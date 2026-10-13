@@ -191,10 +191,9 @@ jobs:
         run: cargo ndk -t arm64-v8a -t x86_64 --platform 24 build --release -p quepaxa-ffi
       - name: Build the FFI test binary for the emulator
         run: |
-          cargo ndk -t x86_64 --platform 24 test -p quepaxa-ffi --test c_abi --no-run --message-format=json \
-            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true) | .executable' \
-            | grep c_abi > test-binary.txt
-          cat test-binary.txt
+          cargo ndk -t x86_64 --platform 24 test -p quepaxa-ffi --test c_abi --no-run
+          find target/x86_64-linux-android/debug/deps -maxdepth 1 -type f -executable -name 'c_abi-*' | head -1 > test-binary.txt
+          test -s test-binary.txt && cat test-binary.txt
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -221,7 +220,7 @@ jobs:
       - name: Smoke test on the simulator
         run: |
           bin=$(cargo test -p quepaxa-ffi --test c_abi --target aarch64-apple-ios-sim --no-run --message-format=json \
-            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true) | .executable' | grep c_abi)
+            | jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .profile.test == true) | .executable' | grep c_abi)
           udid=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
           xcrun simctl boot "$udid"
           xcrun simctl spawn "$udid" "$bin"
