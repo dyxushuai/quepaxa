@@ -1,0 +1,179 @@
+//! Durable record format (spec §4): what a replica asks the caller to persist.
+//!
+//! `"QR"`, format version, kind, payload, then CRC-32C over everything before it.
+
+use alloc::vec::Vec;
+use bytes::{BufMut, Bytes};
+
+use crate::codec::{DecodeError, Reader, put_opt_proposal, put_proposal};
+use crate::crc::crc32c;
+use crate::proposal::Proposal;
+use crate::recorder::Register;
+use crate::types::Slot;
+
+const MAGIC: [u8; 2] = *b"QR";
+const FORMAT_VERSION: u8 = 1;
+
+const KIND_INCARNATION: u8 = 1;
+const KIND_RECORDER: u8 = 2;
+const KIND_RESERVATION: u8 = 3;
+const KIND_DECIDED: u8 = 4;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Record {
+    /// Written first on every start; the new incarnation is the highest seen plus one.
+    Incarnation(u64),
+    /// A recorder register after a change.
+    Recorder { slot: Slot, reg: Register },
+    /// The leader may use the top priority for slots up to `through` in this incarnation.
+    Reservation { through: Slot },
+    /// A slot's decided value.
+    Decided { slot: Slot, proposal: Proposal },
+}
+
+impl Record {
+    pub fn encode(&self) -> Bytes {
+        let mut out = Vec::with_capacity(64);
+        out.put_slice(&MAGIC);
+        out.put_u8(FORMAT_VERSION);
+        match self {
+            Record::Incarnation(n) => {
+                out.put_u8(KIND_INCARNATION);
+                out.put_u64_le(*n);
+            }
+            Record::Recorder { slot, reg } => {
+                out.put_u8(KIND_RECORDER);
+                out.put_u64_le(slot.0);
+                out.put_u32_le(reg.step);
+                put_opt_proposal(&mut out, reg.first.as_ref());
+                put_opt_proposal(&mut out, reg.agg.as_ref());
+                put_opt_proposal(&mut out, reg.prev_agg.as_ref());
+            }
+            Record::Reservation { through } => {
+                out.put_u8(KIND_RESERVATION);
+                out.put_u64_le(through.0);
+            }
+            Record::Decided { slot, proposal } => {
+                out.put_u8(KIND_DECIDED);
+                out.put_u64_le(slot.0);
+                put_proposal(&mut out, proposal);
+            }
+        }
+        let crc = crc32c(&out);
+        out.put_u32_le(crc);
+        Bytes::from(out)
+    }
+
+    pub fn decode(buf: &Bytes) -> Result<Self, DecodeError> {
+        let body_len = buf.len().checked_sub(4).ok_or(DecodeError::Truncated)?;
+        let mut crc = [0u8; 4];
+        crc.copy_from_slice(&buf[body_len..]);
+        if crc32c(&buf[..body_len]) != u32::from_le_bytes(crc) {
+            return Err(DecodeError::BadChecksum);
+        }
+        let body = buf.slice(..body_len);
+        let mut r = Reader::new(&body);
+        if r.take(2)? != MAGIC {
+            return Err(DecodeError::BadMagic);
+        }
+        if r.u8()? != FORMAT_VERSION {
+            return Err(DecodeError::BadVersion);
+        }
+        let rec = match r.u8()? {
+            KIND_INCARNATION => Record::Incarnation(r.u64()?),
+            KIND_RECORDER => {
+                let slot = Slot(r.u64()?);
+                let step = r.u32()?;
+                let reg = Register {
+                    step,
+                    first: r.opt_proposal()?,
+                    agg: r.opt_proposal()?,
+                    prev_agg: r.opt_proposal()?,
+                };
+                Record::Recorder { slot, reg }
+            }
+            KIND_RESERVATION => Record::Reservation {
+                through: Slot(r.u64()?),
+            },
+            KIND_DECIDED => Record::Decided {
+                slot: Slot(r.u64()?),
+                proposal: r.proposal()?,
+            },
+            _ => return Err(DecodeError::UnknownKind),
+        };
+        r.finish()?;
+        Ok(rec)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proposal::tests::prop;
+
+    fn samples() -> [Record; 4] {
+        [
+            Record::Incarnation(3),
+            Record::Recorder {
+                slot: Slot(9),
+                reg: Register {
+                    step: 6,
+                    first: Some(prop(4, 1, 0)),
+                    agg: Some(prop(8, 2, 1)),
+                    prev_agg: None,
+                },
+            },
+            Record::Reservation { through: Slot(40) },
+            Record::Decided {
+                slot: Slot(9),
+                proposal: prop(8, 2, 1),
+            },
+        ]
+    }
+
+    #[test]
+    fn every_kind_round_trips() {
+        for rec in samples() {
+            assert_eq!(Record::decode(&rec.encode()), Ok(rec));
+        }
+    }
+
+    #[test]
+    fn incarnation_matches_golden_bytes_v1() {
+        let mut expected = b"QR\x01\x01".to_vec();
+        expected.extend_from_slice(&3u64.to_le_bytes());
+        let crc = crc32c(&expected);
+        expected.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(Record::Incarnation(3).encode().to_vec(), expected);
+    }
+
+    #[test]
+    fn any_flipped_bit_is_detected() {
+        for rec in samples() {
+            let bytes = rec.encode().to_vec();
+            for i in 0..bytes.len() * 8 {
+                let mut v = bytes.clone();
+                v[i / 8] ^= 1 << (i % 8);
+                assert!(
+                    Record::decode(&Bytes::from(v)).is_err(),
+                    "bit {i} of {rec:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn torn_record_is_rejected() {
+        let bytes = samples()[1].encode();
+        for len in 0..bytes.len() {
+            assert!(Record::decode(&bytes.slice(..len)).is_err());
+        }
+    }
+
+    #[test]
+    fn decode_never_panics() {
+        bolero::check!().for_each(|input: &[u8]| {
+            let _ = Record::decode(&Bytes::copy_from_slice(input));
+        });
+    }
+}

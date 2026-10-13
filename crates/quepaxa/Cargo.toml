@@ -17,4 +17,5 @@ bytes = { version = "1.12", default-features = false }
 
 [dev-dependencies]
 bolero = "0.13"
+bytes = "1.12"
 proptest = "1.12"

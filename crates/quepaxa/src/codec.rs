@@ -15,6 +15,7 @@ pub(crate) const WIRE_VERSION: u8 = 1;
 
 const KIND_RECORD_REQUEST: u8 = 1;
 const KIND_RECORD_REPLY: u8 = 2;
+const KIND_DECIDED: u8 = 3;
 
 const VALUE_INLINE: u8 = 0;
 
@@ -72,6 +73,8 @@ pub(crate) enum Body {
         first: Option<WireProposal>,
         prev_agg: Option<WireProposal>,
     },
+    /// A slot's decided value, broadcast by the decider or sent instead of a record reply.
+    Decided { slot: Slot, proposal: Proposal },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -99,6 +102,7 @@ pub(crate) enum DecodeError {
     UnknownKind,
     BadTag,
     Trailing,
+    BadChecksum,
 }
 
 /// Builds a reply proposal, eliding its value when it is the request's own proposal.
@@ -119,6 +123,7 @@ impl Message {
         out.put_u8(match self.body {
             Body::RecordRequest { .. } => KIND_RECORD_REQUEST,
             Body::RecordReply { .. } => KIND_RECORD_REPLY,
+            Body::Decided { .. } => KIND_DECIDED,
         });
         let e = &self.env;
         out.put_slice(&e.cluster_id);
@@ -150,6 +155,10 @@ impl Message {
                 put_wire_proposal(&mut out, first.as_ref());
                 put_wire_proposal(&mut out, prev_agg.as_ref());
             }
+            Body::Decided { slot, proposal } => {
+                out.put_u64_le(slot.0);
+                put_proposal(&mut out, proposal);
+            }
         }
         Bytes::from(out)
     }
@@ -161,7 +170,9 @@ impl Message {
                 .map_or(0, Bytes::len)
         };
         match &self.body {
-            Body::RecordRequest { proposal, .. } => proposal.value.len(),
+            Body::RecordRequest { proposal, .. } | Body::Decided { proposal, .. } => {
+                proposal.value.len()
+            }
             Body::RecordReply {
                 first, prev_agg, ..
             } => len(first) + len(prev_agg),
@@ -172,7 +183,7 @@ impl Message {
         if buf.len() > ctx.max_message_bytes as usize {
             return Err(DecodeError::TooLarge);
         }
-        let mut r = Reader { buf, pos: 0 };
+        let mut r = Reader::new(buf);
         if r.take(2)? != MAGIC {
             return Err(DecodeError::BadMagic);
         }
@@ -200,16 +211,10 @@ impl Message {
             KIND_RECORD_REQUEST => {
                 let slot = Slot(r.u64()?);
                 let step = r.u32()?;
-                let (priority, key) = r.head()?;
-                let value = r.value()?;
                 Body::RecordRequest {
                     slot,
                     step,
-                    proposal: Proposal {
-                        priority,
-                        key,
-                        value,
-                    },
+                    proposal: r.proposal()?,
                 }
             }
             KIND_RECORD_REPLY => Body::RecordReply {
@@ -219,27 +224,44 @@ impl Message {
                 first: r.wire_proposal()?,
                 prev_agg: r.wire_proposal()?,
             },
+            KIND_DECIDED => Body::Decided {
+                slot: Slot(r.u64()?),
+                proposal: r.proposal()?,
+            },
             _ => return Err(DecodeError::UnknownKind),
         };
-        if r.pos != buf.len() {
-            return Err(DecodeError::Trailing);
-        }
+        r.finish()?;
         Ok(Self { env, body })
     }
 }
 
-fn put_head(out: &mut Vec<u8>, priority: u64, key: ValueKey) {
+pub(crate) fn put_head(out: &mut Vec<u8>, priority: u64, key: ValueKey) {
     out.put_u64_le(priority);
     out.put_u32_le(key.origin.0);
     out.put_u64_le(key.incarnation);
     out.put_u64_le(key.seq);
 }
 
-fn put_value(out: &mut Vec<u8>, value: &Bytes) {
+pub(crate) fn put_value(out: &mut Vec<u8>, value: &Bytes) {
     out.put_u8(VALUE_INLINE);
     // Lengths beyond u32 are rejected earlier by `max_batch_bytes`.
     out.put_u32_le(value.len() as u32);
     out.put_slice(value);
+}
+
+pub(crate) fn put_proposal(out: &mut Vec<u8>, p: &Proposal) {
+    put_head(out, p.priority, p.key);
+    put_value(out, &p.value);
+}
+
+pub(crate) fn put_opt_proposal(out: &mut Vec<u8>, p: Option<&Proposal>) {
+    match p {
+        None => out.put_u8(NIL),
+        Some(p) => {
+            out.put_u8(PRESENT);
+            put_proposal(out, p);
+        }
+    }
 }
 
 fn put_wire_proposal(out: &mut Vec<u8>, p: Option<&WireProposal>) {
@@ -255,13 +277,46 @@ fn put_wire_proposal(out: &mut Vec<u8>, p: Option<&WireProposal>) {
     }
 }
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     buf: &'a Bytes,
     pos: usize,
 }
 
-impl Reader<'_> {
-    fn take(&mut self, n: usize) -> Result<&[u8], DecodeError> {
+impl<'a> Reader<'a> {
+    pub fn new(buf: &'a Bytes) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    pub fn finish(&self) -> Result<(), DecodeError> {
+        if self.pos == self.buf.len() {
+            Ok(())
+        } else {
+            Err(DecodeError::Trailing)
+        }
+    }
+
+    pub fn proposal(&mut self) -> Result<Proposal, DecodeError> {
+        let (priority, key) = self.head()?;
+        Ok(Proposal {
+            priority,
+            key,
+            value: self.value()?,
+        })
+    }
+
+    pub fn opt_proposal(&mut self) -> Result<Option<Proposal>, DecodeError> {
+        match self.u8()? {
+            NIL => Ok(None),
+            PRESENT => Ok(Some(self.proposal()?)),
+            _ => Err(DecodeError::BadTag),
+        }
+    }
+
+    pub fn take(&mut self, n: usize) -> Result<&[u8], DecodeError> {
         let end = self
             .pos
             .checked_add(n)
@@ -272,21 +327,21 @@ impl Reader<'_> {
         Ok(s)
     }
 
-    fn u8(&mut self) -> Result<u8, DecodeError> {
+    pub fn u8(&mut self) -> Result<u8, DecodeError> {
         Ok(self.take(1)?[0])
     }
 
-    fn u32(&mut self) -> Result<u32, DecodeError> {
+    pub fn u32(&mut self) -> Result<u32, DecodeError> {
         let (b, _) = self.take(4)?.as_chunks::<4>();
         Ok(u32::from_le_bytes(b[0]))
     }
 
-    fn u64(&mut self) -> Result<u64, DecodeError> {
+    pub fn u64(&mut self) -> Result<u64, DecodeError> {
         let (b, _) = self.take(8)?.as_chunks::<8>();
         Ok(u64::from_le_bytes(b[0]))
     }
 
-    fn head(&mut self) -> Result<(u64, ValueKey), DecodeError> {
+    pub fn head(&mut self) -> Result<(u64, ValueKey), DecodeError> {
         let priority = self.u64()?;
         let key = ValueKey {
             origin: NodeId(self.u32()?),
@@ -297,7 +352,7 @@ impl Reader<'_> {
     }
 
     /// Zero-copy: the value shares the input buffer.
-    fn value(&mut self) -> Result<Bytes, DecodeError> {
+    pub fn value(&mut self) -> Result<Bytes, DecodeError> {
         if self.u8()? != VALUE_INLINE {
             return Err(DecodeError::BadTag);
         }

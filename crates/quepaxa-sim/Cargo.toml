@@ -9,6 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+bytes = "1.12"
 quepaxa = { path = "../quepaxa" }
 
 [lints]

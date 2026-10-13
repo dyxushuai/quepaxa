@@ -248,6 +248,7 @@ impl Sim {
                     }
                 }
             }
+            Body::Decided { .. } => unreachable!("the single-slot sim never sends decisions"),
         }
     }
 
