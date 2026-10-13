@@ -22,9 +22,10 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
 
 ## Decisions so far
 
+- [QuePaxa protocol, precisely](issues/01-paper-protocol-spec.md): proposer→recorder RPC over 4-phase rounds with a per-slot interval summary register; leader fast path at step 4; paper is crash-stop only and leaves durability, δ-tuning, reconfig, snapshots unspecified (A1–A16).
+
 ## Not yet specified
 
-- **Persistence contract**: exactly what a recorder must durably store before replying, and the storage trait shape — waits on the paper deep read and the core API.
 - **Performance targets & benchmark methodology**: what to measure (throughput/latency under leader failure, WAN, contention), whether to compare against the Go impl or Raft crates.
 - **Reference runtime crate** (`quepaxa-tokio` or similar): whether one ships at all, and its transport.
 - **Adaptive hedging default policy**: which bandit/tuner ships as default and how it is tested deterministically.
