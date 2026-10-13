@@ -152,18 +152,29 @@ async fn main() {
     for t in tasks {
         let _ = t.await;
     }
-    let mut st = stats.lock().unwrap();
-    st.latencies_us.sort_unstable();
-    let done = st.latencies_us.len();
-    println!(
-        "offered={rate:.0}/s completed={done} throughput={:.0}/s errors={} unanswered={} missed={} p50={}us p90={}us p99={}us max={}us",
-        done as f64 / secs,
-        st.errors,
-        st.unanswered,
-        st.missed,
-        percentile(&st.latencies_us, 0.5),
-        percentile(&st.latencies_us, 0.9),
-        percentile(&st.latencies_us, 0.99),
-        st.latencies_us.last().copied().unwrap_or(0),
-    );
+    {
+        let mut st = stats.lock().unwrap();
+        st.latencies_us.sort_unstable();
+        let done = st.latencies_us.len();
+        println!(
+            "offered={rate:.0}/s completed={done} throughput={:.0}/s errors={} unanswered={} missed={} p50={}us p90={}us p99={}us max={}us",
+            done as f64 / secs,
+            st.errors,
+            st.unanswered,
+            st.missed,
+            percentile(&st.latencies_us, 0.5),
+            percentile(&st.latencies_us, 0.9),
+            percentile(&st.latencies_us, 0.99),
+            st.latencies_us.last().copied().unwrap_or(0),
+        );
+    }
+    for addr in targets {
+        if let Ok(s) = TcpStream::connect(addr).await {
+            let (r, mut w) = s.into_split();
+            let _ = w.write_all(b"STATS\n").await;
+            if let Ok(Some(line)) = BufReader::new(r).lines().next_line().await {
+                println!("{addr} {line}");
+            }
+        }
+    }
 }

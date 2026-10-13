@@ -6,7 +6,7 @@
 //! ```
 //!
 //! Clients speak lines: `PUT <key> <value>` → `OK`, `GET <key>` (linearizable, through a
-//! read barrier) → `VALUE <v>` | `NONE`, `STALE <key>` (local, possibly stale). Requests
+//! read barrier) → `VALUE <v>` | `NONE`, `STALE <key>` (local, possibly stale), `STATS` → `STATS <counters>`. Requests
 //! on one connection may be pipelined; replies come back in order.
 //!
 //! Trusted networks only: peer connections are not authenticated or encrypted, and the
@@ -24,8 +24,9 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use quepaxa::{Config, NodeId, Replica, Timestamp};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{mpsc as tmpsc, oneshot};
 
 use node::{Cmd, Ev, MAX_FRAME, Node, PeerFrame};
@@ -72,16 +73,13 @@ fn parse_args() -> Result<Args, String> {
 
 /// Reads one length-prefixed frame; the buffer grows with the bytes actually received, so
 /// an advertised length alone cannot reserve memory.
-async fn read_frame(s: &mut TcpStream) -> std::io::Result<Bytes> {
+async fn read_frame(s: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Bytes> {
     let len = s.read_u32_le().await? as usize;
     if len > MAX_FRAME {
         return Err(std::io::Error::other("frame too large"));
     }
-    let mut buf = Vec::new();
-    (&mut *s).take(len as u64).read_to_end(&mut buf).await?;
-    if buf.len() != len {
-        return Err(std::io::ErrorKind::UnexpectedEof.into());
-    }
+    let mut buf = vec![0; len];
+    s.read_exact(&mut buf).await?;
     Ok(Bytes::from(buf))
 }
 
@@ -100,7 +98,7 @@ async fn push(events: &SyncSender<Ev>, mut ev: Ev) -> bool {
     }
 }
 
-async fn write_frame(s: &mut TcpStream, frame: &[u8]) -> std::io::Result<()> {
+async fn write_frame(s: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> std::io::Result<()> {
     s.write_u32_le(frame.len() as u32).await?;
     s.write_all(frame).await
 }
@@ -109,24 +107,31 @@ async fn write_frame(s: &mut TcpStream, frame: &[u8]) -> std::io::Result<()> {
 /// the protocol.
 async fn outbound(me: u32, addr: SocketAddr, mut rx: tmpsc::Receiver<Vec<u8>>) {
     loop {
-        let Ok(mut s) = TcpStream::connect(addr).await else {
+        let Ok(s) = TcpStream::connect(addr).await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
         };
         let _ = s.set_nodelay(true);
-        if write_frame(&mut s, &me.to_le_bytes()).await.is_err() {
+        // Frames queued while the previous batch was written go out in one syscall.
+        let mut w = BufWriter::with_capacity(64 << 10, s);
+        if write_frame(&mut w, &me.to_le_bytes()).await.is_err() || w.flush().await.is_err() {
             continue;
         }
         while let Some(frame) = rx.recv().await {
-            if write_frame(&mut s, &frame).await.is_err() {
+            let mut ok = write_frame(&mut w, &frame).await.is_ok();
+            while ok && let Ok(frame) = rx.try_recv() {
+                ok = write_frame(&mut w, &frame).await.is_ok();
+            }
+            if !ok || w.flush().await.is_err() {
                 break;
             }
         }
     }
 }
 
-async fn inbound(mut s: TcpStream, events: SyncSender<Ev>) {
+async fn inbound(s: TcpStream, events: SyncSender<Ev>) {
     let _ = s.set_nodelay(true);
+    let mut s = BufReader::with_capacity(64 << 10, s);
     let Ok(Ok(hello)) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut s)).await else {
         return;
     };
@@ -146,6 +151,7 @@ fn parse_cmd(line: &str) -> Option<Cmd> {
         ["PUT", k, v] => Some(Cmd::Put(k.to_owned(), v.to_owned())),
         ["GET", k] => Some(Cmd::Get(k.to_owned())),
         ["STALE", k] => Some(Cmd::Stale(k.to_owned())),
+        ["STATS"] => Some(Cmd::Stats),
         _ => None,
     }
 }
@@ -154,12 +160,25 @@ fn parse_cmd(line: &str) -> Option<Cmd> {
 /// written in request order.
 async fn client(s: TcpStream, events: SyncSender<Ev>) {
     let _ = s.set_nodelay(true);
-    let (r, mut w) = s.into_split();
+    let (r, w) = s.into_split();
     let (tx, mut replies) = tmpsc::unbounded_channel::<oneshot::Receiver<String>>();
     let writer = tokio::spawn(async move {
-        while let Some(rx) = replies.recv().await {
-            let line = rx.await.unwrap_or_else(|_| "ERR node stopped".to_owned());
-            if w.write_all(format!("{line}\n").as_bytes()).await.is_err() {
+        // Replies already available are written together; the buffer is flushed before
+        // waiting on one that is not.
+        let mut w = BufWriter::new(w);
+        while let Some(mut rx) = replies.recv().await {
+            let line = match rx.try_recv() {
+                Ok(line) => line,
+                Err(TryRecvError::Empty) => {
+                    if w.flush().await.is_err() {
+                        return;
+                    }
+                    rx.await.unwrap_or_else(|_| "ERR node stopped".to_owned())
+                }
+                Err(TryRecvError::Closed) => "ERR node stopped".to_owned(),
+            };
+            let written = w.write_all(line.as_bytes()).await.and(w.write_all(b"\n").await);
+            if written.is_err() || (replies.is_empty() && w.flush().await.is_err()) {
                 return;
             }
         }
@@ -174,7 +193,7 @@ async fn client(s: TcpStream, events: SyncSender<Ev>) {
                 }
             }
             None => {
-                let _ = reply.send("ERR expected PUT <k> <v> | GET <k> | STALE <k>".to_owned());
+                let _ = reply.send("ERR expected PUT <k> <v> | GET <k> | STALE <k> | STATS".to_owned());
             }
         }
         if tx.send(rx).is_err() {
@@ -220,7 +239,7 @@ async fn main() {
     }
     let listen = listen.expect("--members must include --id");
     let (events, rx) = mpsc::sync_channel(65_536);
-    let mut node = Node::new(replica, disk, peers, args.snapshot_every);
+    let mut node = Node::new(replica, disk, peers, args.snapshot_every, events.clone());
     if let Err(e) = node.restore() {
         eprintln!("kv-tokio: {e}");
         std::process::exit(1);

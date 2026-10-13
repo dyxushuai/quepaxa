@@ -3,7 +3,7 @@
 //! fsync (group commit); their gated messages leave only after it.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -11,7 +11,7 @@ use quepaxa::{Action, Input, PersistId, ProposalId, Replica, Slot, Timestamp};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
-use crate::storage::{Disk, Snapshot, decode_snapshot, encode_snapshot};
+use crate::storage::{Disk, decode_snapshot, encode_snapshot};
 
 /// Largest frame on a peer link; snapshots larger than this are not taken (see `maybe_snapshot`).
 pub const MAX_FRAME: usize = 64 << 20;
@@ -50,11 +50,26 @@ pub enum Cmd {
     Put(String, String),
     Get(String),
     Stale(String),
+    /// The replica's counters, on one line.
+    Stats,
 }
 
 pub enum Ev {
-    Peer { from: u32, frame: PeerFrame },
-    Client { cmd: Cmd, reply: oneshot::Sender<String> },
+    Peer {
+        from: u32,
+        frame: PeerFrame,
+    },
+    Client {
+        cmd: Cmd,
+        reply: oneshot::Sender<String>,
+    },
+    /// A background snapshot write finished: `Ok(false)` if a newer snapshot won.
+    SnapshotSaved {
+        through: u64,
+        core: Bytes,
+        bytes: Bytes,
+        saved: Result<bool, String>,
+    },
 }
 
 struct PendingPersist {
@@ -89,6 +104,10 @@ pub struct Node {
     snapshot_every: u64,
     last_snapshot: u64,
     own_snapshot: Option<Bytes>,
+    /// A snapshot is being written in the background.
+    snapshotting: bool,
+    /// For background work to report back to the event loop.
+    events: SyncSender<Ev>,
     /// The peer a snapshot was requested from; snapshots from anyone else are ignored.
     snapshot_from: Option<u32>,
     peers: HashMap<u32, Sender<Vec<u8>>>,
@@ -102,7 +121,13 @@ pub struct Node {
 const GROUP: usize = 512;
 
 impl Node {
-    pub fn new(replica: Replica, disk: Disk, peers: HashMap<u32, Sender<Vec<u8>>>, every: u64) -> Self {
+    pub fn new(
+        replica: Replica,
+        disk: Disk,
+        peers: HashMap<u32, Sender<Vec<u8>>>,
+        every: u64,
+        events: SyncSender<Ev>,
+    ) -> Self {
         Self {
             replica,
             disk,
@@ -111,6 +136,8 @@ impl Node {
             snapshot_every: every,
             last_snapshot: 0,
             own_snapshot: None,
+            snapshotting: false,
+            events,
             snapshot_from: None,
             peers,
             start: Instant::now(),
@@ -192,6 +219,19 @@ impl Node {
                 }
             }
             Ev::Client { cmd, reply } => self.on_client(now, cmd, reply),
+            Ev::SnapshotSaved { through, core, bytes, saved } => {
+                self.snapshotting = false;
+                match saved {
+                    // The application snapshot is durable: the log below it may go.
+                    Ok(true) => {
+                        if self.replica.compact(now, Slot(through), core).is_ok() {
+                            self.own_snapshot = Some(bytes);
+                        }
+                    }
+                    Ok(false) => {} // a newer (peer) snapshot was saved meanwhile
+                    Err(e) => eprintln!("kv-tokio: cannot save snapshot ({e}); not compacting"),
+                }
+            }
         }
         self.drain();
     }
@@ -217,6 +257,9 @@ impl Node {
             Cmd::Stale(k) => {
                 let _ = reply.send(self.value(&k));
             }
+            Cmd::Stats => {
+                let _ = reply.send(format!("STATS {:?}", self.replica.metrics()));
+            }
         }
     }
 
@@ -231,16 +274,16 @@ impl Node {
         let Some(snap) = decode_snapshot(&bytes) else { return };
         let now = self.now();
         let through = snap.through;
-        if self.replica.install_snapshot(now, Slot(through), snap.core.clone()) != Ok(true) {
+        if self.replica.install_snapshot(now, Slot(through), snap.core) != Ok(true) {
             return;
         }
         // Adopt the state before draining: commits after `through` apply on top of it.
-        self.kv = snap.kv.clone();
+        self.kv = snap.kv;
         self.applied = through + 1;
         self.last_snapshot = self.applied;
         self.snapshot_from = None;
         self.drain();
-        if let Err(e) = self.disk.save_snapshot(&snap) {
+        if let Err(e) = self.disk.snapshots().save(through, &bytes) {
             eprintln!("kv-tokio: cannot save the received snapshot ({e}); fencing this replica");
             if let Some(last) = self.persists.last().map(|p| p.id) {
                 self.persists.clear();
@@ -344,32 +387,31 @@ impl Node {
     /// Snapshots the KV state durably, then lets the replica compact its log. Snapshots
     /// too large for one peer frame are not taken (the log keeps growing instead), so a
     /// lagging replica can always fetch the latest snapshot.
+    /// Encodes a snapshot on the event loop (a consistent cut) and writes it in the
+    /// background, so the fsync never stalls consensus; the log is compacted once it is
+    /// durable (`Ev::SnapshotSaved`).
     fn maybe_snapshot(&mut self) {
-        if self.applied == 0 || self.applied < self.last_snapshot + self.snapshot_every {
+        if self.snapshotting || self.applied == 0 || self.applied < self.last_snapshot + self.snapshot_every {
             return;
         }
         let through = self.applied - 1;
-        let snap = Snapshot { through, core: self.replica.core_state(), kv: self.kv.clone() };
-        let bytes = Bytes::from(encode_snapshot(&snap));
+        let core = self.replica.core_state();
+        let bytes = Bytes::from(encode_snapshot(through, &core, &self.kv));
+        // The next attempt waits a full interval, also after a failure.
+        self.last_snapshot = self.applied;
         if bytes.len() + 1 > MAX_FRAME {
             eprintln!(
                 "kv-tokio: snapshot of {} bytes exceeds the peer frame limit; not compacting",
                 bytes.len()
             );
-            self.last_snapshot = self.applied;
             return;
         }
-        if let Err(e) = self.disk.save_snapshot(&snap) {
-            eprintln!("kv-tokio: cannot save snapshot ({e}); not compacting");
-            return;
-        }
-        let now = self.now();
-        if self.replica.compact(now, Slot(through), snap.core).is_ok() {
-            self.own_snapshot = Some(bytes);
-            self.last_snapshot = self.applied;
-        }
-        self.drain();
-        self.flush();
+        self.snapshotting = true;
+        let (writer, events) = (self.disk.snapshots(), self.events.clone());
+        std::thread::spawn(move || {
+            let saved = writer.save(through, &bytes).map_err(|e| e.to_string());
+            let _ = events.send(Ev::SnapshotSaved { through, core, bytes, saved });
+        });
     }
 }
 
