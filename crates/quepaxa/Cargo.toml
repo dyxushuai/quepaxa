@@ -6,6 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
 categories = ["algorithms", "no-std"]
 keywords = ["consensus", "paxos", "quepaxa", "replication", "sans-io"]
 

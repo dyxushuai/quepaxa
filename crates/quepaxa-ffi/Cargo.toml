@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme = "../../README.md"
+categories = ["algorithms", "api-bindings"]
+keywords = ["consensus", "quepaxa", "ffi", "c-abi", "replication"]
 
 [lib]
 crate-type = ["cdylib", "staticlib", "rlib"]
