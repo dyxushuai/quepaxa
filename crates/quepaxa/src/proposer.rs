@@ -92,7 +92,7 @@ impl SlotProposer {
 
     /// Paper Alg. 4 loop head: the per-recorder proposals for the current step.
     fn prepare(&mut self, rng: &mut ChaCha20) {
-        let randomize = self.step % 4 == 0 && (self.step > FIRST_STEP || !self.leader);
+        let randomize = self.step.is_multiple_of(4) && (self.step > FIRST_STEP || !self.leader);
         self.sent = self
             .recorders
             .iter()
@@ -114,7 +114,7 @@ impl SlotProposer {
         self.replies.clear();
         // Later phases may carry an adopted leader proposal, so only phase 0 is checked.
         debug_assert!(
-            self.step % 4 != 0
+            !self.step.is_multiple_of(4)
                 || self
                     .sent
                     .values()
