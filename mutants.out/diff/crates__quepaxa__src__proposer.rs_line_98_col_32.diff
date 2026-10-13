@@ -1,0 +1,21 @@
+--- crates/quepaxa/src/proposer.rs
++++ delete field priority from struct Proposal expression in SlotProposer::prepare
+@@ -90,17 +90,17 @@
+     /// Paper Alg. 4 loop head: the per-recorder proposals for the current step.
+     fn prepare(&mut self, rng: &mut ChaCha20) {
+         let randomize = self.step.is_multiple_of(4) && (self.step > FIRST_STEP || !self.leader);
+         self.sent = self
+             .recorders
+             .iter()
+             .map(|&j| {
+                 let priority = if randomize { rng.priority() } else { self.p.priority };
+-                (j, Proposal { priority, ..self.p.clone() })
++                (j, Proposal {  /* ~ changed by cargo-mutants ~ */ ..self.p.clone() })
+             })
+             .collect();
+         self.replies.clear();
+         // Later phases may carry an adopted leader proposal, so only phase 0 is checked.
+         debug_assert!(
+             !self.step.is_multiple_of(4)
+                 || self
+                     .sent

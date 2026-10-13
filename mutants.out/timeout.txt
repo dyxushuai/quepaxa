@@ -1,0 +1,2 @@
+crates/quepaxa/src/proposer.rs:98:32: delete field priority from struct Proposal expression in SlotProposer::prepare
+crates/quepaxa/src/replica/mod.rs:466:9: replace Replica::send_gated with ()

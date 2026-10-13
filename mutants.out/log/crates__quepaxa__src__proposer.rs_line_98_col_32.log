@@ -1,0 +1,2261 @@
+
+*** crates/quepaxa/src/proposer.rs:98:32: delete field priority from struct Proposal expression in SlotProposer::prepare
+
+*** mutation diff:
+--- crates/quepaxa/src/proposer.rs
++++ delete field priority from struct Proposal expression in SlotProposer::prepare
+@@ -90,17 +90,17 @@
+     /// Paper Alg. 4 loop head: the per-recorder proposals for the current step.
+     fn prepare(&mut self, rng: &mut ChaCha20) {
+         let randomize = self.step.is_multiple_of(4) && (self.step > FIRST_STEP || !self.leader);
+         self.sent = self
+             .recorders
+             .iter()
+             .map(|&j| {
+                 let priority = if randomize { rng.priority() } else { self.p.priority };
+-                (j, Proposal { priority, ..self.p.clone() })
++                (j, Proposal {  /* ~ changed by cargo-mutants ~ */ ..self.p.clone() })
+             })
+             .collect();
+         self.replies.clear();
+         // Later phases may carry an adopted leader proposal, so only phase 0 is checked.
+         debug_assert!(
+             !self.step.is_multiple_of(4)
+                 || self
+                     .sent
+
+
+*** /home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo nextest run --no-run --verbose --workspace
+   Compiling quepaxa v0.2.0 (/tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/crates/quepaxa)
+   Compiling syn v3.0.9
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.4
+   Compiling pin-project-lite v0.2.17
+warning: unused variable: `priority`
+  --> crates/quepaxa/src/proposer.rs:97:21
+   |
+97 |                 let priority = if randomize { rng.priority() } else { self.p.priority };
+   |                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_priority`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling quepaxa-sim v0.2.0 (/tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/crates/quepaxa-sim)
+warning: `quepaxa` (lib) generated 1 warning (run `cargo fix --lib -p quepaxa` to apply 1 suggestion)
+   Compiling quepaxa-ffi v0.2.0 (/tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/crates/quepaxa-ffi)
+   Compiling serde_derive v1.0.229
+   Compiling tokio-macros v2.7.2
+   Compiling tokio v1.53.2
+   Compiling serde v1.0.229
+   Compiling tinytemplate v1.2.1
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.8.2
+   Compiling kv-tokio v0.2.0 (/tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/examples/kv-tokio)
+warning: `quepaxa` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.12s
+
+*** result: Success
+
+*** /home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo nextest run --verbose --workspace
+warning: unused variable: `priority`
+  --> crates/quepaxa/src/proposer.rs:97:21
+   |
+97 |                 let priority = if randomize { rng.priority() } else { self.p.priority };
+   |                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_priority`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `quepaxa` (lib) generated 1 warning (run `cargo fix --lib -p quepaxa` to apply 1 suggestion)
+warning: `quepaxa` (lib test) generated 1 warning (1 duplicate)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+────────────
+ Nextest run ID 72e83f4d-1c53-484e-b87e-d8fb1de3f72d with nextest profile: default
+    Starting 110 tests across 10 binaries
+       START [         ] (  1/110) kv-tokio::bin/kv-tokio storage::tests::replace_swaps_the_whole_log
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/d01b0bef3c98b15d/out/kv_tokio-d01b0bef3c98b15d --exact storage::tests::replace_swaps_the_whole_log --nocapture
+       START [         ] (  1/110) kv-tokio::bin/kv-tokio node::tests::put_encoding_keeps_any_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/d01b0bef3c98b15d/out/kv_tokio-d01b0bef3c98b15d --exact node::tests::put_encoding_keeps_any_key --nocapture
+       START [         ] (  1/110) kv-tokio::cluster survives_kill_9_of_a_minority_and_recovers_the_victim
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/81aef708a27053a8/out/cluster-81aef708a27053a8 --exact survives_kill_9_of_a_minority_and_recovers_the_victim --nocapture
+       START [         ] (  1/110) kv-tokio::bin/kv-tokio storage::tests::records_survive_reopen_and_a_torn_tail_is_dropped
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/d01b0bef3c98b15d/out/kv_tokio-d01b0bef3c98b15d --exact storage::tests::records_survive_reopen_and_a_torn_tail_is_dropped --nocapture
+       START [         ] (  1/110) quepaxa batch::tests::batch_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact batch::tests::batch_round_trips --nocapture
+       START [         ] (  1/110) kv-tokio::bin/kv-tokio storage::tests::snapshot_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/d01b0bef3c98b15d/out/kv_tokio-d01b0bef3c98b15d --exact storage::tests::snapshot_round_trips --nocapture
+       START [         ] (  1/110) quepaxa batch::tests::empty_batch_is_four_zero_bytes
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact batch::tests::empty_batch_is_four_zero_bytes --nocapture
+       START [         ] (  1/110) quepaxa batch::tests::decode_never_panics
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact batch::tests::decode_never_panics --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::catch_up_kinds_round_trip
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::catch_up_kinds_round_trip --nocapture
+       START [         ] (  1/110) quepaxa batch::tests::huge_entry_count_does_not_preallocate
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact batch::tests::huge_entry_count_does_not_preallocate --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::decode_never_panics_on_mutated_valid_messages
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::decode_never_panics_on_mutated_valid_messages --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::decode_never_panics_on_arbitrary_input
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::decode_never_panics_on_arbitrary_input --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::elided_value_resolves_only_against_the_same_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::elided_value_resolves_only_against_the_same_key --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::decode_shares_the_input_buffer
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::decode_shares_the_input_buffer --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::message_above_limit_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::message_above_limit_is_rejected --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::foreign_cluster_epoch_and_version_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::foreign_cluster_epoch_and_version_are_rejected --nocapture
+        PASS [   0.004s] (  1/110) kv-tokio::bin/kv-tokio storage::tests::snapshot_round_trips
+       START [         ] (  2/110) quepaxa codec::tests::other_proposals_keep_their_value_in_replies
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::other_proposals_keep_their_value_in_replies --nocapture
+        PASS [   0.004s] (  2/110) kv-tokio::bin/kv-tokio node::tests::put_encoding_keeps_any_key
+       START [         ] (  3/110) quepaxa codec::tests::oversized_length_prefix_is_rejected_without_allocating
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::oversized_length_prefix_is_rejected_without_allocating --nocapture
+        PASS [   0.004s] (  3/110) quepaxa codec::tests::foreign_cluster_epoch_and_version_are_rejected
+       START [         ] (  4/110) quepaxa codec::tests::record_reply_matches_golden_bytes_v1
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::record_reply_matches_golden_bytes_v1 --nocapture
+        PASS [   0.004s] (  4/110) quepaxa batch::tests::huge_entry_count_does_not_preallocate
+       START [         ] (  5/110) quepaxa codec::tests::record_request_matches_golden_bytes_v1
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::record_request_matches_golden_bytes_v1 --nocapture
+        PASS [   0.005s] (  5/110) quepaxa codec::tests::decode_shares_the_input_buffer
+        PASS [   0.005s] (  6/110) kv-tokio::bin/kv-tokio storage::tests::records_survive_reopen_and_a_torn_tail_is_dropped
+       START [         ] (  7/110) quepaxa codec::tests::request_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::request_round_trips --nocapture
+       START [         ] (  7/110) quepaxa codec::tests::reply_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::reply_round_trips --nocapture
+        PASS [   0.007s] (  7/110) quepaxa batch::tests::batch_round_trips
+        PASS [   0.007s] (  8/110) quepaxa codec::tests::message_above_limit_is_rejected
+       START [         ] (  9/110) quepaxa codec::tests::value_above_the_batch_limit_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::value_above_the_batch_limit_is_rejected --nocapture
+       START [         ] (  9/110) quepaxa codec::tests::trailing_bytes_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::trailing_bytes_are_rejected --nocapture
+        PASS [   0.007s] (  9/110) kv-tokio::bin/kv-tokio storage::tests::replace_swaps_the_whole_log
+       START [         ] ( 10/110) quepaxa core_state::tests::decode_never_panics
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact core_state::tests::decode_never_panics --nocapture
+        PASS [   0.007s] ( 10/110) quepaxa codec::tests::elided_value_resolves_only_against_the_same_key
+       START [         ] ( 11/110) quepaxa core_state::tests::rejects_a_schedule_naming_strangers
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact core_state::tests::rejects_a_schedule_naming_strangers --nocapture
+        PASS [   0.007s] ( 11/110) quepaxa batch::tests::empty_batch_is_four_zero_bytes
+       START [         ] ( 12/110) quepaxa core_state::tests::round_trips_after_rotations_and_dedup_activity
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact core_state::tests::round_trips_after_rotations_and_dedup_activity --nocapture
+        PASS [   0.005s] ( 12/110) quepaxa codec::tests::oversized_length_prefix_is_rejected_without_allocating
+       START [         ] ( 13/110) quepaxa crc::tests::matches_rfc3720_zero_vector
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact crc::tests::matches_rfc3720_zero_vector --nocapture
+        PASS [   0.006s] ( 13/110) quepaxa codec::tests::record_reply_matches_golden_bytes_v1
+       START [         ] ( 14/110) quepaxa crc::tests::matches_standard_check_value
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact crc::tests::matches_standard_check_value --nocapture
+        PASS [   0.006s] ( 14/110) quepaxa codec::tests::record_request_matches_golden_bytes_v1
+       START [         ] ( 15/110) quepaxa dedup::tests::contiguous_ids_compact_into_the_watermark
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact dedup::tests::contiguous_ids_compact_into_the_watermark --nocapture
+        PASS [   0.004s] ( 15/110) quepaxa core_state::tests::round_trips_after_rotations_and_dedup_activity
+       START [         ] ( 16/110) quepaxa dedup::tests::entries_from_forgotten_incarnations_count_as_seen
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact dedup::tests::entries_from_forgotten_incarnations_count_as_seen --nocapture
+        PASS [   0.006s] ( 16/110) quepaxa core_state::tests::rejects_a_schedule_naming_strangers
+       START [         ] ( 17/110) quepaxa dedup::tests::incarnations_and_origins_are_independent
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact dedup::tests::incarnations_and_origins_are_independent --nocapture
+        PASS [   0.005s] ( 17/110) quepaxa crc::tests::matches_rfc3720_zero_vector
+       START [         ] ( 18/110) quepaxa dedup::tests::second_occurrence_is_filtered_in_any_order
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact dedup::tests::second_occurrence_is_filtered_in_any_order --nocapture
+        PASS [   0.004s] ( 18/110) quepaxa crc::tests::matches_standard_check_value
+       START [         ] ( 19/110) quepaxa durable::tests::any_flipped_bit_is_detected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::any_flipped_bit_is_detected --nocapture
+        PASS [   0.004s] ( 19/110) quepaxa dedup::tests::contiguous_ids_compact_into_the_watermark
+       START [         ] ( 20/110) quepaxa durable::tests::decode_never_panics
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::decode_never_panics --nocapture
+        PASS [   0.008s] ( 20/110) quepaxa codec::tests::value_above_the_batch_limit_is_rejected
+       START [         ] ( 21/110) quepaxa durable::tests::every_kind_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::every_kind_round_trips --nocapture
+        PASS [   0.008s] ( 21/110) quepaxa codec::tests::trailing_bytes_are_rejected
+       START [         ] ( 22/110) quepaxa durable::tests::incarnation_matches_golden_bytes_v1
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::incarnation_matches_golden_bytes_v1 --nocapture
+        PASS [   0.012s] ( 22/110) quepaxa codec::tests::other_proposals_keep_their_value_in_replies
+       START [         ] ( 23/110) quepaxa durable::tests::torn_record_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::torn_record_is_rejected --nocapture
+        PASS [   0.004s] ( 23/110) quepaxa dedup::tests::entries_from_forgotten_incarnations_count_as_seen
+       START [         ] ( 24/110) quepaxa proposal::tests::distinct_keys_never_compare_equal
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::distinct_keys_never_compare_equal --nocapture
+        PASS [   0.012s] ( 24/110) quepaxa codec::tests::request_round_trips
+       START [         ] ( 25/110) quepaxa proposal::tests::equal_priority_breaks_ties_by_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::equal_priority_breaks_ties_by_key --nocapture
+        PASS [   0.017s] ( 25/110) quepaxa codec::tests::catch_up_kinds_round_trip
+       START [         ] ( 26/110) quepaxa proposal::tests::higher_priority_wins_regardless_of_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::higher_priority_wins_regardless_of_key --nocapture
+        PASS [   0.005s] ( 26/110) quepaxa dedup::tests::incarnations_and_origins_are_independent
+       START [         ] ( 27/110) quepaxa proposal::tests::leader_priority_beats_every_random_priority
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::leader_priority_beats_every_random_priority --nocapture
+        PASS [   0.004s] ( 27/110) quepaxa durable::tests::every_kind_round_trips
+       START [         ] ( 28/110) quepaxa proposal::tests::nil_is_below_every_proposal
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::nil_is_below_every_proposal --nocapture
+        PASS [   0.005s] ( 28/110) quepaxa durable::tests::any_flipped_bit_is_detected
+       START [         ] ( 29/110) quepaxa proposal::tests::order_is_total_and_transitive
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::order_is_total_and_transitive --nocapture
+        PASS [   0.005s] ( 29/110) quepaxa durable::tests::incarnation_matches_golden_bytes_v1
+       START [         ] ( 30/110) quepaxa proposer::tests::leader_alone_decides_on_fast_path_at_first_step
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::leader_alone_decides_on_fast_path_at_first_step --nocapture
+        PASS [   0.005s] ( 30/110) quepaxa durable::tests::torn_record_is_rejected
+       START [         ] ( 31/110) quepaxa proposer::tests::leader_catching_up_at_the_first_step_keeps_the_adopted_priority
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::leader_catching_up_at_the_first_step_keeps_the_adopted_priority --nocapture
+        PASS [   0.004s] ( 31/110) quepaxa proposal::tests::equal_priority_breaks_ties_by_key
+        PASS [   0.017s] ( 32/110) quepaxa codec::tests::reply_round_trips
+       START [         ] ( 33/110) quepaxa proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder --nocapture
+       START [         ] ( 33/110) quepaxa proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two --nocapture
+        PASS [   0.004s] ( 33/110) quepaxa proposal::tests::higher_priority_wins_regardless_of_key
+       START [         ] ( 34/110) quepaxa proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three --nocapture
+        PASS [   0.005s] ( 34/110) quepaxa proposal::tests::nil_is_below_every_proposal
+        PASS [   0.005s] ( 35/110) quepaxa proposal::tests::leader_priority_beats_every_random_priority
+       START [         ] ( 36/110) quepaxa proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum --nocapture
+       START [         ] ( 36/110) quepaxa proposer::tests::racing_proposers_agree
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::racing_proposers_agree --nocapture
+        PASS [   0.009s] ( 36/110) quepaxa proposal::tests::distinct_keys_never_compare_equal
+       START [         ] ( 37/110) quepaxa proposer::tests::replies_to_older_requests_are_ignored
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::replies_to_older_requests_are_ignored --nocapture
+        PASS [   0.012s] ( 37/110) quepaxa dedup::tests::second_occurrence_is_filtered_in_any_order
+       START [         ] ( 38/110) quepaxa proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up --nocapture
+        PASS [   0.006s] ( 38/110) quepaxa proposer::tests::leader_alone_decides_on_fast_path_at_first_step
+       START [         ] ( 39/110) quepaxa recorder::tests::first_record_sets_step_and_first_value_with_nil_prior
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact recorder::tests::first_record_sets_step_and_first_value_with_nil_prior --nocapture
+        PASS [   0.005s] ( 39/110) quepaxa proposer::tests::leader_catching_up_at_the_first_step_keeps_the_adopted_priority
+       START [         ] ( 40/110) quepaxa recorder::tests::next_step_moves_aggregate_to_prior
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact recorder::tests::next_step_moves_aggregate_to_prior --nocapture
+        FAIL [   0.004s] ( 40/110) quepaxa proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two
+  stdout ───
+
+    running 1 test
+    test proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two ... FAILED
+
+    failures:
+
+    failures:
+        proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two' (3611502) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 15 tests still running
+        PASS [   0.009s] ( 41/110) quepaxa proposal::tests::order_is_total_and_transitive
+        FAIL [   0.004s] ( 42/110) quepaxa proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum
+  stdout ───
+
+    running 1 test
+    test proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum ... FAILED
+
+    failures:
+
+    failures:
+        proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum' (3611509) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.006s] ( 43/110) quepaxa proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three
+  stdout ───
+
+    running 1 test
+    test proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three ... FAILED
+
+    failures:
+
+    failures:
+        proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three' (3611510) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.007s] ( 44/110) quepaxa recorder::tests::next_step_moves_aggregate_to_prior
+        PASS [   0.007s] ( 45/110) quepaxa recorder::tests::first_record_sets_step_and_first_value_with_nil_prior
+        FAIL [   0.007s] ( 46/110) quepaxa proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up
+  stdout ───
+
+    running 1 test
+    test proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up ... FAILED
+
+    failures:
+
+    failures:
+        proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up' (3611512) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.011s] ( 47/110) quepaxa proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder
+  stdout ───
+
+    running 1 test
+    test proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder ... FAILED
+
+    failures:
+
+    failures:
+        proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder' (3611513) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.008s] ( 48/110) quepaxa proposer::tests::replies_to_older_requests_are_ignored
+  stdout ───
+
+    running 1 test
+    test proposer::tests::replies_to_older_requests_are_ignored ... FAILED
+
+    failures:
+
+    failures:
+        proposer::tests::replies_to_older_requests_are_ignored
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'proposer::tests::replies_to_older_requests_are_ignored' (3611516) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.021s] ( 49/110) quepaxa proposer::tests::racing_proposers_agree
+  stdout ───
+
+    running 1 test
+    test proposer::tests::racing_proposers_agree ... FAILED
+
+    failures:
+
+    failures:
+        proposer::tests::racing_proposers_agree
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 71 filtered out; finished in 0.02s
+
+  stderr ───
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+
+    thread 'proposer::tests::racing_proposers_agree' (3611511) panicked at crates/quepaxa/src/proposer.rs:320:5:
+    Test failed: P3: phase-0 H only from the leader at the first step.
+    minimal failing input: n_props = 2, n_recs = 3, seed = [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ], order = []
+    successes: 0
+    local rejects: 0
+    global rejects: 0
+
+
+        PASS [   1.004s] ( 50/110) quepaxa codec::tests::decode_never_panics_on_mutated_valid_messages
+        PASS [   1.005s] ( 51/110) quepaxa batch::tests::decode_never_panics
+        PASS [   1.005s] ( 52/110) quepaxa codec::tests::decode_never_panics_on_arbitrary_input
+        PASS [   1.007s] ( 53/110) quepaxa core_state::tests::decode_never_panics
+        PASS [   1.007s] ( 54/110) quepaxa durable::tests::decode_never_panics
+  Cancelling due to signal: 1 test still running
+     SIGTERM [  19.914s] ( 55/110) kv-tokio::cluster survives_kill_9_of_a_minority_and_recovers_the_victim
+  stdout ───
+
+    running 1 test
+  stderr ───
+    kv-tokio 1: peers on 127.0.0.1:40599, clients on 127.0.0.1:43157
+    kv-tokio 2: peers on 127.0.0.1:42731, clients on 127.0.0.1:41447
+    kv-tokio 0: peers on 127.0.0.1:43835, clients on 127.0.0.1:33239
+
+    thread '<unnamed>' (3611453) panicked at crates/quepaxa/src/proposer.rs:103:9:
+    P3: phase-0 H only from the leader at the first step
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+    (test aborted with signal 15: SIGTERM)
+
+────────────
+     Summary [  19.915s] 55/110 tests run: 47 passed, 8 failed, 0 skipped
+        FAIL [   0.004s] ( 40/110) quepaxa proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two
+        FAIL [   0.004s] ( 42/110) quepaxa proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum
+        FAIL [   0.006s] ( 43/110) quepaxa proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three
+        FAIL [   0.007s] ( 46/110) quepaxa proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up
+        FAIL [   0.011s] ( 47/110) quepaxa proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder
+        FAIL [   0.008s] ( 48/110) quepaxa proposer::tests::replies_to_older_requests_are_ignored
+        FAIL [   0.021s] ( 49/110) quepaxa proposer::tests::racing_proposers_agree
+     SIGTERM [  19.914s] ( 55/110) kv-tokio::cluster survives_kill_9_of_a_minority_and_recovers_the_victim
+warning: 55/110 tests were not run due to signal
+error: test run failed
+
+*** result: Timeout

@@ -1,0 +1,66 @@
+[
+  {
+    "diff": "--- crates/quepaxa/src/proposer.rs\n+++ delete field priority from struct Proposal expression in SlotProposer::prepare\n@@ -90,17 +90,17 @@\n     /// Paper Alg. 4 loop head: the per-recorder proposals for the current step.\n     fn prepare(&mut self, rng: &mut ChaCha20) {\n         let randomize = self.step.is_multiple_of(4) && (self.step > FIRST_STEP || !self.leader);\n         self.sent = self\n             .recorders\n             .iter()\n             .map(|&j| {\n                 let priority = if randomize { rng.priority() } else { self.p.priority };\n-                (j, Proposal { priority, ..self.p.clone() })\n+                (j, Proposal {  /* ~ changed by cargo-mutants ~ */ ..self.p.clone() })\n             })\n             .collect();\n         self.replies.clear();\n         // Later phases may carry an adopted leader proposal, so only phase 0 is checked.\n         debug_assert!(\n             !self.step.is_multiple_of(4)\n                 || self\n                     .sent\n",
+    "file": "crates/quepaxa/src/proposer.rs",
+    "function": {
+      "function_name": "SlotProposer::prepare",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 111
+        },
+        "start": {
+          "column": 5,
+          "line": 90
+        }
+      }
+    },
+    "genre": "StructField",
+    "name": "crates/quepaxa/src/proposer.rs:98:32: delete field priority from struct Proposal expression in SlotProposer::prepare",
+    "package": "quepaxa",
+    "replacement": "",
+    "span": {
+      "end": {
+        "column": 41,
+        "line": 98
+      },
+      "start": {
+        "column": 32,
+        "line": 98
+      }
+    }
+  },
+  {
+    "diff": "--- crates/quepaxa/src/replica/mod.rs\n+++ replace Replica::send_gated with ()\n@@ -458,22 +458,17 @@\n             self.actions.push(Action::Send(out));\n         } else {\n             self.gated.push(out);\n         }\n     }\n \n     /// A send that reports state possibly not yet durable.\n     fn send_gated(&mut self, to: NodeId, body: Body) {\n-        let out = self.encode(to, body);\n-        if self.idle_storage() {\n-            self.actions.push(Action::Send(out));\n-        } else {\n-            self.gated.push(out);\n-        }\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n \n     fn on_message(&mut self, bytes: &Bytes) {\n         let Ok(msg) = Message::decode(bytes, &self.wire) else {\n             self.metrics.messages_rejected += 1;\n             return;\n         };\n         let from = msg.env.from;\n",
+    "file": "crates/quepaxa/src/replica/mod.rs",
+    "function": {
+      "function_name": "Replica::send_gated",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 472
+        },
+        "start": {
+          "column": 5,
+          "line": 464
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/quepaxa/src/replica/mod.rs:466:9: replace Replica::send_gated with ()",
+    "package": "quepaxa",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 471
+      },
+      "start": {
+        "column": 9,
+        "line": 466
+      }
+    }
+  }
+]

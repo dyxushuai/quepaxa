@@ -1,0 +1,5 @@
+# Replica behaviour is mostly verified by quepaxa-sim (simulation and model checking), so
+# every mutant of the core is tested against the whole workspace.
+test_workspace = true
+# Test support only.
+exclude_re = ["fingerprint"]
