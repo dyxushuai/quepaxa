@@ -1,0 +1,163 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build artifacts only; publish nothing"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, zig: true }
+          - { os: ubuntu-24.04, target: aarch64-unknown-linux-gnu, zig: true }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15, target: x86_64-apple-darwin }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc }
+          - { os: windows-2025, target: aarch64-pc-windows-msvc }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        if: matrix.zig
+        with:
+          tool: cargo-zigbuild
+      - uses: mlugg/setup-zig@v2
+        if: matrix.zig
+      - name: Build (Linux artifacts require only glibc 2.28)
+        shell: bash
+        run: |
+          if [ "${{ matrix.zig }}" = true ]; then
+            cargo zigbuild --release -p quepaxa-ffi --target ${{ matrix.target }}.2.28
+          else
+            cargo build --release -p quepaxa-ffi --target ${{ matrix.target }}
+          fi
+      - name: Package
+        shell: bash
+        run: |
+          name=quepaxa-ffi-${GITHUB_REF_NAME#v}-${{ matrix.target }}
+          mkdir -p "$name/include" "$name/lib"
+          cp crates/quepaxa-ffi/include/quepaxa.h "$name/include/"
+          cp LICENSE-MIT LICENSE-APACHE README.md "$name/"
+          out=target/${{ matrix.target }}/release
+          cp "$out"/libquepaxa_ffi.a "$out"/libquepaxa_ffi.so "$out"/libquepaxa_ffi.dylib \
+             "$out"/quepaxa_ffi.dll "$out"/quepaxa_ffi.dll.lib "$out"/quepaxa_ffi.lib "$name/lib/" 2>/dev/null || true
+          ls "$name/lib"
+          test -n "$(ls "$name/lib")"
+          tar czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.target }}
+          path: "*.tar.gz"
+
+  android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android, i686-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-ndk
+      - name: Build all Android ABIs (NDK r28+, 16 KB pages)
+        run: cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 -t x86 --platform 24 -o jniLibs build --release -p quepaxa-ffi
+      - name: Package
+        run: |
+          name=quepaxa-ffi-${GITHUB_REF_NAME#v}-android
+          mkdir -p "$name/include"
+          cp -r jniLibs "$name/"
+          cp crates/quepaxa-ffi/include/quepaxa.h "$name/include/"
+          cp LICENSE-MIT LICENSE-APACHE README.md "$name/"
+          tar czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: "*.tar.gz"
+
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios, aarch64-apple-ios-sim, x86_64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and assemble an XCFramework
+        run: |
+          for t in aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios; do
+            cargo build --release -p quepaxa-ffi --target $t
+          done
+          mkdir -p sim headers
+          lipo -create target/aarch64-apple-ios-sim/release/libquepaxa_ffi.a \
+                       target/x86_64-apple-ios/release/libquepaxa_ffi.a -output sim/libquepaxa_ffi.a
+          cp crates/quepaxa-ffi/include/quepaxa.h headers/
+          name=quepaxa-ffi-${GITHUB_REF_NAME#v}-ios
+          xcodebuild -create-xcframework \
+            -library target/aarch64-apple-ios/release/libquepaxa_ffi.a -headers headers \
+            -library sim/libquepaxa_ffi.a -headers headers \
+            -output "$name/QuePaxa.xcframework"
+          cp LICENSE-MIT LICENSE-APACHE README.md "$name/"
+          zip -qr "$name.zip" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: "*.zip"
+
+  publish:
+    if: github.event_name == 'push' || !inputs.dry_run
+    needs: [native, android, ios]
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: write
+      id-token: write # crates.io trusted publishing
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: The tag matches the crate version
+        run: test "${GITHUB_REF_NAME#v}" = "$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name=="quepaxa") | .version')"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        # Versions already on crates.io are skipped (e.g. a crate's first release, which
+        # trusted publishing cannot do and is published by hand with a token).
+        run: |
+          for crate in quepaxa quepaxa-ffi; do
+            v=$(cargo metadata --no-deps --format-version 1 | jq -r ".packages[] | select(.name==\"$crate\") | .version")
+            if curl -fsS -A "quepaxa-release (github.com/dyxushuai/quepaxa)" "https://crates.io/api/v1/crates/$crate/$v" >/dev/null 2>&1; then
+              echo "$crate $v is already published"
+            else
+              cargo publish -p "$crate"
+            fi
+          done
+      - name: GitHub release with prebuilt libraries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=$(awk '/^## /{n++} n==1' CHANGELOG.md)
+          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes "$notes" --verify-tag
