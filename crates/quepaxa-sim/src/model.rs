@@ -280,8 +280,13 @@ impl State {
                     }
                 }
                 Action::Committed { id, slot } => {
+                    // The exact proposal (origin, id, payload) must be logged in that slot.
                     let payload = self.nodes[i].proposed.get(&id);
-                    let logged = payload.is_some_and(|p| self.committed_at.get(p) == Some(&slot.0));
+                    let logged = payload.is_some_and(|p| {
+                        self.log.get(&slot.0).is_some_and(|es| {
+                            es.iter().any(|e| e.origin == NodeId(i as u32) && e.id == id && e.payload == *p)
+                        })
+                    });
                     if !logged {
                         return Err(format!(
                             "n{i} reported Committed {id:?} at {slot:?} but it is not logged there"
