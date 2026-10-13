@@ -1,13 +1,12 @@
-diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
-index e91314d..f9f47cc 100644
---- a/crates/quepaxa/src/replica/mod.rs
-+++ b/crates/quepaxa/src/replica/mod.rs
-@@ -361,7 +361,7 @@ impl Replica {
- 
-     /// Runs `e` now if nothing is waiting on storage, else once the next `Persist` lands.
-     fn after_durable(&mut self, e: Effect) {
--        if self.idle_storage() {
+diff --git a/crates/quepaxa/src/replica/gate.rs b/crates/quepaxa/src/replica/gate.rs
+--- a/crates/quepaxa/src/replica/gate.rs
++++ b/crates/quepaxa/src/replica/gate.rs
+@@ -95,7 +95,7 @@
+     /// everything written so far is durable.
+     #[must_use]
+     pub fn after_durable(&mut self, e: E) -> Option<E> {
+-        if self.idle() {
 +        if true {
-             self.apply(e);
+             Some(e)
          } else {
              self.effects.push(e);

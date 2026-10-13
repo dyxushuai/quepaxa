@@ -34,7 +34,7 @@ impl Replica {
         let before = reg.step;
         if reg.record(step, proposal) {
             let rec = Record::Recorder { slot, reg: reg.clone() }.encode();
-            self.writes.push(rec);
+            self.gate.write(rec);
         }
         let s = reg.summary();
         // Progress on this slot postpones hedging it.
@@ -85,7 +85,7 @@ impl Replica {
             return;
         }
         self.metrics.slots_decided += 1;
-        self.writes.push(Record::Decided { slot, proposal: proposal.clone() }.encode());
+        self.gate.write(Record::Decided { slot, proposal: proposal.clone() }.encode());
         // A local batch that lost its slot goes back to be proposed elsewhere.
         if let Some(a) = self.proposers.remove(&slot)
             && let Some(b) = self.batches.get_mut(&a.batch)

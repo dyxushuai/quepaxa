@@ -161,8 +161,7 @@ impl Replica {
                 .map(|(slot, d)| Record::Decided { slot: *slot, proposal: d.proposal.clone() }.encode()),
         );
         // Writes made earlier in this call are already reflected in the checkpoint.
-        self.writes = records;
-        self.replace_next = true;
+        self.gate.checkpoint(records);
     }
 
     /// A peer no longer has slots we need.
