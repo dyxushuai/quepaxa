@@ -189,6 +189,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-ndk
+      - name: Use NDK r28+ (16 KB page alignment) for every cargo-ndk step
+        run: echo "ANDROID_NDK_HOME=$ANDROID_NDK_LATEST_HOME" >> "$GITHUB_ENV"
       - name: Build the C ABI for device and emulator ABIs
         run: cargo ndk -t arm64-v8a -t x86_64 --platform 24 build --release -p quepaxa-ffi
       - name: Build the FFI test binary and the C smoke test for the emulator
