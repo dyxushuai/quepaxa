@@ -51,10 +51,7 @@ impl SlotProposer {
     /// Starts at round 1, phase 0 proposing `value` (its priority is chosen here).
     pub fn new(recorders: Vec<NodeId>, leader: bool, value: Proposal, rng: &mut ChaCha20) -> Self {
         let quorum = recorders.len() / 2 + 1;
-        let p = Proposal {
-            priority: LEADER_PRIORITY,
-            ..value
-        };
+        let p = Proposal { priority: LEADER_PRIORITY, ..value };
         let mut s = Self {
             recorders,
             quorum,
@@ -85,10 +82,7 @@ impl SlotProposer {
 
     /// Current-step requests not yet answered (for first send and retransmission).
     pub fn requests(&self) -> impl Iterator<Item = (NodeId, &Proposal)> {
-        self.sent
-            .iter()
-            .filter(|(j, _)| !self.replies.contains_key(j))
-            .map(|(j, p)| (*j, p))
+        self.sent.iter().filter(|(j, _)| !self.replies.contains_key(j)).map(|(j, p)| (*j, p))
     }
 
     /// Paper Alg. 4 loop head: the per-recorder proposals for the current step.
@@ -98,18 +92,8 @@ impl SlotProposer {
             .recorders
             .iter()
             .map(|&j| {
-                let priority = if randomize {
-                    rng.priority()
-                } else {
-                    self.p.priority
-                };
-                (
-                    j,
-                    Proposal {
-                        priority,
-                        ..self.p.clone()
-                    },
-                )
+                let priority = if randomize { rng.priority() } else { self.p.priority };
+                (j, Proposal { priority, ..self.p.clone() })
             })
             .collect();
         self.replies.clear();
@@ -119,8 +103,7 @@ impl SlotProposer {
                 || self
                     .sent
                     .values()
-                    .all(|q| q.priority != LEADER_PRIORITY
-                        || (self.leader && self.step == FIRST_STEP)),
+                    .all(|q| q.priority != LEADER_PRIORITY || (self.leader && self.step == FIRST_STEP)),
             "P3: phase-0 H only from the leader at the first step"
         );
     }
@@ -136,10 +119,7 @@ impl SlotProposer {
         if self.decided.is_some() || reply.req_step != self.step || !self.sent.contains_key(&from) {
             return Progress::Waiting;
         }
-        debug_assert!(
-            reply.step >= reply.req_step,
-            "P1: recorder replied with an older step"
-        );
+        debug_assert!(reply.step >= reply.req_step, "P1: recorder replied with an older step");
         if reply.step > self.step {
             // Catch up to the recorder's step, adopting its first value there (A12: take
             // the first reply that is ahead; any such reply is valid by Lemma C.3).
@@ -157,12 +137,7 @@ impl SlotProposer {
             return Progress::Waiting;
         }
         let firsts = || self.replies.values().map(|r| r.first.as_ref());
-        let best_agg = self
-            .replies
-            .values()
-            .filter_map(|r| r.prev_agg.as_ref())
-            .max()
-            .cloned();
+        let best_agg = self.replies.values().filter_map(|r| r.prev_agg.as_ref()).max().cloned();
         match self.step % 4 {
             0 => {
                 if self.step == FIRST_STEP
@@ -228,12 +203,7 @@ mod tests {
         let req_step = ps[pi].step();
         regs[j].record(req_step, req);
         let s = regs[j].summary();
-        let reply = Reply {
-            req_step,
-            step: s.step,
-            first: s.first,
-            prev_agg: s.prev_agg,
-        };
+        let reply = Reply { req_step, step: s.step, first: s.first, prev_agg: s.prev_agg };
         ps[pi].on_reply(NodeId(j as u32), reply, rng)
     }
 
@@ -253,19 +223,11 @@ mod tests {
         let mut rng = rng();
         let mut regs = vec![Register::default(); 3];
         let mut p = SlotProposer::new(ids(3), true, prop(0, 1, 0), &mut rng);
-        assert_eq!(
-            exchange(core::slice::from_mut(&mut p), &mut regs, 0, 0, &mut rng),
-            Progress::Waiting
-        );
-        let Progress::Decided(v) =
-            exchange(core::slice::from_mut(&mut p), &mut regs, 0, 1, &mut rng)
-        else {
+        assert_eq!(exchange(core::slice::from_mut(&mut p), &mut regs, 0, 0, &mut rng), Progress::Waiting);
+        let Progress::Decided(v) = exchange(core::slice::from_mut(&mut p), &mut regs, 0, 1, &mut rng) else {
             panic!()
         };
-        assert_eq!(
-            (v.key, v.priority, p.step()),
-            (prop(0, 1, 0).key, LEADER_PRIORITY, 4)
-        );
+        assert_eq!((v.key, v.priority, p.step()), (prop(0, 1, 0).key, LEADER_PRIORITY, 4));
     }
 
     #[test]
@@ -288,17 +250,9 @@ mod tests {
     fn phase_zero_adopts_the_best_first_value_of_the_quorum() {
         let mut rng = rng();
         let mut p = SlotProposer::new(ids(3), false, prop(0, 2, 0), &mut rng);
-        let reply = |first| Reply {
-            req_step: 4,
-            step: 4,
-            first: Some(first),
-            prev_agg: None,
-        };
+        let reply = |first| Reply { req_step: 4, step: 4, first: Some(first), prev_agg: None };
         p.on_reply(NodeId(0), reply(prop(3, 7, 0)), &mut rng);
-        assert_eq!(
-            p.on_reply(NodeId(1), reply(prop(9, 8, 0)), &mut rng),
-            Progress::Advanced
-        );
+        assert_eq!(p.on_reply(NodeId(1), reply(prop(9, 8, 0)), &mut rng), Progress::Advanced);
         assert!(p.requests().all(|(_, q)| *q == prop(9, 8, 0)));
     }
 
@@ -309,12 +263,7 @@ mod tests {
         first: Proposal,
         agg: Option<Proposal>,
     ) -> Progress {
-        let r = |f: Proposal| Reply {
-            req_step: step,
-            step,
-            first: Some(f),
-            prev_agg: agg.clone(),
-        };
+        let r = |f: Proposal| Reply { req_step: step, step, first: Some(f), prev_agg: agg.clone() };
         p.on_reply(NodeId(0), r(first.clone()), rng);
         p.on_reply(NodeId(1), r(first), rng)
     }
@@ -325,31 +274,17 @@ mod tests {
         let mut p = SlotProposer::new(ids(3), false, prop(0, 2, 0), &mut rng);
         feed(&mut p, &mut rng, 4, prop(5, 2, 0), None);
         feed(&mut p, &mut rng, 5, prop(5, 2, 0), Some(prop(5, 2, 0)));
-        assert_eq!(
-            feed(&mut p, &mut rng, 6, prop(5, 2, 0), Some(prop(8, 3, 0))),
-            Progress::Advanced
-        );
+        assert_eq!(feed(&mut p, &mut rng, 6, prop(5, 2, 0), Some(prop(8, 3, 0))), Progress::Advanced);
         assert_eq!(p.step(), 7);
-        assert_eq!(
-            feed(&mut p, &mut rng, 7, prop(5, 2, 0), Some(prop(8, 3, 0))),
-            Progress::Advanced
-        );
-        assert!(
-            p.requests().all(|(_, q)| q.key == prop(8, 3, 0).key),
-            "phase 3 adopts best aggregate"
-        );
+        assert_eq!(feed(&mut p, &mut rng, 7, prop(5, 2, 0), Some(prop(8, 3, 0))), Progress::Advanced);
+        assert!(p.requests().all(|(_, q)| q.key == prop(8, 3, 0).key), "phase 3 adopts best aggregate");
     }
 
     #[test]
     fn reply_from_a_recorder_ahead_makes_the_proposer_catch_up() {
         let mut rng = rng();
         let mut p = SlotProposer::new(ids(3), false, prop(0, 2, 0), &mut rng);
-        let reply = Reply {
-            req_step: 4,
-            step: 9,
-            first: Some(prop(4, 6, 0)),
-            prev_agg: None,
-        };
+        let reply = Reply { req_step: 4, step: 9, first: Some(prop(4, 6, 0)), prev_agg: None };
         assert_eq!(p.on_reply(NodeId(2), reply, &mut rng), Progress::Advanced);
         assert_eq!(p.step(), 9);
         assert!(p.requests().all(|(_, q)| *q == prop(4, 6, 0)));
@@ -360,30 +295,17 @@ mod tests {
         // Ambiguity A14: the leader must not stamp H onto another proposer's value.
         let mut rng = rng();
         let mut p = SlotProposer::new(ids(3), true, prop(0, 1, 0), &mut rng);
-        let reply = Reply {
-            req_step: 4,
-            step: 4,
-            first: Some(prop(4, 6, 0)),
-            prev_agg: None,
-        };
+        let reply = Reply { req_step: 4, step: 4, first: Some(prop(4, 6, 0)), prev_agg: None };
         p.on_reply(NodeId(0), reply.clone(), &mut rng);
         p.on_reply(NodeId(1), reply, &mut rng);
-        assert!(
-            p.requests()
-                .all(|(_, q)| q.priority != LEADER_PRIORITY && q.key == prop(4, 6, 0).key)
-        );
+        assert!(p.requests().all(|(_, q)| q.priority != LEADER_PRIORITY && q.key == prop(4, 6, 0).key));
     }
 
     #[test]
     fn replies_to_older_requests_are_ignored() {
         let mut rng = rng();
         let mut p = SlotProposer::new(ids(3), false, prop(0, 2, 0), &mut rng);
-        let stale = Reply {
-            req_step: 3,
-            step: 9,
-            first: Some(prop(4, 6, 0)),
-            prev_agg: None,
-        };
+        let stale = Reply { req_step: 3, step: 9, first: Some(prop(4, 6, 0)), prev_agg: None };
         assert_eq!(p.on_reply(NodeId(0), stale, &mut rng), Progress::Waiting);
         assert_eq!(p.step(), 4);
     }

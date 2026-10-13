@@ -19,9 +19,7 @@ const TABLE: [u32; 256] = {
 };
 
 pub(crate) fn crc32c(data: &[u8]) -> u32 {
-    !data.iter().fold(!0u32, |c, &b| {
-        TABLE[((c ^ u32::from(b)) & 0xFF) as usize] ^ (c >> 8)
-    })
+    !data.iter().fold(!0u32, |c, &b| TABLE[((c ^ u32::from(b)) & 0xFF) as usize] ^ (c >> 8))
 }
 
 #[cfg(test)]

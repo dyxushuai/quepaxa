@@ -54,12 +54,7 @@ pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Entry>, DecodeError> {
         let len = r.u32()? as usize;
         let start = r.pos();
         r.take(len)?;
-        entries.push(Entry {
-            origin,
-            incarnation,
-            id,
-            payload: buf.slice(start..start + len),
-        });
+        entries.push(Entry { origin, incarnation, id, payload: buf.slice(start..start + len) });
     }
     r.finish()?;
     Ok(entries)
@@ -71,12 +66,7 @@ mod tests {
     use alloc::vec;
 
     fn entry(o: u32, id: u64, p: &'static [u8]) -> Entry {
-        Entry {
-            origin: NodeId(o),
-            incarnation: 2,
-            id: ProposalId(id),
-            payload: Bytes::from_static(p),
-        }
+        Entry { origin: NodeId(o), incarnation: 2, id: ProposalId(id), payload: Bytes::from_static(p) }
     }
 
     #[test]

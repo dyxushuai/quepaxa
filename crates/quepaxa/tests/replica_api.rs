@@ -1,19 +1,12 @@
 //! Contract tests of the public `Replica` API on a single-member cluster.
 
 use bytes::Bytes;
-use quepaxa::{
-    Action, Config, DropReason, Error, Input, NodeId, PersistId, Replica, Slot, Timestamp,
-};
+use quepaxa::{Action, Config, DropReason, Error, Input, NodeId, PersistId, Replica, Slot, Timestamp};
 
 const T0: Timestamp = Timestamp(0);
 
 fn config(members: &[u32]) -> Config {
-    Config::new(
-        [9; 16],
-        NodeId(members[0]),
-        members.iter().copied().map(NodeId).collect(),
-        [1; 32],
-    )
+    Config::new([9; 16], NodeId(members[0]), members.iter().copied().map(NodeId).collect(), [1; 32])
 }
 
 fn drain(r: &mut Replica) -> Vec<Action> {
@@ -88,9 +81,7 @@ fn restart_replays_committed_slots_from_durable_records() {
     settle(&mut r, &mut disk);
     let mut r2 = Replica::new(config(&[0]), disk.clone(), T0).unwrap();
     let replay = drain(&mut r2);
-    assert!(
-        matches!(&replay[0], Action::Commit { slot: Slot(0), entries } if entries[0].payload == "x")
-    );
+    assert!(matches!(&replay[0], Action::Commit { slot: Slot(0), entries } if entries[0].payload == "x"));
     assert_eq!(r2.commit_index(), 1);
 }
 
@@ -115,10 +106,7 @@ fn calling_again_before_draining_is_rejected() {
 fn unknown_persist_id_is_rejected() {
     let mut r = Replica::new(config(&[0]), [], T0).unwrap();
     drain(&mut r);
-    assert_eq!(
-        r.handle(T0, Input::Persisted(PersistId(5))),
-        Err(Error::UnknownPersistId)
-    );
+    assert_eq!(r.handle(T0, Input::Persisted(PersistId(5))), Err(Error::UnknownPersistId));
 }
 
 #[test]
@@ -129,13 +117,7 @@ fn storage_failure_fences_and_drops_outstanding_proposals() {
     let id = r.propose(T0, Bytes::from_static(b"x")).unwrap();
     drain(&mut r);
     r.handle(T0, Input::StorageFailed(PersistId(1))).unwrap();
-    assert_eq!(
-        drain(&mut r),
-        vec![Action::Dropped {
-            id,
-            reason: DropReason::Fenced
-        }]
-    );
+    assert_eq!(drain(&mut r), vec![Action::Dropped { id, reason: DropReason::Fenced }]);
     assert_eq!(r.propose(T0, Bytes::new()), Err(Error::Fenced));
     assert_eq!(r.next_deadline(), None);
 }
@@ -147,10 +129,7 @@ fn backpressure_and_size_limits_are_enforced() {
     cfg.max_batch_bytes = 64;
     let mut r = Replica::new(cfg, [], T0).unwrap();
     drain(&mut r);
-    assert_eq!(
-        r.propose(T0, Bytes::from(vec![0; 64])),
-        Err(Error::PayloadTooLarge)
-    );
+    assert_eq!(r.propose(T0, Bytes::from(vec![0; 64])), Err(Error::PayloadTooLarge));
     r.propose(T0, Bytes::new()).unwrap();
     drain(&mut r);
     assert_eq!(r.propose(T0, Bytes::new()), Err(Error::Busy));
@@ -160,24 +139,17 @@ fn backpressure_and_size_limits_are_enforced() {
 fn invalid_configs_are_rejected() {
     let mut dup = config(&[0, 0]);
     dup.id = NodeId(0);
-    assert!(matches!(
-        Replica::new(dup, [], T0),
-        Err(Error::InvalidConfig(_))
-    ));
+    assert!(matches!(Replica::new(dup, [], T0), Err(Error::InvalidConfig(_))));
     let mut stranger = config(&[0, 1]);
     stranger.id = NodeId(7);
-    assert!(matches!(
-        Replica::new(stranger, [], T0),
-        Err(Error::InvalidConfig(_))
-    ));
+    assert!(matches!(Replica::new(stranger, [], T0), Err(Error::InvalidConfig(_))));
 }
 
 #[test]
 fn garbage_network_input_is_counted_and_ignored() {
     let mut r = Replica::new(config(&[0, 1, 2]), [], T0).unwrap();
     drain(&mut r);
-    r.handle(T0, Input::Message(Bytes::from_static(b"not a message")))
-        .unwrap();
+    r.handle(T0, Input::Message(Bytes::from_static(b"not a message"))).unwrap();
     assert!(drain(&mut r).is_empty());
     assert_eq!(r.metrics().messages_rejected, 1);
 }

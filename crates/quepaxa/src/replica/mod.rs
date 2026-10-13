@@ -1,0 +1,455 @@
+//! The sans-IO replica: one proposer and one recorder per slot, a decided log, and the
+//! durability gate that keeps replies behind the writes they depend on (ADR 0002).
+//!
+//! `log` holds the recorder and decided-log side, `proposing` the proposer side (batching,
+//! forwarding to the leader, hedging, stalled slots).
+
+mod log;
+mod proposing;
+
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::vec::Vec;
+use bytes::Bytes;
+use core::mem;
+
+use crate::api::{Action, Config, DropReason, Error, Input, Metrics, Outbound};
+use crate::batch::{self, Entry};
+use crate::codec::{Body, Envelope, Message, WireCtx};
+use crate::dedup::Dedup;
+use crate::durable::Record;
+use crate::proposal::{Proposal, ValueKey};
+use crate::proposer::SlotProposer;
+use crate::recorder::Register;
+use crate::rng::ChaCha20;
+use crate::schedule::Schedule;
+use crate::types::{NodeId, PersistId, ProposalId, Slot, Timestamp};
+
+struct Decision {
+    proposal: Proposal,
+    durable: bool,
+}
+
+struct Active {
+    prop: SlotProposer,
+    batch: u64,
+    resend_at: Timestamp,
+}
+
+/// A batch this replica proposes, in at most one slot at a time until it is decided.
+struct LocalBatch {
+    key: ValueKey,
+    value: Bytes,
+    entries: Vec<(NodeId, u64, ProposalId)>,
+    slot: Option<Slot>,
+}
+
+/// Work deferred until the next `Persist` is acknowledged.
+enum Effect {
+    Ready,
+    ReservationDurable(u64),
+    DecidedDurable(Slot),
+    LocalReply(Body),
+}
+
+struct InFlight {
+    id: u64,
+    effects: Vec<Effect>,
+    parked: Vec<Outbound>,
+}
+
+/// One member of a QuePaxa cluster. See the crate docs for the driving contract.
+pub struct Replica {
+    cfg: Config,
+    me: NodeId,
+    wire: WireCtx,
+    rng: ChaCha20,
+    incarnation: u64,
+    now: Timestamp,
+    fenced: bool,
+    metrics: Metrics,
+
+    // Durability gate.
+    ready: bool,
+    next_persist: u64,
+    acked: Option<u64>,
+    writes: Vec<Bytes>,
+    gated: Vec<Outbound>,
+    effects: Vec<Effect>,
+    /// Issued persists awaiting acknowledgement, with the effects and sends parked behind each.
+    in_flight: VecDeque<InFlight>,
+    actions: Vec<Action>,
+    inbox: VecDeque<(NodeId, Body)>,
+
+    // Recorder and decided log.
+    registers: BTreeMap<Slot, Register>,
+    log: BTreeMap<Slot, Decision>,
+    committed: u64,
+    emitted: u64,
+    peer_committed: u64,
+    /// Undecided slots someone else drives, with when they last made progress.
+    seen: BTreeMap<Slot, Timestamp>,
+    catch_up_sent: Option<Timestamp>,
+    schedule: Schedule,
+    dedup: Dedup,
+
+    // Proposer side.
+    proposers: BTreeMap<Slot, Active>,
+    batches: BTreeMap<u64, LocalBatch>,
+    /// Entries to batch if this replica leads, else to forward to the leader.
+    pending: VecDeque<Entry>,
+    /// Own entries the leader did not commit in time; this replica proposes them itself.
+    hedged: VecDeque<Entry>,
+    /// Own entries handed to the leader, with when.
+    forwarded: BTreeMap<ProposalId, (Entry, Timestamp)>,
+    /// Own proposals awaiting commit, with when they were made.
+    outstanding: BTreeMap<ProposalId, Timestamp>,
+    /// Smoothed propose-to-commit latency of own proposals, in nanoseconds.
+    commit_latency: Option<u64>,
+    next_batch: u64,
+    next_proposal: u64,
+    next_alloc: u64,
+    /// First slot this incarnation may use the leader priority in.
+    h_floor: u64,
+    reserved_through: Option<u64>,
+    reserved_durable: Option<u64>,
+}
+
+impl Replica {
+    /// Starts a replica from the durable records of its previous incarnations (in the
+    /// order they were persisted; empty for a fresh replica).
+    pub fn new(cfg: Config, durable: impl IntoIterator<Item = Bytes>, now: Timestamp) -> Result<Self, Error> {
+        cfg.validate()?;
+        let mut last_incarnation = 0;
+        let mut registers = BTreeMap::new();
+        let mut log = BTreeMap::new();
+        let mut reservation: Option<u64> = None;
+        for (index, bytes) in durable.into_iter().enumerate() {
+            match Record::decode(&bytes).map_err(|_| Error::CorruptRecord { index })? {
+                Record::Incarnation(n) => last_incarnation = last_incarnation.max(n),
+                Record::Recorder { slot, reg } => {
+                    registers.insert(slot, reg);
+                }
+                Record::Reservation { through } => reservation = reservation.max(Some(through.0)),
+                Record::Decided { slot, proposal } => {
+                    log.insert(slot, Decision { proposal, durable: true });
+                }
+            }
+        }
+        registers.retain(|slot, _| !log.contains_key(slot));
+        let wire =
+            WireCtx { cluster_id: cfg.cluster_id, config_epoch: 0, max_message_bytes: cfg.max_message_bytes };
+        let mut r = Self {
+            me: cfg.id,
+            wire,
+            rng: ChaCha20::new(cfg.seed),
+            schedule: Schedule::new(&cfg.members),
+            cfg,
+            incarnation: last_incarnation + 1,
+            now,
+            fenced: false,
+            metrics: Metrics::default(),
+            ready: false,
+            next_persist: 0,
+            acked: None,
+            writes: Vec::new(),
+            gated: Vec::new(),
+            effects: Vec::new(),
+            in_flight: VecDeque::new(),
+            actions: Vec::new(),
+            inbox: VecDeque::new(),
+            registers,
+            log,
+            committed: 0,
+            emitted: 0,
+            peer_committed: 0,
+            seen: BTreeMap::new(),
+            catch_up_sent: None,
+            dedup: Dedup::default(),
+            proposers: BTreeMap::new(),
+            batches: BTreeMap::new(),
+            pending: VecDeque::new(),
+            hedged: VecDeque::new(),
+            forwarded: BTreeMap::new(),
+            outstanding: BTreeMap::new(),
+            commit_latency: None,
+            next_batch: 0,
+            next_proposal: 0,
+            next_alloc: 0,
+            h_floor: reservation.map_or(0, |r| r + 1),
+            reserved_through: None,
+            reserved_durable: None,
+        };
+        r.advance_committed();
+        // Slots with recovered recorder state were started by someone; make sure they get driven.
+        let started: Vec<Slot> = r.registers.keys().copied().collect();
+        for slot in started {
+            r.seen.entry(slot).or_insert(now);
+        }
+        r.emit_commits();
+        // Nothing leaves this replica until its new incarnation is durable.
+        r.writes.push(Record::Incarnation(r.incarnation).encode());
+        r.effects.push(Effect::Ready);
+        r.flush();
+        Ok(r)
+    }
+
+    /// This replica's id.
+    pub fn id(&self) -> NodeId {
+        self.me
+    }
+
+    /// Number of contiguous decided slots from the start of the log.
+    pub fn commit_index(&self) -> u64 {
+        self.committed
+    }
+
+    /// Counters for observability.
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
+    }
+
+    /// Queues `payload` for the log. The returned id later appears in exactly one of
+    /// [`Action::Committed`] or [`Action::Dropped`], unless the replica crashes first.
+    pub fn propose(&mut self, now: Timestamp, payload: Bytes) -> Result<ProposalId, Error> {
+        self.begin(now)?;
+        if self.fenced {
+            return Err(Error::Fenced);
+        }
+        if self.outstanding.len() >= self.cfg.max_outstanding_proposals as usize {
+            return Err(Error::Busy);
+        }
+        let id = ProposalId(self.next_proposal);
+        let entry = Entry { origin: self.me, incarnation: self.incarnation, id, payload };
+        if 4 + batch::encoded_len(&entry) > self.cfg.max_batch_bytes as usize {
+            return Err(Error::PayloadTooLarge);
+        }
+        self.next_proposal += 1;
+        self.outstanding.insert(id, self.now);
+        self.pending.push_back(entry);
+        self.pump();
+        self.flush();
+        Ok(id)
+    }
+
+    /// Feeds one external event.
+    pub fn handle(&mut self, now: Timestamp, input: Input) -> Result<(), Error> {
+        self.begin(now)?;
+        if self.fenced {
+            return Ok(());
+        }
+        match input {
+            Input::Message(bytes) => self.on_message(&bytes),
+            Input::Persisted(id) => self.on_persisted(id)?,
+            Input::StorageFailed(_) => self.fence(),
+        }
+        self.pump();
+        self.flush();
+        Ok(())
+    }
+
+    /// Fires timers due at `now`; call it at or after [`Replica::next_deadline`].
+    pub fn handle_timeout(&mut self, now: Timestamp) -> Result<(), Error> {
+        self.begin(now)?;
+        if self.fenced {
+            return Ok(());
+        }
+        self.fire_timers();
+        self.pump();
+        self.flush();
+        Ok(())
+    }
+
+    /// When [`Replica::handle_timeout`] next needs to run, if at all.
+    pub fn next_deadline(&self) -> Option<Timestamp> {
+        if self.fenced { None } else { self.earliest_timer() }
+    }
+
+    /// Moves every pending action into `out`. Must be called after each other method
+    /// before the next one.
+    pub fn poll_actions(&mut self, out: &mut Vec<Action>) {
+        out.append(&mut self.actions);
+    }
+
+    fn begin(&mut self, now: Timestamp) -> Result<(), Error> {
+        if !self.actions.is_empty() {
+            return Err(Error::NotDrained);
+        }
+        self.now = self.now.max(now);
+        Ok(())
+    }
+
+    fn window(&self) -> u64 {
+        u64::from(self.cfg.max_in_flight_slots)
+    }
+
+    // ---- durability gate ----
+
+    fn idle_storage(&self) -> bool {
+        self.ready && self.writes.is_empty() && self.in_flight.is_empty()
+    }
+
+    /// Runs `e` now if nothing is waiting on storage, else once the next `Persist` lands.
+    fn after_durable(&mut self, e: Effect) {
+        if self.idle_storage() {
+            self.apply(e);
+        } else {
+            self.effects.push(e);
+        }
+    }
+
+    /// Emits a `Persist` for new writes. Sends and effects that only wait for writes
+    /// already in flight are parked behind the last one instead, so idle replies never
+    /// cost an extra (empty) write.
+    fn flush(&mut self) {
+        if self.writes.is_empty() {
+            if let Some(last) = self.in_flight.back_mut() {
+                last.effects.append(&mut self.effects);
+                last.parked.append(&mut self.gated);
+            }
+            debug_assert!(self.gated.is_empty() && self.effects.is_empty(), "gated work without a write");
+            return;
+        }
+        let id = self.next_persist;
+        self.next_persist += 1;
+        self.actions.push(Action::Persist {
+            id: PersistId(id),
+            records: mem::take(&mut self.writes),
+            then: mem::take(&mut self.gated),
+        });
+        self.in_flight.push_back(InFlight { id, effects: mem::take(&mut self.effects), parked: Vec::new() });
+    }
+
+    fn on_persisted(&mut self, PersistId(id): PersistId) -> Result<(), Error> {
+        if id >= self.next_persist || self.acked.is_some_and(|a| id <= a) {
+            return Err(Error::UnknownPersistId);
+        }
+        self.acked = Some(id);
+        while self.in_flight.front().is_some_and(|f| f.id <= id) {
+            let Some(done) = self.in_flight.pop_front() else { break };
+            self.actions.extend(done.parked.into_iter().map(Action::Send));
+            for e in done.effects {
+                self.apply(e);
+            }
+        }
+        Ok(())
+    }
+
+    fn apply(&mut self, e: Effect) {
+        match e {
+            Effect::Ready => self.ready = true,
+            Effect::ReservationDurable(t) => self.reserved_durable = self.reserved_durable.max(Some(t)),
+            Effect::DecidedDurable(slot) => {
+                if let Some(d) = self.log.get_mut(&slot) {
+                    d.durable = true;
+                }
+                self.registers.remove(&slot);
+                self.emit_commits();
+            }
+            Effect::LocalReply(body) => self.inbox.push_back((self.me, body)),
+        }
+    }
+
+    fn fence(&mut self) {
+        self.fenced = true;
+        for id in mem::take(&mut self.outstanding).into_keys() {
+            self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
+        }
+        self.proposers.clear();
+        self.pending.clear();
+        self.hedged.clear();
+        self.forwarded.clear();
+        self.batches.clear();
+        self.inbox.clear();
+        self.writes.clear();
+        self.gated.clear();
+        self.effects.clear();
+    }
+
+    // ---- network ----
+
+    fn encode(&self, to: NodeId, body: Body) -> Outbound {
+        let env = Envelope {
+            cluster_id: self.cfg.cluster_id,
+            config_epoch: 0,
+            from: self.me,
+            to,
+            commit_index: self.committed,
+        };
+        Outbound { to, bytes: Message { env, body }.encode() }
+    }
+
+    /// A send that does not depend on durable state.
+    fn send(&mut self, to: NodeId, body: Body) {
+        if to == self.me {
+            self.inbox.push_back((to, body));
+            return;
+        }
+        let out = self.encode(to, body);
+        if self.ready {
+            self.actions.push(Action::Send(out));
+        } else {
+            self.gated.push(out);
+        }
+    }
+
+    /// A send that reports state possibly not yet durable.
+    fn send_gated(&mut self, to: NodeId, body: Body) {
+        let out = self.encode(to, body);
+        if self.idle_storage() {
+            self.actions.push(Action::Send(out));
+        } else {
+            self.gated.push(out);
+        }
+    }
+
+    fn on_message(&mut self, bytes: &Bytes) {
+        let Ok(msg) = Message::decode(bytes, &self.wire) else {
+            self.metrics.messages_rejected += 1;
+            return;
+        };
+        let from = msg.env.from;
+        if msg.env.to != self.me || from == self.me || !self.cfg.members.contains(&from) {
+            self.metrics.messages_rejected += 1;
+            return;
+        }
+        self.peer_committed = self.peer_committed.max(msg.env.commit_index);
+        if self.peer_committed > self.committed {
+            self.seen.entry(Slot(self.committed)).or_insert(self.now);
+        }
+        // More than the slot in progress behind: fetch the decided prefix in bulk.
+        let idle = self.catch_up_sent.is_none_or(|t| t.after(self.cfg.retransmit_interval) <= self.now);
+        if msg.env.commit_index > self.committed + 1 && idle {
+            self.catch_up_sent = Some(self.now);
+            self.send(from, Body::CatchUp { from: Slot(self.committed) });
+        }
+        self.inbox.push_back((from, msg.body));
+    }
+
+    fn pump(&mut self) {
+        loop {
+            while let Some((from, body)) = self.inbox.pop_front() {
+                match body {
+                    Body::RecordRequest { slot, step, proposal } => {
+                        self.on_request(from, slot, step, proposal)
+                    }
+                    Body::RecordReply { slot, req_step, step, first, prev_agg } => {
+                        self.on_reply(from, slot, req_step, step, first, prev_agg)
+                    }
+                    Body::Decided { slot, proposal } => self.learn(slot, proposal, false),
+                    Body::CatchUp { from: start } => self.on_catch_up(from, start),
+                    Body::Entries { first, proposals } => {
+                        self.catch_up_sent = None;
+                        for (slot, p) in (first.0..).zip(proposals) {
+                            self.learn(Slot(slot), p, false);
+                        }
+                    }
+                    Body::Forward { batch } => self.on_forward(&batch),
+                }
+            }
+            self.drive();
+            if self.inbox.is_empty() {
+                break;
+            }
+        }
+    }
+}

@@ -33,8 +33,11 @@ pub struct Config {
     pub max_outstanding_proposals: u32,
     /// How often an unanswered record request is re-sent, in nanoseconds.
     pub retransmit_interval: u64,
-    /// How long an undecided slot may stall before this replica drives it itself, in nanoseconds.
-    pub stall_timeout: u64,
+    /// Lower bound of the adaptive hedge delay, in nanoseconds.
+    pub hedge_min: u64,
+    /// Upper bound of the adaptive hedge delay, in nanoseconds; a quarter of it is used
+    /// until a commit latency has been observed.
+    pub hedge_max: u64,
 }
 
 impl Config {
@@ -50,7 +53,8 @@ impl Config {
             max_in_flight_slots: 8,
             max_outstanding_proposals: 4096,
             retransmit_interval: 50 * MILLI,
-            stall_timeout: 200 * MILLI,
+            hedge_min: MILLI,
+            hedge_max: 1000 * MILLI,
         }
     }
 
@@ -62,22 +66,10 @@ impl Config {
             (sorted.len() == self.members.len(), "members must be unique"),
             (sorted.contains(&self.id), "id must be a member"),
             (self.max_batch_bytes > 0, "max_batch_bytes must be positive"),
-            (
-                self.max_message_bytes > self.max_batch_bytes,
-                "max_message_bytes must exceed max_batch_bytes",
-            ),
-            (
-                self.max_in_flight_slots > 0,
-                "max_in_flight_slots must be positive",
-            ),
-            (
-                self.max_outstanding_proposals > 0,
-                "max_outstanding_proposals must be positive",
-            ),
-            (
-                self.retransmit_interval > 0,
-                "retransmit_interval must be positive",
-            ),
+            (self.max_message_bytes > self.max_batch_bytes, "max_message_bytes must exceed max_batch_bytes"),
+            (self.max_in_flight_slots > 0, "max_in_flight_slots must be positive"),
+            (self.max_outstanding_proposals > 0, "max_outstanding_proposals must be positive"),
+            (self.retransmit_interval > 0, "retransmit_interval must be positive"),
         ];
         match checks.iter().find(|(ok, _)| !ok) {
             Some((_, why)) => Err(Error::InvalidConfig(why)),
@@ -169,6 +161,10 @@ pub struct Metrics {
     pub fast_path_decisions: u64,
     /// Decided batches whose entries could not be decoded.
     pub corrupt_batches: u64,
+    /// Batches of entries forwarded to the leader.
+    pub forwarded: u64,
+    /// Own entries proposed directly after the leader did not commit them in time.
+    pub hedged: u64,
 }
 
 /// A caller contract violation or a refused request.
@@ -202,9 +198,7 @@ impl fmt::Display for Error {
             Error::Busy => f.write_str("too many outstanding proposals"),
             Error::PayloadTooLarge => f.write_str("payload exceeds max_batch_bytes"),
             Error::Fenced => f.write_str("replica is fenced after a storage failure"),
-            Error::NotDrained => {
-                f.write_str("poll_actions must drain actions before the next call")
-            }
+            Error::NotDrained => f.write_str("poll_actions must drain actions before the next call"),
             Error::UnknownPersistId => f.write_str("unknown persist id"),
         }
     }

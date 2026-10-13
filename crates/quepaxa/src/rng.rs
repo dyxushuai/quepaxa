@@ -20,12 +20,7 @@ impl ChaCha20 {
         for (k, c) in key.iter_mut().zip(words) {
             *k = u32::from_le_bytes(*c);
         }
-        Self {
-            key,
-            counter: 0,
-            block: [0; 16],
-            used: 16,
-        }
+        Self { key, counter: 0, block: [0; 16], used: 16 }
     }
 
     pub fn next_u32(&mut self) -> u32 {
@@ -116,10 +111,7 @@ mod tests {
     fn stream_starts_at_counter_zero() {
         let mut rng = ChaCha20::new(seq_seed());
         let words: Vec<u32> = (0..8).map(|_| rng.next_u32()).collect();
-        assert_eq!(
-            le_bytes(&words),
-            hex("39fd2b7dd9c5196a8dbd0377b8dc4a498a35d86fbcde6accb2cc7d4cd8ea2492")
-        );
+        assert_eq!(le_bytes(&words), hex("39fd2b7dd9c5196a8dbd0377b8dc4a498a35d86fbcde6accb2cc7d4cd8ea2492"));
     }
 
     #[test]
@@ -132,10 +124,7 @@ mod tests {
 
     #[test]
     fn different_seeds_give_different_priorities() {
-        assert_ne!(
-            ChaCha20::new([1; 32]).priority(),
-            ChaCha20::new([2; 32]).priority()
-        );
+        assert_ne!(ChaCha20::new([1; 32]).priority(), ChaCha20::new([2; 32]).priority());
     }
 
     #[test]
@@ -160,9 +149,6 @@ mod tests {
     }
 
     fn hex(s: &str) -> Vec<u8> {
-        (0..s.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-            .collect()
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 }
