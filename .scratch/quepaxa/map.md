@@ -27,6 +27,7 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
 - [What toolchain delivers the C ABI across our platform tiers](issues/05-ffi-cross-platform-toolchain.md): hand-written `extern "C"` + committed cbindgen header + cargo-c; catch_unwind per export; all 6 Tier 1 targets run natively on GH-hosted runners; MSRV 1.89 proposed; wasm gets wasm-bindgen/wasip2 later, not C ABI.
 - [Which tools give us model checking, DST and linearizability checking in Rust](issues/03-assurance-tooling.md): one sans-IO core driven by proptest, hand-rolled DST, stateright (model check + linearizability), bolero fuzzing, cargo-mutants; only Promela/TLA+ single-slot models exist publicly.
 - [What the Go reference implementation actually does](issues/02-go-reference-impl.md): faithful Alg. 3/4 but no durability, low-entropy priorities, static hedging δ, leader-order tuner via log pseudo-command; supplies test vectors, scenarios and benchmark baselines.
+- [Who owns the `quepaxa` crate name on crates.io](issues/13-crate-name-ownership.md): owned by the user's `johntaiko` account; placeholder 0.1.0 exists, so first real release is > 0.1.0 and the placeholder gets yanked.
 
 ## Not yet specified
 
