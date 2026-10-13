@@ -12,8 +12,16 @@ work=$(mktemp -d)
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/target/canaries}
 failed=0
 ran=0
-# Canaries run against the working tree's tracked files, so local edits are checked too.
-rev=$(git -C "$root" stash create); rev=${rev:-HEAD}
+# Canaries run against a snapshot of the working tree (new files included, ignored files
+# not), so local edits are checked too.
+index=$(mktemp)
+cp "$(git -C "$root" rev-parse --path-format=absolute --git-path index)" "$index"
+GIT_INDEX_FILE=$index git -C "$root" add -A
+rev=$(GIT_AUTHOR_NAME=canaries GIT_AUTHOR_EMAIL=canaries@localhost GIT_COMMITTER_NAME=canaries \
+  GIT_COMMITTER_EMAIL=canaries@localhost \
+  git -C "$root" commit-tree "$(GIT_INDEX_FILE=$index git -C "$root" write-tree)" -p HEAD -m canaries)
+rm -f "$index"
+[[ -n "$rev" ]] || { echo "cannot snapshot the working tree"; exit 1; }
 for patch in "$root"/verification/canaries/*.patch; do
   name=$(basename "$patch" .patch)
   if ! cut -f1 "$root/verification/canaries.tsv" | grep -qx "$name"; then

@@ -160,7 +160,8 @@ pub enum Action {
     Committed {
         /// The proposal.
         id: ProposalId,
-        /// Where it was committed.
+        /// Where it was committed; if an installed snapshot resolved it, that snapshot's
+        /// `through` (the proposal is in the log at or before it).
         slot: Slot,
     },
     /// A read barrier is in the log: after applying every commit up to and including

@@ -164,11 +164,8 @@ impl Replica {
                     log.insert(slot, Decision { proposal, durable: true });
                 }
                 Record::Compacted { through, core_state } => {
-                    let state = CoreState::decode(&core_state, &cfg.members)
-                        .map_err(|_| Error::CorruptRecord { index })?;
-                    if through.0.checked_add(1) != Some(state.next) || state.next > MAX_SLOT {
-                        return Err(Error::CorruptRecord { index });
-                    }
+                    let state = snapshot::decode_state(through, &core_state, &cfg.members)
+                        .ok_or(Error::CorruptRecord { index })?;
                     if snapshot.as_ref().is_none_or(|(s, _)| s.next < state.next) {
                         snapshot = Some((state, core_state));
                     }

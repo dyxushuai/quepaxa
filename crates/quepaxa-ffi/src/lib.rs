@@ -13,7 +13,10 @@
 //! - `qpx_last_error` describes the most recent failing call on the calling thread.
 //! - A panic inside the library returns `QPX_ERR_PANIC` and poisons the handle; every
 //!   later call on it returns `QPX_ERR_POISONED`.
-#![allow(non_camel_case_types)] // C naming for exported types
+#![expect(non_camel_case_types)]
+// C naming for exported types
+// Panics across the C ABI are caught, but production code should not rely on that.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

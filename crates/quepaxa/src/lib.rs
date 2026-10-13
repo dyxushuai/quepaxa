@@ -47,6 +47,8 @@
 //! # Ok::<(), quepaxa::Error>(())
 //! ```
 #![no_std]
+// A replica must never take its host down: failures are `Error`s or fencing.
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 extern crate alloc;
 

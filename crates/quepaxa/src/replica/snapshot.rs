@@ -52,9 +52,13 @@ impl Replica {
     /// may be newer than the replica's last durable compaction).
     ///
     /// Returns `Ok(false)` without changing anything when this replica already emitted every
-    /// slot the snapshot covers. Compare `through` with [`Replica::emitted_index`] before
-    /// replacing the application state, so a snapshot that went stale in transit never
-    /// rewinds the application.
+    /// slot the snapshot covers (it went stale in transit); replace the application state
+    /// only on `Ok(true)`, so the application is never rewound.
+    ///
+    /// On `Ok(true)` the replica queues a checkpoint `Persist` that discards the log below
+    /// the snapshot. Store the application snapshot durably before executing that persist
+    /// (and fail it with [`crate::Input::StorageFailed`] if you cannot): otherwise a crash
+    /// in between leaves neither the log nor a snapshot covering those slots.
     pub fn install_snapshot(
         &mut self,
         now: Timestamp,
@@ -116,11 +120,7 @@ impl Replica {
     }
 
     fn check_state(&self, through: Slot, core_state: &Bytes) -> Result<CoreState, Error> {
-        let state = CoreState::decode(core_state, &self.cfg.members).map_err(|_| Error::InvalidCoreState)?;
-        if through.0.checked_add(1) != Some(state.next) || state.next > crate::types::MAX_SLOT {
-            return Err(Error::InvalidCoreState);
-        }
-        Ok(state)
+        decode_state(through, core_state, &self.cfg.members).ok_or(Error::InvalidCoreState)
     }
 
     fn raise_floor(&mut self, next: u64, core_state: Bytes) {
@@ -129,6 +129,10 @@ impl Replica {
         self.log = self.log.split_off(&floor);
         self.registers = self.registers.split_off(&floor);
         self.seen = self.seen.split_off(&floor);
+        #[cfg(feature = "model")]
+        {
+            self.decided_steps = self.decided_steps.split_off(&floor);
+        }
         self.next_alloc = self.next_alloc.max(next);
         self.snapshot_state = Some(core_state);
         self.checkpoint();
@@ -172,4 +176,10 @@ impl Replica {
             self.actions.push(Action::SnapshotNeeded { peer: from, through });
         }
     }
+}
+
+/// Core state covering every slot through `through`, if `bytes` is one.
+pub(super) fn decode_state(through: Slot, bytes: &Bytes, members: &[NodeId]) -> Option<CoreState> {
+    let state = CoreState::decode(bytes, members).ok()?;
+    (through.0.checked_add(1) == Some(state.next) && state.next <= crate::types::MAX_SLOT).then_some(state)
 }

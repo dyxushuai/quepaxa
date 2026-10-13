@@ -229,9 +229,6 @@ impl Node {
     /// the checkpoint compact the log.
     fn install(&mut self, bytes: Bytes) {
         let Some(snap) = decode_snapshot(&bytes) else { return };
-        if snap.through < self.replica.emitted_index() {
-            return; // stale in transit: never rewind the application
-        }
         let now = self.now();
         let through = snap.through;
         if self.replica.install_snapshot(now, Slot(through), snap.core.clone()) != Ok(true) {
@@ -319,14 +316,15 @@ impl Node {
             for p in batch {
                 if p.replace {
                     appends.clear();
-                    ok &= self.disk.replace(&p.records).is_ok();
+                    // After a failure nothing more is written: later records assume it.
+                    ok = ok && self.disk.replace(&p.records).is_ok();
                 } else {
                     appends.extend(p.records);
                 }
                 gated.extend(p.then);
                 last = Some(p.id);
             }
-            ok &= appends.is_empty() || self.disk.append(&appends).is_ok();
+            ok = ok && (appends.is_empty() || self.disk.append(&appends).is_ok());
             let Some(id) = last else { return };
             let now = self.now();
             if !ok {

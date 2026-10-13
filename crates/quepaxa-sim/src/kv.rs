@@ -131,11 +131,6 @@ impl Kv {
         self.state[node] = state;
     }
 
-    /// Slot where a payload was first committed.
-    pub fn slot_of(&self, payload: &Bytes) -> Option<u64> {
-        self.positions.get(payload).map(|(slot, _)| *slot)
-    }
-
     pub fn reads(&self) -> usize {
         self.reads.len()
     }

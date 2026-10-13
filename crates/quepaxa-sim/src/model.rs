@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use bytes::Bytes;
-use quepaxa::{Action, Config, Entry, Input, NodeId, PersistId, ProposalId, Replica, Timestamp};
+use quepaxa::{Action, Config, Input, NodeId, PersistId, ProposalId, Replica, Timestamp};
 
 /// Bounds of one exploration.
 #[derive(Clone, Debug)]
@@ -73,11 +73,7 @@ struct State {
     crashes: u32,
     isolated: Option<usize>,
     history: crate::invariants::History,
-    log: BTreeMap<u64, Vec<Entry>>,
-    /// Slot each committed payload first appeared in.
-    committed_at: BTreeMap<Bytes, u64>,
-    /// Every payload any client proposed (validity).
-    proposals: Vec<Bytes>,
+    ledger: crate::invariants::Ledger,
     /// Payloads that must eventually commit: client writes, minus those whose replica
     /// crashed before committing them (the client retries those as new payloads).
     required: Vec<Bytes>,
@@ -117,7 +113,8 @@ impl State {
         for n in &self.nodes {
             (n.replica.fingerprint(), &n.durable, n.now, n.next_commit, &n.proposed).hash(&mut h);
         }
-        (&self.events, self.deviations, self.crashes, self.isolated, &self.log, &self.history).hash(&mut h);
+        (&self.events, self.deviations, self.crashes, self.isolated, &self.ledger, &self.history)
+            .hash(&mut h);
         h.finish()
     }
 
@@ -300,7 +297,7 @@ impl State {
             let n = &mut self.nodes[node];
             let id = n.replica.propose(Timestamp(n.now), retry.clone()).map_err(|e| e.to_string())?;
             n.proposed.insert(id, retry.clone());
-            self.proposals.push(retry.clone());
+            self.ledger.proposed(retry.clone());
             self.required.push(retry);
             self.drain(node)?;
         }
@@ -323,44 +320,12 @@ impl State {
                         return Err(format!("n{i} committed slot {} out of order", slot.0));
                     }
                     n.next_commit += 1;
-                    match self.log.get(&slot.0) {
-                        Some(agreed) if *agreed != entries => {
-                            return Err(format!(
-                                "agreement broken at slot {}: {agreed:?} vs {entries:?}",
-                                slot.0
-                            ));
-                        }
-                        Some(_) => {}
-                        None => {
-                            for e in &entries {
-                                if !self.proposals.contains(&e.payload) {
-                                    return Err(format!("validity: {:?} was never proposed", e.payload));
-                                }
-                                if let Some(at) = self.committed_at.insert(e.payload.clone(), slot.0) {
-                                    return Err(format!(
-                                        "{:?} committed in slots {at} and {}",
-                                        e.payload, slot.0
-                                    ));
-                                }
-                            }
-                            self.log.insert(slot.0, entries);
-                        }
-                    }
+                    self.ledger.commit(slot.0, &entries)?;
                 }
                 Action::Committed { id, slot } => {
-                    // The exact proposal (origin, id, payload) must be logged in that slot.
-                    let payload = self.nodes[i].proposed.get(&id);
-                    let logged = payload.is_some_and(|p| {
-                        self.log.get(&slot.0).is_some_and(|es| {
-                            es.iter().any(|e| e.origin == NodeId(i as u32) && e.id == id && e.payload == *p)
-                        })
-                    });
                     self.nodes[i].acked.insert(id);
-                    if !logged {
-                        return Err(format!(
-                            "n{i} reported Committed {id:?} at {slot:?} but it is not logged there"
-                        ));
-                    }
+                    let payload = self.nodes[i].proposed.get(&id).cloned().unwrap_or_default();
+                    self.ledger.acknowledged(NodeId(i as u32), id, &payload, slot.0, None)?;
                 }
                 _ => {}
             }
@@ -375,8 +340,8 @@ impl State {
     }
 
     fn complete(&self) -> bool {
-        self.required.iter().all(|p| self.committed_at.contains_key(p))
-            && self.nodes.iter().all(|n| n.next_commit as usize == self.log.len())
+        self.required.iter().all(|p| self.ledger.is_committed(p))
+            && self.nodes.iter().all(|n| n.next_commit as usize == self.ledger.slots())
     }
 }
 
@@ -401,9 +366,7 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         crashes: cfg.crashes,
         isolated: None,
         history: crate::invariants::History::default(),
-        log: BTreeMap::new(),
-        committed_at: BTreeMap::new(),
-        proposals: Vec::new(),
+        ledger: crate::invariants::Ledger::default(),
         required: Vec::new(),
         depth: 0,
     };
@@ -414,7 +377,7 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         let payload = Bytes::from(format!("w{k}@n{i}"));
         let id = init.nodes[i].replica.propose(Timestamp(0), payload.clone()).map_err(|e| e.to_string())?;
         init.nodes[i].proposed.insert(id, payload.clone());
-        init.proposals.push(payload.clone());
+        init.ledger.proposed(payload.clone());
         init.required.push(payload);
         init.drain(i)?;
     }
@@ -488,7 +451,7 @@ fn settle(mut st: State, max: usize) -> Result<(), String> {
         st.apply(step)?;
         st.observe()?;
     }
-    Err(format!("liveness: still busy after {max} default steps (log {} slots)", st.log.len()))
+    Err(format!("liveness: still busy after {max} default steps (log {} slots)", st.ledger.slots()))
 }
 
 /// Debug aid (`QPX_MODEL_REPLAY=1`): re-runs `path`, printing what every step produced.
