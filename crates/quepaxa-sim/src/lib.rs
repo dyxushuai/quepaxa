@@ -127,6 +127,8 @@ pub struct Report {
     pub slots_after_kill: u64,
     /// Each live replica's counters at the end (since its last restart).
     pub metrics: Vec<quepaxa::Metrics>,
+    /// Most uncommitted local batches any live replica held at the end.
+    pub local_batches: usize,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -274,6 +276,12 @@ impl Sim {
                 let lines: Vec<&str> = self.trace.lines().collect();
                 self.report.trace_tail = lines[lines.len().saturating_sub(400)..].join("\n");
                 self.report.reads = self.kv.reads();
+                self.report.local_batches = self
+                    .nodes
+                    .iter()
+                    .filter_map(|n| n.replica.as_ref().map(|r| r.inspect().local_batches))
+                    .max()
+                    .unwrap_or(0);
                 self.report.metrics = self
                     .nodes
                     .iter()

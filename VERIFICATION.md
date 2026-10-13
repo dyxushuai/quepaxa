@@ -14,7 +14,7 @@ lemmas, checked on the real code — there is no second model to drift from it.
 | Model checking | `crates/quepaxa-sim/src/model.rs` (`tests/model_check.rs`) | every schedule within *k* deviations from a fair default (reorder, loss, duplication, early timer, partition) plus crash-restarts losing any suffix of the write in progress, with client retries: the same invariants in every state, liveness after the partition heals | every PR (exhaustive), nightly (+1 deviation, exhaustive) |
 | Fuzzing | bolero targets in `crates/quepaxa/src` | decoding of messages, batches, durable records, core state | corpus replay every PR, 20 min/target nightly |
 | Unsafe code | `crates/quepaxa-ffi` | Miri; ASan/UBSan on the C smoke test | every PR |
-| Mutation testing | `.cargo/mutants.toml` | test strength over the whole workspace | weekly |
+| Mutation testing | `.cargo/mutants.toml`, `verification/mutants-check.sh` | test strength over the whole workspace; fails on any missed mutant not in `verification/mutants-accepted.txt` | weekly |
 | **Seeded-bug canaries** | `verification/` | each known class of bug is still caught by the check meant to catch it | every PR |
 
 The invariants (`crates/quepaxa-sim/src/invariants.rs`, from `Replica::inspect` under the
@@ -36,6 +36,7 @@ cargo nextest run --release -p quepaxa-sim --test model_check   # model checking
 QPX_SIM_SEEDS=100000 cargo nextest run --release -p quepaxa-sim --test replica_sim
 QPX_MODEL_EXTRA_DEVIATIONS=1 cargo nextest run --release -p quepaxa-sim --test model_check
 verification/canaries.sh [name]                                 # seeded bugs
+cargo mutants -p quepaxa -f crates/quepaxa/src/dedup.rs          # mutants of one file (whole workspace tested)
 cargo +nightly bolero test -p quepaxa 'codec::tests::decode_never_panics_on_arbitrary_input' --target x86_64-unknown-linux-gnu -T 60s
 ```
 
@@ -54,6 +55,10 @@ that matters, and every test stays green. The canaries make that loud.
 - When you fix a correctness bug, add a canary that re-introduces it.
 - When you add protocol logic, add or extend an invariant, then a canary proving the
   invariant catches a broken version.
+- Mutation testing ratchets: a missed mutant fails the weekly run unless
+  `verification/mutants-accepted.txt` lists it with the reason it cannot or need not be
+  killed (equivalent, liveness or performance only). Prefer a test; shrink the list when
+  you can.
 - When you change an oracle, run the canaries: a stronger oracle may catch a canary with a
   different message; update the expected pattern, never drop the canary.
 

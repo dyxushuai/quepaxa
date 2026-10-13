@@ -145,7 +145,10 @@ jobs:
           test -f mutants.out/outcomes.json
           { echo "### Mutants shard ${{ matrix.shard }}"; for f in caught missed timeout unviable; do
               echo "- $f: $(wc -l < mutants.out/$f.txt 2>/dev/null || echo 0)"; done; } >> "$GITHUB_STEP_SUMMARY"
+      - name: No missed mutant beyond the accepted list
+        run: verification/mutants-check.sh mutants.out/missed.txt
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: mutants-${{ matrix.shard }}
           path: mutants.out/

@@ -171,13 +171,18 @@ fn compaction_rewrites_durable_state_once_and_restarts_from_the_snapshot() {
     let mut r = Replica::new(config(&[0]), [], T0).unwrap();
     let mut disk = Vec::new();
     settle(&mut r, &mut disk);
+    let mut states = Vec::new();
     for p in [b"a", b"b", b"c"] {
         r.propose(T0, Bytes::from_static(p)).unwrap();
         settle(&mut r, &mut disk);
+        states.push(r.core_state());
     }
     let before = disk.len();
-    let state = r.core_state();
+    let state = states[2].clone();
     assert_eq!(r.compact(T0, Slot(1), state.clone()), Err(Error::InvalidCoreState));
+    // An older snapshot (taken after slot 1) may still compact, then the newest one.
+    assert_eq!(r.compact(T0, Slot(1), states[1].clone()), Ok(()));
+    drain_and_ack(&mut r, &mut disk);
     assert_eq!(r.compact(T0, Slot(2), state.clone()), Ok(()));
     let replaced =
         |a: &[Action]| a.iter().filter(|a| matches!(a, Action::Persist { replace: true, .. })).count();

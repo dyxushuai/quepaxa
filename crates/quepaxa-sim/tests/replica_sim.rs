@@ -65,6 +65,7 @@ fn compaction_keeps_memory_bounded_on_long_runs() {
     let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
     assert!(report.slots > 1_000, "{report:?}");
     assert!(report.max_retained_slots <= 32 + 8, "{report:?}");
+    assert!(report.local_batches <= 4, "committed batches leak: {} held", report.local_batches);
 }
 
 #[test]
@@ -89,6 +90,10 @@ fn quiet_cluster_serves_multi_page_catch_up() {
         };
         let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
         assert!(report.slots > 100, "seed {seed}: {report:?}");
+        // Each answered page asks for the next at once; only lost pages wait for the timer
+        // (5-8 retries per seed today, 50+ if pages waited for it).
+        let retries: u64 = report.metrics.iter().map(|m| m.catch_up_retries).sum();
+        assert!(retries <= 20, "seed {seed}: {retries} catch-up retries");
     }
 }
 
