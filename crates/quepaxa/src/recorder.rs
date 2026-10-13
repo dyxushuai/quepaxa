@@ -5,6 +5,7 @@ use crate::types::Step;
 
 /// Recorder state for one slot. `None` is the paper's nil.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub(crate) struct Register {
     /// Current step `S`.
     pub step: Step,

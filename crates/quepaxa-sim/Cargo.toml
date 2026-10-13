@@ -10,7 +10,7 @@ publish = false
 
 [dependencies]
 bytes = "1.12"
-quepaxa = { path = "../quepaxa" }
+quepaxa = { path = "../quepaxa", features = ["model"] }
 
 [lints]
 workspace = true

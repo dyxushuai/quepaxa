@@ -7,6 +7,7 @@
 //! fault phase the cluster must converge and commit every live proposal.
 
 mod kv;
+pub mod model;
 mod rng;
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};

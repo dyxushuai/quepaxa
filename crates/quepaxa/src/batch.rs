@@ -11,6 +11,7 @@ const ENTRY_BARRIER: u8 = 1;
 
 /// One application payload committed in the log, tagged with where it was proposed.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub struct Entry {
     /// Replica that accepted the proposal.
     pub origin: NodeId,
@@ -25,6 +26,7 @@ pub struct Entry {
 /// An entry as carried in a batch: application data, or a read barrier (empty payload)
 /// that only marks a log position.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub(crate) struct Item {
     pub entry: Entry,
     pub barrier: bool,

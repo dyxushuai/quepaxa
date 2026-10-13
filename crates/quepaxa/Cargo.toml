@@ -12,6 +12,11 @@ keywords = ["consensus", "paxos", "quepaxa", "replication", "sans-io"]
 [lints]
 workspace = true
 
+[features]
+# Test support only: makes `Replica` cloneable and fingerprintable for model checking.
+# Not part of the stable API.
+model = []
+
 [dependencies]
 bytes = { version = "1.12", default-features = false }
 

@@ -40,6 +40,7 @@ pub(crate) struct Envelope {
 /// A proposal as it appears in a reply: its value may be elided when the requester
 /// already holds it (same key as the request's proposal).
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub(crate) struct WireProposal {
     pub priority: u64,
     pub key: ValueKey,
@@ -60,6 +61,7 @@ impl WireProposal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub(crate) enum Body {
     RecordRequest {
         slot: Slot,
@@ -105,6 +107,7 @@ pub(crate) struct Message {
 
 /// What the receiver expects from every message.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub(crate) struct WireCtx {
     pub cluster_id: [u8; 16],
     pub config_epoch: u64,

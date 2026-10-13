@@ -12,6 +12,7 @@ const MILLI: u64 = 1_000_000;
 /// Static configuration of one replica. Every member must use the same `cluster_id` and
 /// `members`; `seed` must be fresh CSPRNG output on every start, including restarts.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "model", derive(Hash))]
 #[non_exhaustive]
 pub struct Config {
     /// Identifies the cluster; messages from other clusters are dropped.
@@ -92,6 +93,7 @@ pub enum Input {
 
 /// A message to send to one peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub struct Outbound {
     /// Destination replica.
     pub to: NodeId,
@@ -101,6 +103,7 @@ pub struct Outbound {
 
 /// Why a local proposal will never commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 #[non_exhaustive]
 pub enum DropReason {
     /// The replica fenced itself after a storage failure.
@@ -109,6 +112,7 @@ pub enum DropReason {
 
 /// Work the caller must carry out, in the order returned.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 #[non_exhaustive]
 pub enum Action {
     /// Durably append `records` after every earlier `Persist`, then send `then`, then
@@ -168,6 +172,7 @@ pub enum Action {
 
 /// Counters for observability.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 #[non_exhaustive]
 pub struct Metrics {
     /// Network messages that failed to decode or came from a non-member.

@@ -15,6 +15,7 @@ const FIRST_STEP: Step = 4;
 
 /// A recorder's answer to this proposer's request at `req_step`, values already resolved.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub(crate) struct Reply {
     pub req_step: Step,
     pub step: Step,
@@ -32,6 +33,7 @@ pub(crate) enum Progress {
     Decided(Proposal),
 }
 
+#[cfg_attr(feature = "model", derive(Clone, Hash))]
 pub(crate) struct SlotProposer {
     recorders: Vec<NodeId>,
     quorum: usize,
