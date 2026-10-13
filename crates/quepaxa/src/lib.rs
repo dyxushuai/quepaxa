@@ -57,6 +57,9 @@ mod core_state;
 mod crc;
 mod dedup;
 mod durable;
+#[cfg(feature = "model")]
+#[doc(hidden)]
+pub mod inspect;
 mod proposal;
 mod proposer;
 mod recorder;

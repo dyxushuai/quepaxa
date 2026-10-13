@@ -135,6 +135,9 @@ pub struct Replica {
     /// The next `Persist` replaces all earlier records.
     replace_next: bool,
     snapshot_asked: Option<Timestamp>,
+    /// Steps at which this replica's proposers decided, for verification only.
+    #[cfg(feature = "model")]
+    decided_steps: BTreeMap<Slot, (Proposal, u32)>,
 }
 
 impl Replica {
@@ -232,6 +235,8 @@ impl Replica {
             snapshot_state: snapshot.map(|(_, b)| b),
             replace_next: false,
             snapshot_asked: None,
+            #[cfg(feature = "model")]
+            decided_steps: BTreeMap::new(),
         };
         r.advance_committed();
         // Slots with recovered recorder state were started by someone; make sure they get driven.
@@ -546,6 +551,16 @@ impl Replica {
 
 #[cfg(feature = "model")]
 impl Replica {
+    /// Protocol-internal state for invariant checking in tests only.
+    #[doc(hidden)]
+    pub fn inspect(&self) -> crate::inspect::Inspection {
+        crate::inspect::Inspection {
+            registers: self.registers.iter().map(|(s, r)| (s.0, r.into())).collect(),
+            decided_here: self.decided_steps.iter().map(|(s, (p, step))| (s.0, p.into(), *step)).collect(),
+            decided: self.log.iter().map(|(s, d)| (s.0, (&d.proposal).into())).collect(),
+        }
+    }
+
     /// Hash of the complete replica state, for state-space exploration in tests only.
     #[doc(hidden)]
     pub fn fingerprint(&self) -> u64 {

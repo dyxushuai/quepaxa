@@ -49,6 +49,8 @@ impl Replica {
                 if req_step == 4 && p.priority == LEADER_PRIORITY {
                     self.metrics.fast_path_decisions += 1;
                 }
+                #[cfg(feature = "model")]
+                self.decided_steps.insert(slot, (p.clone(), req_step));
                 self.learn(slot, p, true);
             }
         }
