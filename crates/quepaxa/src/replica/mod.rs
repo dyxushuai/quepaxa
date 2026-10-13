@@ -13,7 +13,7 @@ use bytes::Bytes;
 use core::mem;
 
 use crate::api::{Action, Config, DropReason, Error, Input, Metrics, Outbound};
-use crate::batch::{self, Entry};
+use crate::batch::{self, Entry, Item};
 use crate::codec::{Body, Envelope, Message, WireCtx};
 use crate::dedup::Dedup;
 use crate::durable::Record;
@@ -96,11 +96,11 @@ pub struct Replica {
     proposers: BTreeMap<Slot, Active>,
     batches: BTreeMap<u64, LocalBatch>,
     /// Entries to batch if this replica leads, else to forward to the leader.
-    pending: VecDeque<Entry>,
+    pending: VecDeque<Item>,
     /// Own entries the leader did not commit in time; this replica proposes them itself.
-    hedged: VecDeque<Entry>,
+    hedged: VecDeque<Item>,
     /// Own entries handed to the leader, with when.
-    forwarded: BTreeMap<ProposalId, (Entry, Timestamp)>,
+    forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
     /// Own proposals awaiting commit, with when they were made.
     outstanding: BTreeMap<ProposalId, Timestamp>,
     /// Smoothed propose-to-commit latency of own proposals, in nanoseconds.
@@ -211,6 +211,17 @@ impl Replica {
     /// Queues `payload` for the log. The returned id later appears in exactly one of
     /// [`Action::Committed`] or [`Action::Dropped`], unless the replica crashes first.
     pub fn propose(&mut self, now: Timestamp, payload: Bytes) -> Result<ProposalId, Error> {
+        self.enqueue(now, payload, false)
+    }
+
+    /// Requests a linearizable read point. The returned id later appears in exactly one of
+    /// [`Action::ReadReady`] or [`Action::Dropped`]: once the application has applied every
+    /// commit up to the reported slot, a read of its state is linearizable.
+    pub fn read_barrier(&mut self, now: Timestamp) -> Result<ProposalId, Error> {
+        self.enqueue(now, Bytes::new(), true)
+    }
+
+    fn enqueue(&mut self, now: Timestamp, payload: Bytes, barrier: bool) -> Result<ProposalId, Error> {
         self.begin(now)?;
         if self.fenced {
             return Err(Error::Fenced);
@@ -219,13 +230,14 @@ impl Replica {
             return Err(Error::Busy);
         }
         let id = ProposalId(self.next_proposal);
-        let entry = Entry { origin: self.me, incarnation: self.incarnation, id, payload };
-        if 4 + batch::encoded_len(&entry) > self.cfg.max_batch_bytes as usize {
+        let item =
+            Item { entry: Entry { origin: self.me, incarnation: self.incarnation, id, payload }, barrier };
+        if 4 + batch::encoded_len(&item) > self.cfg.max_batch_bytes as usize {
             return Err(Error::PayloadTooLarge);
         }
         self.next_proposal += 1;
         self.outstanding.insert(id, self.now);
-        self.pending.push_back(entry);
+        self.pending.push_back(item);
         self.pump();
         self.flush();
         Ok(id)

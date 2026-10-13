@@ -7,6 +7,7 @@ use crate::codec::{DecodeError, Reader};
 use crate::types::{NodeId, ProposalId};
 
 const ENTRY_APP: u8 = 0;
+const ENTRY_BARRIER: u8 = 1;
 
 /// One application payload committed in the log, tagged with where it was proposed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -21,25 +22,39 @@ pub struct Entry {
     pub payload: Bytes,
 }
 
-pub(crate) fn encoded_len(e: &Entry) -> usize {
-    4 + 8 + 8 + 1 + 4 + e.payload.len()
+/// An entry as carried in a batch: application data, or a read barrier (empty payload)
+/// that only marks a log position.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Item {
+    pub entry: Entry,
+    pub barrier: bool,
 }
 
-pub(crate) fn encode(entries: &[Entry]) -> Bytes {
-    let mut out = Vec::with_capacity(4 + entries.iter().map(encoded_len).sum::<usize>());
-    out.put_u32_le(entries.len() as u32);
-    for e in entries {
+impl Item {
+    pub fn key(&self) -> (NodeId, u64, ProposalId) {
+        (self.entry.origin, self.entry.incarnation, self.entry.id)
+    }
+}
+
+pub(crate) fn encoded_len(i: &Item) -> usize {
+    4 + 8 + 8 + 1 + 4 + i.entry.payload.len()
+}
+
+pub(crate) fn encode(items: &[Item]) -> Bytes {
+    let mut out = Vec::with_capacity(4 + items.iter().map(encoded_len).sum::<usize>());
+    out.put_u32_le(items.len() as u32);
+    for Item { entry: e, barrier } in items {
         out.put_u32_le(e.origin.0);
         out.put_u64_le(e.incarnation);
         out.put_u64_le(e.id.0);
-        out.put_u8(ENTRY_APP);
+        out.put_u8(if *barrier { ENTRY_BARRIER } else { ENTRY_APP });
         out.put_u32_le(e.payload.len() as u32);
         out.put_slice(&e.payload);
     }
     Bytes::from(out)
 }
 
-pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Entry>, DecodeError> {
+pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
     let mut r = Reader::new(buf);
     let n = r.u32()? as usize;
     // Each entry takes at least 25 bytes, which bounds the allocation by the input size.
@@ -48,13 +63,16 @@ pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Entry>, DecodeError> {
         let origin = NodeId(r.u32()?);
         let incarnation = r.u64()?;
         let id = ProposalId(r.u64()?);
-        if r.u8()? != ENTRY_APP {
-            return Err(DecodeError::BadTag);
-        }
+        let barrier = match r.u8()? {
+            ENTRY_APP => false,
+            ENTRY_BARRIER => true,
+            _ => return Err(DecodeError::BadTag),
+        };
         let len = r.u32()? as usize;
         let start = r.pos();
         r.take(len)?;
-        entries.push(Entry { origin, incarnation, id, payload: buf.slice(start..start + len) });
+        let entry = Entry { origin, incarnation, id, payload: buf.slice(start..start + len) };
+        entries.push(Item { entry, barrier });
     }
     r.finish()?;
     Ok(entries)
@@ -65,8 +83,10 @@ mod tests {
     use super::*;
     use alloc::vec;
 
-    fn entry(o: u32, id: u64, p: &'static [u8]) -> Entry {
-        Entry { origin: NodeId(o), incarnation: 2, id: ProposalId(id), payload: Bytes::from_static(p) }
+    fn entry(o: u32, id: u64, p: &'static [u8]) -> Item {
+        let entry =
+            Entry { origin: NodeId(o), incarnation: 2, id: ProposalId(id), payload: Bytes::from_static(p) };
+        Item { entry, barrier: id % 2 == 1 }
     }
 
     #[test]

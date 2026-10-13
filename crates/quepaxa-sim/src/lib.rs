@@ -6,6 +6,7 @@
 //! restart with a fresh seed. After every action the log-level oracles run; after the
 //! fault phase the cluster must converge and commit every live proposal.
 
+mod kv;
 mod rng;
 
 use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
@@ -39,8 +40,10 @@ pub struct SimConfig {
     pub partition: u32,
     /// Probability per tick that some replica crashes.
     pub crash: u32,
-    /// Probability per tick that some replica receives a client proposal.
+    /// Probability per tick that some replica receives a client write.
     pub propose: u32,
+    /// Probability per tick that some replica receives a client read.
+    pub read: u32,
     /// Upper bound on one-way message latency.
     pub max_latency_ms: u64,
     /// Upper bound on one persist's latency.
@@ -72,6 +75,7 @@ impl SimConfig {
             partition: 3,
             crash: 3,
             propose: 300,
+            read: 150,
             max_latency_ms: 20,
             max_persist_ms: 5,
             in_flight_slots: 4,
@@ -90,6 +94,8 @@ pub struct Report {
     pub entries: usize,
     /// Proposals made.
     pub proposals: usize,
+    /// Linearizable reads completed and checked.
+    pub reads: usize,
     /// Crashes injected.
     pub crashes: usize,
     /// Fingerprint of the event trace (same seed ⇒ same fingerprint).
@@ -149,6 +155,7 @@ pub struct Sim {
     report: Report,
     trace: String,
     last_new_slot_at: u64,
+    kv: kv::Kv,
 }
 
 fn cluster_id() -> [u8; 16] {
@@ -159,6 +166,7 @@ impl Sim {
     /// Builds a fresh cluster.
     pub fn new(cfg: SimConfig) -> Self {
         let rng = SplitMix64::new(cfg.seed);
+        let nodes_len = cfg.nodes;
         let nodes = (0..cfg.nodes)
             .map(|_| Node {
                 replica: None,
@@ -188,6 +196,7 @@ impl Sim {
             report: Report::default(),
             trace: String::new(),
             last_new_slot_at: 0,
+            kv: kv::Kv::new(nodes_len),
         };
         if let Some((node, at)) = sim.cfg.kill {
             sim.push(at * MS, Event::Kill { node });
@@ -221,6 +230,10 @@ impl Sim {
                 self.report.trace_hash = fnv(self.trace.as_bytes());
                 let lines: Vec<&str> = self.trace.lines().collect();
                 self.report.trace_tail = lines[lines.len().saturating_sub(400)..].join("\n");
+                self.report.reads = self.kv.reads();
+                if let Err(e) = self.kv.check() {
+                    return Err(self.fail(&format!("linearizability: {e}")));
+                }
                 return Ok(self.report);
             }
         }
@@ -311,6 +324,7 @@ impl Sim {
         node.generation += 1;
         node.next_commit = 0;
         node.outstanding.clear();
+        self.kv.restarted(i);
         node.incarnation_payloads.clear();
         node.timer_at = None;
         let _ = writeln!(self.trace, "{} start n{i} g{}", self.now, node.generation);
@@ -347,6 +361,10 @@ impl Sim {
                 if self.faults_on && self.chance(self.cfg.propose) {
                     let i = self.rng.below(self.cfg.nodes as u64) as usize;
                     self.propose(i)?;
+                }
+                if self.faults_on && self.chance(self.cfg.read) {
+                    let i = self.rng.below(self.cfg.nodes as u64) as usize;
+                    self.read(i)?;
                 }
                 if self.faults_on {
                     self.push(self.now + MS, Event::Tick);
@@ -417,18 +435,32 @@ impl Sim {
     }
 
     fn propose(&mut self, i: usize) -> Result<(), String> {
-        let payload = Bytes::from(format!("n{i}-p{}", self.proposed.len()));
+        let n = self.proposed.len();
+        let payload = kv::write_payload(n as u64 % kv::KEYS, &format!("n{i}-p{n}"));
         let Some(r) = self.nodes[i].replica.as_mut() else {
             return Ok(());
         };
         match r.propose(Timestamp(self.now), payload.clone()) {
             Ok(id) => {
                 self.proposed.insert(payload.clone());
+                self.kv.write_invoked(payload.clone(), self.now);
                 self.nodes[i].outstanding.insert(id, payload.clone());
                 self.nodes[i].incarnation_payloads.insert(id, payload);
             }
             Err(quepaxa::Error::Busy) => {}
             Err(e) => return Err(self.fail(&format!("propose failed: {e}"))),
+        }
+        self.drain(i);
+        Ok(())
+    }
+
+    fn read(&mut self, i: usize) -> Result<(), String> {
+        let key = b'0' + self.rng.below(kv::KEYS) as u8;
+        let Some(r) = self.nodes[i].replica.as_mut() else { return Ok(()) };
+        match r.read_barrier(Timestamp(self.now)) {
+            Ok(id) => self.kv.read_invoked(i, id, key, self.now),
+            Err(quepaxa::Error::Busy) => {}
+            Err(e) => return Err(self.fail(&format!("read_barrier failed: {e}"))),
         }
         self.drain(i);
         Ok(())
@@ -495,6 +527,9 @@ impl Sim {
                 let n = &mut self.nodes[i];
                 let payload = n.incarnation_payloads.get(&id).cloned();
                 n.outstanding.remove(&id);
+                if let Some(p) = &payload {
+                    self.kv.write_completed(p, self.now);
+                }
                 let in_log = payload.is_some_and(|p| {
                     self.log.get(&slot.0).is_some_and(|es| es.iter().any(|e| e.payload == p))
                 });
@@ -506,7 +541,9 @@ impl Sim {
             }
             Action::Dropped { id, .. } => {
                 self.nodes[i].outstanding.remove(&id);
+                self.kv.read_dropped(i, id);
             }
+            Action::ReadReady { id, .. } => self.kv.read_ready(i, id, self.now),
             _ => {}
         }
     }
@@ -516,6 +553,8 @@ impl Sim {
         assert_eq!(slot.0, expected, "{}", self.fail(&format!("n{i} commit out of order")));
         let n = &mut self.nodes[i];
         n.next_commit += 1;
+        let payloads: Vec<Bytes> = entries.iter().map(|e| e.payload.clone()).collect();
+        self.kv.apply(i, &payloads);
         let _ = writeln!(self.trace, "{} n{i} commit {} ({} entries)", self.now, slot.0, entries.len());
         match self.log.get(&slot.0) {
             Some(agreed) => {
@@ -530,6 +569,7 @@ impl Sim {
                         self.fail(&format!("payload {:?} committed twice", e.payload))
                     );
                 }
+                self.kv.first_commit(slot.0, &payloads);
                 self.log.insert(slot.0, entries);
                 if self.faults_on {
                     let gap = (self.now - self.last_new_slot_at) / MS;
