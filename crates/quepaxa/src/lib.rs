@@ -12,6 +12,8 @@ mod proposal;
 mod proposer;
 mod recorder;
 mod rng;
+#[cfg(test)]
+mod slot_sim;
 mod types;
 
 pub use types::{NodeId, Slot};
