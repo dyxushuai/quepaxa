@@ -247,7 +247,12 @@ impl Replica {
         let resend = self.proposers.values().map(|a| a.resend_at);
         let stall = self.stalled().map(|(_, at)| at);
         let hedge = self.forwarded.values().map(|(_, at)| *at).min().map(|t| t.after(self.hedge_delay()));
-        resend.chain(stall).chain(hedge).min()
+        // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
+        let behind = self.peer_committed > self.committed + 1
+            && self.catch_up.or(self.ahead_peer.map(|p| (p, self.now))).is_some();
+        let catch_up =
+            behind.then(|| self.catch_up.map_or(self.now, |(_, t)| t.after(self.cfg.retransmit_interval)));
+        resend.chain(stall).chain(hedge).chain(catch_up).min()
     }
 
     pub(super) fn fire_timers(&mut self) {
@@ -265,6 +270,13 @@ impl Replica {
             if let Some((e, _)) = self.forwarded.remove(&id) {
                 self.metrics.hedged += 1;
                 self.hedged.push_back(e);
+            }
+        }
+        if self.peer_committed > self.committed + 1 && self.catch_up_due() {
+            let peer = self.catch_up.map(|(p, _)| p).or(self.ahead_peer);
+            if let Some(peer) = peer {
+                self.metrics.retransmits += 1;
+                self.request_catch_up(peer);
             }
         }
         let stalled: Vec<Slot> = self.stalled().filter(|(_, at)| *at <= now).map(|(s, _)| s).collect();

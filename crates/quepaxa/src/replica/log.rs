@@ -128,6 +128,7 @@ impl Replica {
             }
             let slot = Slot(self.emitted);
             let key = d.proposal.key;
+            self.applied_schedule.observe(slot, key.origin);
             let mut items = batch::decode(&d.proposal.value).unwrap_or_else(|_| {
                 self.metrics.corrupt_batches += 1;
                 Vec::new()

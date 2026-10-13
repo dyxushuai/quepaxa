@@ -96,8 +96,14 @@ pub struct Replica {
     peer_committed: u64,
     /// Undecided slots someone else drives, with when they last made progress.
     seen: BTreeMap<Slot, Timestamp>,
-    catch_up_sent: Option<Timestamp>,
+    /// Outstanding bulk catch-up request: peer and when it was sent.
+    catch_up: Option<(NodeId, Timestamp)>,
+    /// A peer that advertised `peer_committed`.
+    ahead_peer: Option<NodeId>,
+    /// Leader schedule as of the decided prefix (`committed`), used to drive slots.
     schedule: Schedule,
+    /// The same schedule as of the emitted prefix (`emitted`), carried in `core_state`.
+    applied_schedule: Schedule,
     dedup: Dedup,
 
     // Proposer side.
@@ -183,6 +189,9 @@ impl Replica {
             schedule: snapshot
                 .as_ref()
                 .map_or_else(|| Schedule::new(&cfg.members), |(s, _)| s.schedule.clone()),
+            applied_schedule: snapshot
+                .as_ref()
+                .map_or_else(|| Schedule::new(&cfg.members), |(s, _)| s.schedule.clone()),
             cfg,
             incarnation: last_incarnation + 1,
             now,
@@ -203,7 +212,8 @@ impl Replica {
             emitted: floor,
             peer_committed: 0,
             seen: BTreeMap::new(),
-            catch_up_sent: None,
+            catch_up: None,
+            ahead_peer: None,
             dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
             proposers: BTreeMap::new(),
             batches: BTreeMap::new(),
@@ -471,17 +481,28 @@ impl Replica {
             self.metrics.messages_rejected += 1;
             return;
         }
-        self.peer_committed = self.peer_committed.max(msg.env.commit_index);
+        if msg.env.commit_index > self.peer_committed {
+            self.peer_committed = msg.env.commit_index;
+            self.ahead_peer = Some(from);
+        }
         if self.peer_committed > self.committed {
             self.seen.entry(Slot(self.committed)).or_insert(self.now);
         }
-        // More than the slot in progress behind: fetch the decided prefix in bulk.
-        let idle = self.catch_up_sent.is_none_or(|t| t.after(self.cfg.retransmit_interval) <= self.now);
-        if msg.env.commit_index > self.committed + 1 && idle {
-            self.catch_up_sent = Some(self.now);
-            self.send(from, Body::CatchUp { from: Slot(self.committed) });
+        if msg.env.commit_index > self.committed + 1 && self.catch_up_due() {
+            self.request_catch_up(from);
         }
         self.inbox.push_back((from, msg.body));
+    }
+
+    /// Whether a bulk catch-up request may be (re)sent now.
+    fn catch_up_due(&self) -> bool {
+        self.catch_up.is_none_or(|(_, t)| t.after(self.cfg.retransmit_interval) <= self.now)
+    }
+
+    /// Fetches the decided prefix from `committed` in bulk.
+    fn request_catch_up(&mut self, peer: NodeId) {
+        self.catch_up = Some((peer, self.now));
+        self.send(peer, Body::CatchUp { from: Slot(self.committed) });
     }
 
     fn pump(&mut self) {
@@ -497,10 +518,14 @@ impl Replica {
                     Body::Decided { slot, proposal } => self.learn(slot, proposal, false),
                     Body::CatchUp { from: start } => self.on_catch_up(from, start),
                     Body::Entries { first, proposals } => {
-                        self.catch_up_sent = None;
+                        self.catch_up = None;
                         for (i, p) in proposals.into_iter().enumerate() {
                             let Some(slot) = first.0.checked_add(i as u64) else { break };
                             self.learn(Slot(slot), p, false);
+                        }
+                        // Still behind after one page: ask the same peer for the next one.
+                        if self.peer_committed > self.committed + 1 {
+                            self.request_catch_up(from);
                         }
                     }
                     Body::Forward { batch } => self.on_forward(&batch),
@@ -594,6 +619,40 @@ mod tests {
                 .prop_map(|(first, proposals)| Body::Entries { first, proposals }),
             slot.prop_map(|through| Body::Compacted { through }),
         ]
+    }
+
+    #[test]
+    fn core_state_schedule_covers_only_emitted_slots() {
+        let mut r = replica();
+        let mut out = Vec::new();
+        // Ten decisions not originated by the leader (node 0) would rotate it, but they are
+        // not durable yet, so nothing is emitted and core state must not reflect them.
+        for slot in 0..10 {
+            let env = Envelope {
+                cluster_id: [3; 16],
+                config_epoch: 0,
+                from: NodeId(1),
+                to: NodeId(0),
+                commit_index: 0,
+            };
+            let body = Body::Decided { slot: Slot(slot), proposal: proposal(1, 1, slot) };
+            r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
+            r.poll_actions(&mut out);
+        }
+        assert_eq!(r.emitted_index(), 0);
+        let fresh = Schedule::new(&[NodeId(0), NodeId(1), NodeId(2)]);
+        let state = CoreState::decode(&r.core_state(), &r.cfg.members).unwrap();
+        assert_eq!(state.schedule, fresh);
+        assert_ne!(r.schedule, fresh, "the driving schedule already saw the decided prefix");
+        let last = out.iter().rev().find_map(|a| match a {
+            Action::Persist { id, .. } => Some(*id),
+            _ => None,
+        });
+        r.handle(Timestamp(2), Input::Persisted(last.unwrap())).unwrap();
+        r.poll_actions(&mut out);
+        assert_eq!(r.emitted_index(), 10);
+        let state = CoreState::decode(&r.core_state(), &r.cfg.members).unwrap();
+        assert_eq!(state.schedule, r.schedule);
     }
 
     proptest! {

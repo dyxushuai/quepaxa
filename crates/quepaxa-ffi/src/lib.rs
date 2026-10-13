@@ -30,6 +30,8 @@ pub const QPX_OK: i32 = 0;
 pub const QPX_EMPTY: i32 = 1;
 /// The output buffer is too small; the required length was written.
 pub const QPX_BUFFER_TOO_SMALL: i32 = 2;
+/// The call had no effect: the snapshot is older than what the replica already emitted.
+pub const QPX_IGNORED: i32 = 3;
 /// A null pointer, bad `struct_size` or out-of-range index.
 pub const QPX_ERR_INVALID_ARGUMENT: i32 = -1;
 /// The configuration is invalid.
@@ -246,6 +248,7 @@ pub extern "C" fn qpx_status_str(status: i32) -> *const std::ffi::c_char {
         QPX_OK => b"ok\0",
         QPX_EMPTY => b"empty\0",
         QPX_BUFFER_TOO_SMALL => b"buffer too small\0",
+        QPX_IGNORED => b"ignored: snapshot older than the emitted prefix\0",
         QPX_ERR_INVALID_ARGUMENT => b"invalid argument\0",
         QPX_ERR_INVALID_CONFIG => b"invalid config\0",
         QPX_ERR_CORRUPT_RECORD => b"corrupt durable record\0",
@@ -535,7 +538,8 @@ pub unsafe extern "C" fn qpx_compact(
     mutate(h, |r| r.compact(Timestamp(now_ns), Slot(through), state))
 }
 
-/// Adopts a snapshot covering slots up to `through` (after installing the application state).
+/// Adopts a snapshot covering slots up to `through`; `QPX_IGNORED` if the replica already
+/// emitted past it (do not rewind the application state in that case).
 ///
 /// # Safety
 /// `h` must be a live handle; `state` must point to `len` bytes.
@@ -549,7 +553,12 @@ pub unsafe extern "C" fn qpx_install_snapshot(
 ) -> i32 {
     // SAFETY: guaranteed by the caller.
     let Some(state) = (unsafe { bytes_from(state, len) }) else { return QPX_ERR_INVALID_ARGUMENT };
-    mutate(h, |r| r.install_snapshot(Timestamp(now_ns), Slot(through), state))
+    let mut adopted = true;
+    let rc = mutate(h, |r| {
+        adopted = r.install_snapshot(Timestamp(now_ns), Slot(through), state)?;
+        Ok(())
+    });
+    if rc == QPX_OK && !adopted { QPX_IGNORED } else { rc }
 }
 
 /// Takes the next action into `out`, or returns `QPX_EMPTY`.

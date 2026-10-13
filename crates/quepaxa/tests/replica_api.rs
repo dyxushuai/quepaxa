@@ -146,6 +146,24 @@ fn invalid_configs_are_rejected() {
 }
 
 #[test]
+fn installing_a_stale_snapshot_reports_it_was_ignored() {
+    let mut r = Replica::new(config(&[0]), [], T0).unwrap();
+    let mut disk = Vec::new();
+    settle(&mut r, &mut disk);
+    let early = r.core_state(); // covers nothing yet
+    for p in [b"a", b"b"] {
+        r.propose(T0, Bytes::from_static(p)).unwrap();
+        settle(&mut r, &mut disk);
+    }
+    assert_eq!(r.emitted_index(), 2);
+    let state = r.core_state();
+    r.compact(T0, Slot(1), state.clone()).unwrap();
+    settle(&mut r, &mut disk);
+    assert_eq!(r.install_snapshot(T0, Slot(1), state), Ok(false));
+    assert_eq!(r.install_snapshot(T0, Slot(0), early), Err(Error::InvalidCoreState));
+}
+
+#[test]
 fn configs_that_would_misbehave_at_runtime_are_rejected() {
     let bad: [fn(&mut Config); 4] = [
         |c| (c.hedge_min, c.hedge_max) = (10, 5),

@@ -33,6 +33,9 @@
 // The output buffer is too small; the required length was written.
 #define QPX_BUFFER_TOO_SMALL 2
 
+// The call had no effect: the snapshot is older than what the replica already emitted.
+#define QPX_IGNORED 3
+
 // A null pointer, bad `struct_size` or out-of-range index.
 #define QPX_ERR_INVALID_ARGUMENT -1
 
@@ -272,7 +275,8 @@ int32_t qpx_compact(qpx_replica *h,
                     const uint8_t *state,
                     size_t len);
 
-// Adopts a snapshot covering slots up to `through` (after installing the application state).
+// Adopts a snapshot covering slots up to `through`; `QPX_IGNORED` if the replica already
+// emitted past it (do not rewind the application state in that case).
 //
 // # Safety
 // `h` must be a live handle; `state` must point to `len` bytes.
