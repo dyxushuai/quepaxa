@@ -172,6 +172,9 @@ fn last_error_explains_an_invalid_config() {
     let mut h = ptr::null_mut();
     assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_CONFIG);
     assert!(last_error().contains("members must be unique"), "{}", last_error());
+    // A later failure in argument checking replaces the old description.
+    assert_eq!(unsafe { qpx_poll(ptr::null_mut(), ptr::null_mut()) }, QPX_ERR_INVALID_ARGUMENT);
+    assert!(last_error().contains("invalid argument"), "{}", last_error());
 }
 
 #[test]
