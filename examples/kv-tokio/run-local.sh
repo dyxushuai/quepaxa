@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Starts a 3-replica kv-tokio cluster on loopback, runs kv-bench against it, stops it.
+# Usage: run-local.sh [rate] [secs] [netem-delay-ms]
+# With a netem delay (needs `sudo tc`), loopback traffic gets that one-way delay.
+set -euo pipefail
+rate=${1:-20000}; secs=${2:-10}; delay=${3:-0}
+root=$(cd "$(dirname "$0")/../.." && pwd)
+cargo build --release -q --manifest-path "$root/Cargo.toml" -p kv-tokio
+bin="$root/target/release"
+data=$(mktemp -d)
+members="0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102"
+cleanup() {
+  kill "${pids[@]}" 2>/dev/null || true
+  [ "$delay" != 0 ] && sudo tc qdisc del dev lo root 2>/dev/null || true
+  rm -rf "$data"
+}
+trap cleanup EXIT
+if [ "$delay" != 0 ]; then
+  sudo tc qdisc add dev lo root netem delay "${delay}ms"
+fi
+pids=()
+for i in 0 1 2; do
+  "$bin/kv-tokio" --id $i --members "$members" --client 127.0.0.1:720$i --data "$data/n$i" 2>"$data/n$i.log" &
+  pids+=($!)
+done
+sleep 1
+"$bin/kv-bench" --targets 127.0.0.1:7200,127.0.0.1:7201,127.0.0.1:7202 --rate "$rate" --secs "$secs" --conns 24
