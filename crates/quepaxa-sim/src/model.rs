@@ -42,6 +42,8 @@ pub struct ModelReport {
     pub complete: usize,
     /// Whether every schedule within the bounds was explored.
     pub exhausted: bool,
+    /// States at the depth bound; each was shown to settle under the default schedule.
+    pub depth_limited: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -305,8 +307,7 @@ impl State {
     }
 }
 
-/// Explores the bounded schedule space; `Err` carries the violating schedule.
-pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
+fn initial(cfg: &ModelConfig) -> Result<State, String> {
     let mut nodes = Vec::new();
     for i in 0..cfg.nodes {
         let replica = Replica::new(config(cfg.nodes, i, 0), [], Timestamp(0)).map_err(|e| e.to_string())?;
@@ -339,6 +340,12 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
         init.proposals.push(payload);
         init.drain(i)?;
     }
+    Ok(init)
+}
+
+/// Explores the bounded schedule space; `Err` carries the violating schedule.
+pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
+    let init = initial(cfg)?;
     let mut report = ModelReport { exhausted: true, ..ModelReport::default() };
     let mut visited = HashSet::new();
     let mut stack: Vec<(State, Vec<Step>)> = vec![(init, Vec::new())];
@@ -355,7 +362,14 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
             report.complete += 1;
         }
         if state.depth >= cfg.max_depth {
-            report.exhausted = false;
+            // Liveness under the fair default schedule: a long path must still settle.
+            if let Err(e) = settle(state.clone(), SETTLE_STEPS) {
+                if std::env::var("QPX_MODEL_REPLAY").is_ok() {
+                    replay(cfg, &path);
+                }
+                return Err(format!("{e}\nschedule ({} steps): {path:?}", path.len()));
+            }
+            report.depth_limited += 1;
             continue;
         }
         for (step, deviation) in state.steps() {
@@ -372,4 +386,43 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
         }
     }
     Ok(report)
+}
+
+/// Default steps a depth-limited state may take to settle. QuePaxa terminates with
+/// probability 1 (each leaderless round decides with probability > 1/2 under a
+/// content-oblivious schedule), so long tails are expected but must end.
+const SETTLE_STEPS: usize = 5_000;
+
+/// Follows the default schedule until nothing is pending (no events, no timers).
+fn settle(mut st: State, max: usize) -> Result<(), String> {
+    for _ in 0..max {
+        if st.events.is_empty() && st.nodes.iter().all(|n| n.replica.next_deadline().is_none()) {
+            return Ok(());
+        }
+        let Some((step, _)) = st.steps().into_iter().next() else { return Ok(()) };
+        st.apply(step)?;
+    }
+    Err(format!("liveness: still busy after {max} default steps (log {} slots)", st.log.len()))
+}
+
+/// Debug aid (`QPX_MODEL_REPLAY=1`): re-runs `path`, printing what every step produced.
+fn replay(cfg: &ModelConfig, path: &[Step]) {
+    let mut st = initial(cfg).expect("initial state");
+    for (k, step) in path.iter().enumerate() {
+        let before = st.events.len();
+        let _ = st.apply(*step);
+        let new: Vec<String> = st
+            .events
+            .iter()
+            .skip(before.saturating_sub(1))
+            .map(|e| match e {
+                Event::Deliver { to, bytes } => format!("msg->{to} k{}", bytes.get(3).copied().unwrap_or(0)),
+                Event::Persisted { node, records, .. } => {
+                    let kinds: Vec<u8> = records.iter().map(|r| r.get(3).copied().unwrap_or(0)).collect();
+                    format!("persist@{node} rec{kinds:?}")
+                }
+            })
+            .collect();
+        eprintln!("{k:3} {step:?} -> {new:?}");
+    }
 }

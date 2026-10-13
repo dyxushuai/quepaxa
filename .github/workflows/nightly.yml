@@ -1,0 +1,165 @@
+name: Nightly assurance
+
+on:
+  schedule:
+    - cron: "17 3 * * *" # nightly
+    - cron: "41 4 * * 0" # weekly (Sunday): adds mutation testing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - codec::tests::decode_never_panics_on_arbitrary_input
+          - codec::tests::decode_never_panics_on_mutated_valid_messages
+          - batch::tests::decode_never_panics
+          - durable::tests::decode_never_panics
+          - core_state::tests::decode_never_panics
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-bolero
+      - name: Fuzz for 20 minutes (libFuzzer + ASan)
+        run: cargo bolero test -p quepaxa '${{ matrix.target }}' -T 20min
+      - name: Keep the corpus and any crash
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-${{ strategy.job-index }}
+          path: crates/quepaxa/src/**/__fuzz__/
+          if-no-files-found: ignore
+
+  simulation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: 100k seeds per simulator scenario
+        env:
+          QPX_SIM_SEEDS: "100000"
+        run: cargo nextest run --release -p quepaxa-sim --test replica_sim --no-fail-fast
+      - name: Model checking with three deviations, exhaustively
+        env:
+          QPX_MODEL_DEVIATIONS: "3"
+          QPX_MODEL_STATES: "200000000"
+        run: cargo nextest run --release -p quepaxa-sim --test model_check --no-fail-fast
+      - name: Deep property tests
+        env:
+          PROPTEST_CASES: "100000"
+        run: cargo nextest run --release -p quepaxa --no-fail-fast
+
+  bench:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Restore the previous baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ github.run_id }}
+          restore-keys: criterion-baseline-
+      - name: Compare against the previous baseline (fail on a >10% regression)
+        shell: bash
+        run: |
+          set -o pipefail
+          if [ -d target/criterion ] && ls target/criterion/*/*/nightly >/dev/null 2>&1; then
+            cargo bench -p quepaxa --bench replica -- --baseline nightly --noise-threshold 0.10 | tee bench.txt
+            if grep -q "Performance has regressed" bench.txt; then
+              echo "::error::benchmark regression above 10% against the previous nightly"
+              exit 1
+            fi
+          else
+            echo "no previous baseline; recording the first one"
+          fi
+      - name: Record tonight's baseline
+        if: success()
+        run: cargo bench -p quepaxa --bench replica -- --save-baseline nightly
+      - uses: actions/cache/save@v4
+        if: success()
+        with:
+          path: target/criterion
+          key: criterion-baseline-${{ github.run_id }}
+
+  coverage:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov,cargo-nextest
+      - name: Coverage (reported, not gated)
+        run: |
+          cargo llvm-cov nextest --workspace --lcov --output-path lcov.info
+          cargo llvm-cov report --summary-only | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: lcov.info
+
+  mutants:
+    if: github.event.schedule == '41 4 * * 0' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants,cargo-nextest
+      - name: Mutation testing of the core (shard ${{ matrix.shard }}/4)
+        run: |
+          # Exit 0: all caught, 2: some missed, 3: some timed out — findings, reported below.
+          # Anything else (baseline failure, usage error, crash) means no valid run.
+          status=0
+          cargo mutants -p quepaxa --test-tool nextest --shard ${{ matrix.shard }}/4 --no-shuffle || status=$?
+          case $status in 0|2|3) ;; *) echo "::error::cargo-mutants failed (exit $status)"; exit 1 ;; esac
+          test -f mutants.out/outcomes.json
+          { echo "### Mutants shard ${{ matrix.shard }}"; for f in caught missed timeout unviable; do
+              echo "- $f: $(wc -l < mutants.out/$f.txt 2>/dev/null || echo 0)"; done; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutants-${{ matrix.shard }}
+          path: mutants.out/
+
+  report:
+    needs: [fuzz, simulation, bench, coverage, mutants]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue for the failed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue create -R "$GITHUB_REPOSITORY" --label needs-triage \
+            --title "Nightly assurance failed ($(date -u +%F))" \
+            --body "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Failing seeds, schedules and fuzz inputs are in the job logs and artifacts (simulator and model-checker failures print the seed or schedule that reproduces them)."
