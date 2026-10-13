@@ -5,13 +5,14 @@
 //! mid-append) is truncated on load, as any write-ahead log does; record integrity beyond
 //! framing is checked by the replica's own CRC.
 
-use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+
+use crate::kv::Kv;
 
 /// The application state persisted with a snapshot.
 pub struct Snapshot {
@@ -20,7 +21,7 @@ pub struct Snapshot {
     /// `Replica::core_state` taken right after applying `through`.
     pub core: Bytes,
     /// The key-value map.
-    pub kv: BTreeMap<String, String>,
+    pub kv: Kv,
 }
 
 pub struct Disk {
@@ -153,14 +154,14 @@ impl Disk {
 }
 
 /// `[through u64][core len u32][core][count u32]([klen u32][k][vlen u32][v])*`.
-pub fn encode_snapshot(through: u64, core: &[u8], kv: &BTreeMap<String, String>) -> Vec<u8> {
+pub fn encode_snapshot(through: u64, core: &[u8], kv: &Kv) -> Vec<u8> {
     let size = 16 + core.len() + kv.iter().map(|(k, v)| 8 + k.len() + v.len()).sum::<usize>();
     let mut b = Vec::with_capacity(size);
     b.extend_from_slice(&through.to_le_bytes());
     b.extend_from_slice(&(core.len() as u32).to_le_bytes());
     b.extend_from_slice(core);
     b.extend_from_slice(&(kv.len() as u32).to_le_bytes());
-    for (k, v) in kv {
+    for (k, v) in kv.iter() {
         for part in [k.as_bytes(), v.as_bytes()] {
             b.extend_from_slice(&(part.len() as u32).to_le_bytes());
             b.extend_from_slice(part);
@@ -180,7 +181,7 @@ pub fn decode_snapshot(b: &Bytes) -> Option<Snapshot> {
     let core_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
     let core = Bytes::copy_from_slice(take(core_len)?);
     let count = u32::from_le_bytes(take(4)?.try_into().ok()?);
-    let mut kv = BTreeMap::new();
+    let mut kv = Kv::default();
     for _ in 0..count {
         let mut part = || {
             let len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
@@ -231,7 +232,7 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips() {
-        let kv = BTreeMap::from([("k".to_owned(), "v".to_owned())]);
+        let kv = Kv::from_iter([("k".to_owned(), "v".to_owned())]);
         let s = Snapshot { through: 7, core: Bytes::from_static(b"core"), kv };
         let d = decode_snapshot(&Bytes::from(encode_snapshot(s.through, &s.core, &s.kv))).unwrap();
         assert_eq!((d.through, d.core, d.kv), (s.through, s.core, s.kv));
