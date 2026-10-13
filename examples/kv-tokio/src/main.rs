@@ -78,8 +78,12 @@ async fn read_frame(s: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Bytes> 
     if len > MAX_FRAME {
         return Err(std::io::Error::other("frame too large"));
     }
-    let mut buf = vec![0; len];
-    s.read_exact(&mut buf).await?;
+    // Grows with the bytes that arrive, not with the advertised length.
+    let mut buf = Vec::new();
+    s.take(len as u64).read_to_end(&mut buf).await?;
+    if buf.len() != len {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
     Ok(Bytes::from(buf))
 }
 

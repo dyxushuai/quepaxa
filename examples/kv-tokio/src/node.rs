@@ -103,7 +103,8 @@ pub struct Node {
     applied: u64,
     snapshot_every: u64,
     last_snapshot: u64,
-    own_snapshot: Option<Bytes>,
+    /// The newest snapshot saved here (its `through` and encoding), served to peers.
+    own_snapshot: Option<(u64, Bytes)>,
     /// A snapshot is being written in the background.
     snapshotting: bool,
     /// For background work to report back to the event loop.
@@ -167,7 +168,7 @@ impl Node {
         self.replica
             .install_snapshot(now, Slot(snap.through), snap.core)
             .map_err(|e| format!("snapshot.bin does not match the log: {e}"))?;
-        self.own_snapshot = Some(bytes);
+        self.own_snapshot = Some((snap.through, bytes));
         self.drain();
         Ok(())
     }
@@ -209,7 +210,7 @@ impl Node {
                 let _ = self.replica.handle(now, Input::Message(b));
             }
             Ev::Peer { from, frame: PeerFrame::SnapshotRequest } => {
-                if let Some(s) = self.own_snapshot.clone() {
+                if let Some((_, s)) = self.own_snapshot.clone() {
                     self.send(from, PeerFrame::Snapshot(s));
                 }
             }
@@ -224,8 +225,10 @@ impl Node {
                 match saved {
                     // The application snapshot is durable: the log below it may go.
                     Ok(true) => {
-                        if self.replica.compact(now, Slot(through), core).is_ok() {
-                            self.own_snapshot = Some(bytes);
+                        // A newer (peer) snapshot may have been saved after this one.
+                        let newest = self.own_snapshot.as_ref().is_none_or(|(t, _)| *t < through);
+                        if self.replica.compact(now, Slot(through), core).is_ok() && newest {
+                            self.own_snapshot = Some((through, bytes));
                         }
                     }
                     Ok(false) => {} // a newer (peer) snapshot was saved meanwhile
@@ -291,7 +294,7 @@ impl Node {
             }
             return;
         }
-        self.own_snapshot = Some(bytes);
+        self.own_snapshot = Some((through, bytes));
     }
 
     /// Takes every pending action; persists wait for `flush`.
