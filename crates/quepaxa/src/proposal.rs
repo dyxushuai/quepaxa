@@ -52,11 +52,7 @@ pub(crate) mod tests {
     pub fn prop(priority: u64, origin: u32, seq: u64) -> Proposal {
         Proposal {
             priority,
-            key: ValueKey {
-                origin: NodeId(origin),
-                incarnation: 1,
-                seq,
-            },
+            key: ValueKey { origin: NodeId(origin), incarnation: 1, seq },
             value: Bytes::from(alloc::format!("v{origin}.{seq}")),
         }
     }

@@ -1,0 +1,101 @@
+//! Commit-time deduplication: an entry may be decided twice (forwarded to the leader and
+//! later hedged by its origin), but is applied once. The state evolves only with the
+//! decided log, so every replica filters identically.
+
+use alloc::collections::{BTreeMap, BTreeSet};
+
+use crate::types::{NodeId, ProposalId};
+
+/// Incarnations remembered per origin; entries from older ones are treated as seen.
+const INCARNATIONS_KEPT: usize = 4;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Window {
+    /// Every id below this was seen.
+    below: u64,
+    /// Seen ids at or above `below`.
+    above: BTreeSet<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Dedup {
+    origins: BTreeMap<NodeId, BTreeMap<u64, Window>>,
+}
+
+impl Dedup {
+    /// Whether the entry was already seen (without recording it).
+    pub fn contains(&self, origin: NodeId, incarnation: u64, ProposalId(id): ProposalId) -> bool {
+        let Some(incs) = self.origins.get(&origin) else { return false };
+        match incs.get(&incarnation) {
+            Some(w) => id < w.below || w.above.contains(&id),
+            None => incs.len() >= INCARNATIONS_KEPT && incs.keys().next().is_some_and(|&o| incarnation < o),
+        }
+    }
+
+    /// Records the entry; true the first time it is seen.
+    pub fn first_time(&mut self, origin: NodeId, incarnation: u64, ProposalId(id): ProposalId) -> bool {
+        let incs = self.origins.entry(origin).or_default();
+        if incs.len() >= INCARNATIONS_KEPT && !incs.contains_key(&incarnation) {
+            if incs.keys().next().is_some_and(|&oldest| incarnation < oldest) {
+                return false;
+            }
+            incs.pop_first();
+        }
+        let w = incs.entry(incarnation).or_default();
+        if id < w.below || !w.above.insert(id) {
+            return false;
+        }
+        while w.above.remove(&w.below) {
+            w.below += 1;
+        }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seen(d: &mut Dedup, inc: u64, id: u64) -> bool {
+        !d.first_time(NodeId(1), inc, ProposalId(id))
+    }
+
+    #[test]
+    fn second_occurrence_is_filtered_in_any_order() {
+        let mut d = Dedup::default();
+        assert!(!seen(&mut d, 1, 2));
+        assert!(!seen(&mut d, 1, 0));
+        assert!(seen(&mut d, 1, 2));
+        assert!(seen(&mut d, 1, 0));
+        assert!(!seen(&mut d, 1, 1));
+        assert!(seen(&mut d, 1, 1));
+    }
+
+    #[test]
+    fn contiguous_ids_compact_into_the_watermark() {
+        let mut d = Dedup::default();
+        for id in 0..1000 {
+            d.first_time(NodeId(1), 1, ProposalId(id));
+        }
+        let w = &d.origins[&NodeId(1)][&1];
+        assert_eq!((w.below, w.above.len()), (1000, 0));
+    }
+
+    #[test]
+    fn incarnations_and_origins_are_independent() {
+        let mut d = Dedup::default();
+        assert!(!seen(&mut d, 1, 0));
+        assert!(!seen(&mut d, 2, 0));
+        assert!(d.first_time(NodeId(2), 1, ProposalId(0)));
+    }
+
+    #[test]
+    fn entries_from_forgotten_incarnations_count_as_seen() {
+        let mut d = Dedup::default();
+        for inc in 1..=5 {
+            d.first_time(NodeId(1), inc, ProposalId(0));
+        }
+        assert!(seen(&mut d, 1, 7));
+        assert!(!seen(&mut d, 6, 0));
+    }
+}

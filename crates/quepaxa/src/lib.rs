@@ -53,12 +53,14 @@ mod api;
 mod batch;
 mod codec;
 mod crc;
+mod dedup;
 mod durable;
 mod proposal;
 mod proposer;
 mod recorder;
 mod replica;
 mod rng;
+mod schedule;
 #[cfg(test)]
 mod slot_sim;
 mod types;

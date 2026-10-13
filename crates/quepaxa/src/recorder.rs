@@ -34,11 +34,7 @@ impl Register {
             self.agg = Some(v);
             true
         } else if s > self.step {
-            self.prev_agg = if s == self.step + 1 {
-                self.agg.take()
-            } else {
-                None
-            };
+            self.prev_agg = if s == self.step + 1 { self.agg.take() } else { None };
             self.step = s;
             self.first = Some(v.clone());
             self.agg = Some(v);
@@ -49,11 +45,7 @@ impl Register {
     }
 
     pub fn summary(&self) -> Summary {
-        Summary {
-            step: self.step,
-            first: self.first.clone(),
-            prev_agg: self.prev_agg.clone(),
-        }
+        Summary { step: self.step, first: self.first.clone(), prev_agg: self.prev_agg.clone() }
     }
 }
 
@@ -64,11 +56,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn summary(step: Step, first: Option<Proposal>, prev_agg: Option<Proposal>) -> Summary {
-        Summary {
-            step,
-            first,
-            prev_agg,
-        }
+        Summary { step, first, prev_agg }
     }
 
     #[test]
@@ -103,10 +91,7 @@ mod tests {
         r.record(4, prop(3, 1, 0));
         r.record(4, prop(7, 2, 0));
         r.record(5, prop(1, 3, 0));
-        assert_eq!(
-            r.summary(),
-            summary(5, Some(prop(1, 3, 0)), Some(prop(7, 2, 0)))
-        );
+        assert_eq!(r.summary(), summary(5, Some(prop(1, 3, 0)), Some(prop(7, 2, 0))));
     }
 
     #[test]
@@ -125,10 +110,7 @@ mod tests {
         let before = r.clone();
         assert!(!r.record(4, prop(9, 9, 0)));
         assert_eq!(r, before);
-        assert_eq!(
-            r.summary(),
-            summary(5, Some(prop(1, 3, 0)), Some(prop(7, 2, 0)))
-        );
+        assert_eq!(r.summary(), summary(5, Some(prop(1, 3, 0)), Some(prop(7, 2, 0))));
     }
 
     fn arb_input() -> impl Strategy<Value = (Step, Proposal)> {

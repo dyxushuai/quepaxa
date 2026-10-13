@@ -92,13 +92,8 @@ impl Record {
                 };
                 Record::Recorder { slot, reg }
             }
-            KIND_RESERVATION => Record::Reservation {
-                through: Slot(r.u64()?),
-            },
-            KIND_DECIDED => Record::Decided {
-                slot: Slot(r.u64()?),
-                proposal: r.proposal()?,
-            },
+            KIND_RESERVATION => Record::Reservation { through: Slot(r.u64()?) },
+            KIND_DECIDED => Record::Decided { slot: Slot(r.u64()?), proposal: r.proposal()? },
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -124,10 +119,7 @@ mod tests {
                 },
             },
             Record::Reservation { through: Slot(40) },
-            Record::Decided {
-                slot: Slot(9),
-                proposal: prop(8, 2, 1),
-            },
+            Record::Decided { slot: Slot(9), proposal: prop(8, 2, 1) },
         ]
     }
 
@@ -154,10 +146,7 @@ mod tests {
             for i in 0..bytes.len() * 8 {
                 let mut v = bytes.clone();
                 v[i / 8] ^= 1 << (i % 8);
-                assert!(
-                    Record::decode(&Bytes::from(v)).is_err(),
-                    "bit {i} of {rec:?}"
-                );
+                assert!(Record::decode(&Bytes::from(v)).is_err(), "bit {i} of {rec:?}");
             }
         }
     }

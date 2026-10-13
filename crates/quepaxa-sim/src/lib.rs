@@ -49,19 +49,15 @@ pub struct SimConfig {
     pub in_flight_slots: u32,
     /// A replica kept down for the whole fault phase (it starts at heal).
     pub absent: Option<usize>,
+    /// Crash this replica at this virtual time and keep it down until heal.
+    pub kill: Option<(usize, u64)>,
 }
 
 impl SimConfig {
     /// Long fsyncs, frequent crashes and heavy loss: maximizes the window in which a reply
     /// could escape before its write is durable.
     pub fn durability_stress(nodes: usize, seed: u64) -> Self {
-        Self {
-            drop: 250,
-            crash: 25,
-            max_persist_ms: 40,
-            in_flight_slots: 2,
-            ..Self::hostile(nodes, seed)
-        }
+        Self { drop: 250, crash: 25, max_persist_ms: 40, in_flight_slots: 2, ..Self::hostile(nodes, seed) }
     }
 
     /// A hostile default: lossy, reordering, partitioning, crashing.
@@ -80,6 +76,7 @@ impl SimConfig {
             max_persist_ms: 5,
             in_flight_slots: 4,
             absent: None,
+            kill: None,
         }
     }
 }
@@ -99,27 +96,17 @@ pub struct Report {
     pub trace_hash: u64,
     /// The last lines of the trace, for debugging.
     pub trace_tail: String,
+    /// Longest virtual time between two new agreed slots during the fault phase.
+    pub max_commit_gap_ms: u64,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Event {
-    Deliver {
-        to: usize,
-        bytes: Vec<u8>,
-    },
-    PersistDone {
-        node: usize,
-        generation: u64,
-        id: u64,
-    },
-    Timer {
-        node: usize,
-        generation: u64,
-        at: u64,
-    },
-    Restart {
-        node: usize,
-    },
+    Deliver { to: usize, bytes: Vec<u8> },
+    PersistDone { node: usize, generation: u64, id: u64 },
+    Timer { node: usize, generation: u64, at: u64 },
+    Restart { node: usize },
+    Kill { node: usize },
     Tick,
 }
 
@@ -161,6 +148,7 @@ pub struct Sim {
     committed_payloads: BTreeSet<Bytes>,
     report: Report,
     trace: String,
+    last_new_slot_at: u64,
 }
 
 fn cluster_id() -> [u8; 16] {
@@ -199,7 +187,11 @@ impl Sim {
             committed_payloads: BTreeSet::new(),
             report: Report::default(),
             trace: String::new(),
+            last_new_slot_at: 0,
         };
+        if let Some((node, at)) = sim.cfg.kill {
+            sim.push(at * MS, Event::Kill { node });
+        }
         for i in 0..sim.cfg.nodes {
             if sim.cfg.absent != Some(i) {
                 sim.start(i);
@@ -240,12 +232,7 @@ impl Sim {
             .trace
             .lines()
             .rev()
-            .take(
-                std::env::var("QPX_TAIL")
-                    .ok()
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(40),
-            )
+            .take(std::env::var("QPX_TAIL").ok().and_then(|s| s.parse().ok()).unwrap_or(40))
             .collect();
         let nodes: Vec<String> = self
             .nodes
@@ -292,13 +279,9 @@ impl Sim {
 
     fn converged(&self) -> bool {
         let target = self.log.len() as u64;
-        self.queue
-            .iter()
-            .all(|std::cmp::Reverse((_, _, e))| !matches!(e, Event::Restart { .. }))
+        self.queue.iter().all(|std::cmp::Reverse((_, _, e))| !matches!(e, Event::Restart { .. }))
             && self.nodes.iter().all(|n| {
-                n.replica
-                    .as_ref()
-                    .is_some_and(|r| r.commit_index() == target)
+                n.replica.as_ref().is_some_and(|r| r.commit_index() == target)
                     && n.next_commit == target
                     && n.outstanding.is_empty()
             })
@@ -312,7 +295,7 @@ impl Sim {
         }
         let mut cfg = Config::new(cluster_id(), NodeId(i as u32), members, seed);
         cfg.retransmit_interval = 20 * MS;
-        cfg.stall_timeout = 60 * MS;
+        cfg.hedge_max = 400 * MS;
         cfg.max_in_flight_slots = self.cfg.in_flight_slots;
         cfg.max_batch_bytes = 4096;
         cfg.max_message_bytes = 1 << 20;
@@ -322,8 +305,7 @@ impl Sim {
     fn start(&mut self, i: usize) {
         let cfg = self.config(i);
         let records = self.nodes[i].durable.clone();
-        let replica =
-            Replica::new(cfg, records, Timestamp(self.now)).expect("durable records must recover");
+        let replica = Replica::new(cfg, records, Timestamp(self.now)).expect("durable records must recover");
         let node = &mut self.nodes[i];
         node.replica = Some(replica);
         node.generation += 1;
@@ -344,9 +326,7 @@ impl Sim {
         let pending = std::mem::take(&mut node.pending);
         if let Some(first) = pending.into_iter().next() {
             let keep = self.rng.below(first.records.len() as u64 + 1) as usize;
-            self.nodes[i]
-                .durable
-                .extend(first.records.into_iter().take(keep));
+            self.nodes[i].durable.extend(first.records.into_iter().take(keep));
         }
         let node = &mut self.nodes[i];
         node.generation += 1;
@@ -373,10 +353,12 @@ impl Sim {
                 }
             }
             Event::Restart { node } => {
-                if self.nodes[node].replica.is_none() {
+                let killed = self.faults_on && self.cfg.kill.is_some_and(|(k, _)| k == node);
+                if self.nodes[node].replica.is_none() && !killed {
                     self.start(node);
                 }
             }
+            Event::Kill { node } => self.crash(node),
             Event::Deliver { to, bytes } => {
                 let Some(r) = self.nodes[to].replica.as_mut() else {
                     return Ok(());
@@ -385,43 +367,29 @@ impl Sim {
                     .map_err(|e| e.to_string())?;
                 self.drain(to);
             }
-            Event::PersistDone {
-                node,
-                generation,
-                id,
-            } => {
+            Event::PersistDone { node, generation, id } => {
                 if self.nodes[node].generation != generation {
                     return Ok(());
                 }
                 let n = &mut self.nodes[node];
-                let pos = n
-                    .pending
-                    .iter()
-                    .position(|p| p.id == id)
-                    .expect("persist completes once");
+                let pos = n.pending.iter().position(|p| p.id == id).expect("persist completes once");
                 let p = n.pending.remove(pos);
                 n.durable.extend(p.records);
                 for out in p.then {
                     self.net_send(node, out);
                 }
                 let r = self.nodes[node].replica.as_mut().expect("live generation");
-                r.handle(Timestamp(self.now), Input::Persisted(PersistId(id)))
-                    .map_err(|e| e.to_string())?;
+                r.handle(Timestamp(self.now), Input::Persisted(PersistId(id))).map_err(|e| e.to_string())?;
                 self.drain(node);
             }
-            Event::Timer {
-                node,
-                generation,
-                at,
-            } => {
+            Event::Timer { node, generation, at } => {
                 let n = &mut self.nodes[node];
                 if n.generation != generation || n.timer_at != Some(at) {
                     return Ok(());
                 }
                 n.timer_at = None;
                 let r = n.replica.as_mut().expect("live generation");
-                r.handle_timeout(Timestamp(self.now))
-                    .map_err(|e| e.to_string())?;
+                r.handle_timeout(Timestamp(self.now)).map_err(|e| e.to_string())?;
                 self.drain(node);
             }
         }
@@ -473,20 +441,10 @@ impl Sim {
         {
             return;
         }
-        let copies = if self.faults_on && self.chance(self.cfg.dup) {
-            2
-        } else {
-            1
-        };
+        let copies = if self.faults_on && self.chance(self.cfg.dup) { 2 } else { 1 };
         for _ in 0..copies {
             let at = self.now + 1 + self.rng.below(self.cfg.max_latency_ms * MS);
-            self.push(
-                at,
-                Event::Deliver {
-                    to,
-                    bytes: out.bytes.to_vec(),
-                },
-            );
+            self.push(at, Event::Deliver { to, bytes: out.bytes.to_vec() });
         }
     }
 
@@ -506,14 +464,7 @@ impl Sim {
             if n.timer_at != Some(at) {
                 n.timer_at = Some(at);
                 let generation = n.generation;
-                self.push(
-                    at,
-                    Event::Timer {
-                        node: i,
-                        generation,
-                        at,
-                    },
-                );
+                self.push(at, Event::Timer { node: i, generation, at });
             }
         }
     }
@@ -525,8 +476,7 @@ impl Sim {
                 // Group commit: writes issued while an fsync runs share the next one.
                 let lat = 1 + self.rng.below(self.cfg.max_persist_ms * MS);
                 let n = &mut self.nodes[i];
-                if n.disk_next_group.is_some_and(|g| g <= self.now) || self.now >= n.disk_busy_until
-                {
+                if n.disk_next_group.is_some_and(|g| g <= self.now) || self.now >= n.disk_busy_until {
                     n.disk_busy_until = n.disk_busy_until.max(n.disk_next_group.unwrap_or(0));
                     n.disk_next_group = None;
                 }
@@ -536,20 +486,9 @@ impl Sim {
                 } else {
                     *n.disk_next_group.get_or_insert(n.disk_busy_until + lat)
                 };
-                n.pending.push(PendingPersist {
-                    id: id.0,
-                    records,
-                    then,
-                });
+                n.pending.push(PendingPersist { id: id.0, records, then });
                 let generation = n.generation;
-                self.push(
-                    done,
-                    Event::PersistDone {
-                        node: i,
-                        generation,
-                        id: id.0,
-                    },
-                );
+                self.push(done, Event::PersistDone { node: i, generation, id: id.0 });
             }
             Action::Commit { slot, entries } => self.on_commit(i, slot, entries),
             Action::Committed { id, slot } => {
@@ -557,16 +496,12 @@ impl Sim {
                 let payload = n.incarnation_payloads.get(&id).cloned();
                 n.outstanding.remove(&id);
                 let in_log = payload.is_some_and(|p| {
-                    self.log
-                        .get(&slot.0)
-                        .is_some_and(|es| es.iter().any(|e| e.payload == p))
+                    self.log.get(&slot.0).is_some_and(|es| es.iter().any(|e| e.payload == p))
                 });
                 assert!(
                     in_log,
                     "{}",
-                    self.fail(&format!(
-                        "n{i} Committed {id:?} in {slot:?} but not in the log"
-                    ))
+                    self.fail(&format!("n{i} Committed {id:?} in {slot:?} but not in the log"))
                 );
             }
             Action::Dropped { id, .. } => {
@@ -578,35 +513,17 @@ impl Sim {
 
     fn on_commit(&mut self, i: usize, slot: Slot, entries: Vec<Entry>) {
         let expected = self.nodes[i].next_commit;
-        assert_eq!(
-            slot.0,
-            expected,
-            "{}",
-            self.fail(&format!("n{i} commit out of order"))
-        );
+        assert_eq!(slot.0, expected, "{}", self.fail(&format!("n{i} commit out of order")));
         let n = &mut self.nodes[i];
         n.next_commit += 1;
-        let _ = writeln!(
-            self.trace,
-            "{} n{i} commit {} ({} entries)",
-            self.now,
-            slot.0,
-            entries.len()
-        );
+        let _ = writeln!(self.trace, "{} n{i} commit {} ({} entries)", self.now, slot.0, entries.len());
         match self.log.get(&slot.0) {
-            Some(agreed) => assert_eq!(
-                agreed,
-                &entries,
-                "{}",
-                self.fail(&format!("agreement broken at slot {}", slot.0))
-            ),
+            Some(agreed) => {
+                assert_eq!(agreed, &entries, "{}", self.fail(&format!("agreement broken at slot {}", slot.0)))
+            }
             None => {
                 for e in &entries {
-                    assert!(
-                        self.proposed.contains(&e.payload),
-                        "{}",
-                        self.fail("validity: unknown payload")
-                    );
+                    assert!(self.proposed.contains(&e.payload), "{}", self.fail("validity: unknown payload"));
                     assert!(
                         self.committed_payloads.insert(e.payload.clone()),
                         "{}",
@@ -614,6 +531,11 @@ impl Sim {
                     );
                 }
                 self.log.insert(slot.0, entries);
+                if self.faults_on {
+                    let gap = (self.now - self.last_new_slot_at) / MS;
+                    self.report.max_commit_gap_ms = self.report.max_commit_gap_ms.max(gap);
+                }
+                self.last_new_slot_at = self.now;
             }
         }
     }
@@ -625,7 +547,5 @@ impl Sim {
 }
 
 fn fnv(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| {
-        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
-    })
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }

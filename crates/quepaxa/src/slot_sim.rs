@@ -14,11 +14,7 @@ use crate::recorder::Register;
 use crate::rng::ChaCha20;
 use crate::types::{NodeId, Slot, Step};
 
-const CTX: WireCtx = WireCtx {
-    cluster_id: [1; 16],
-    config_epoch: 0,
-    max_message_bytes: 1 << 16,
-};
+const CTX: WireCtx = WireCtx { cluster_id: [1; 16], config_epoch: 0, max_message_bytes: 1 << 16 };
 const SLOT: Slot = Slot(0);
 
 #[derive(Clone, Copy, Debug)]
@@ -51,25 +47,16 @@ fn ids(n: usize) -> Vec<NodeId> {
 }
 
 fn value(origin: usize) -> Proposal {
-    let key = ValueKey {
-        origin: NodeId(origin as u32),
-        incarnation: 1,
-        seq: 0,
-    };
-    Proposal {
-        priority: 0,
-        key,
-        value: Bytes::from(format!("value-{origin}")),
-    }
+    let key = ValueKey { origin: NodeId(origin as u32), incarnation: 1, seq: 0 };
+    Proposal { priority: 0, key, value: Bytes::from(format!("value-{origin}")) }
 }
 
 impl Sim {
     /// `n` replicas; the first `k` run proposers, node 0 being the leader.
     pub fn new(seed: [u8; 32], n: usize, k: usize, faults: Faults) -> Self {
         let mut rng = ChaCha20::new(seed);
-        let props: BTreeMap<usize, SlotProposer> = (0..k)
-            .map(|i| (i, SlotProposer::new(ids(n), i == 0, value(i), &mut rng)))
-            .collect();
+        let props: BTreeMap<usize, SlotProposer> =
+            (0..k).map(|i| (i, SlotProposer::new(ids(n), i == 0, value(i), &mut rng))).collect();
         let inputs = (0..k).map(|i| value(i).key).collect();
         let mut sim = Self {
             rng,
@@ -110,11 +97,7 @@ impl Sim {
         if self.chance(self.faults.drop) {
             return;
         }
-        let bytes = Message {
-            env: Self::env(from, to),
-            body,
-        }
-        .encode();
+        let bytes = Message { env: Self::env(from, to), body }.encode();
         if self.chance(self.faults.dup) {
             self.net.push(bytes.clone());
         }
@@ -129,15 +112,7 @@ impl Sim {
         let step = p.step();
         let reqs: Vec<(NodeId, Proposal)> = p.requests().map(|(j, q)| (j, q.clone())).collect();
         for (j, proposal) in reqs {
-            self.send(
-                i,
-                j.0 as usize,
-                Body::RecordRequest {
-                    slot: SLOT,
-                    step,
-                    proposal,
-                },
-            );
+            self.send(i, j.0 as usize, Body::RecordRequest { slot: SLOT, step, proposal });
         }
     }
 
@@ -194,22 +169,10 @@ impl Sim {
                 self.send(
                     to,
                     from,
-                    Body::RecordReply {
-                        slot: SLOT,
-                        req_step: step,
-                        step: s.step,
-                        first,
-                        prev_agg,
-                    },
+                    Body::RecordReply { slot: SLOT, req_step: step, step: s.step, first, prev_agg },
                 );
             }
-            Body::RecordReply {
-                req_step,
-                step,
-                first,
-                prev_agg,
-                ..
-            } => {
+            Body::RecordReply { req_step, step, first, prev_agg, .. } => {
                 let Some(p) = self.props.get_mut(&to) else {
                     return;
                 };
@@ -229,12 +192,7 @@ impl Sim {
                 let step_before = p.step();
                 match p.on_reply(
                     NodeId(from as u32),
-                    Reply {
-                        req_step,
-                        step,
-                        first,
-                        prev_agg,
-                    },
+                    Reply { req_step, step, first, prev_agg },
                     &mut self.rng,
                 ) {
                     Progress::Waiting => {}
@@ -256,24 +214,14 @@ impl Sim {
         let decided: Vec<&(Proposal, Step)> = self.decisions.values().collect();
         if let Some((first, _)) = decided.first() {
             // G1 agreement and G2 validity.
-            assert!(
-                decided.iter().all(|(v, _)| v.key == first.key),
-                "G1 violated\n{}",
-                self.trace
-            );
-            assert!(
-                self.inputs.contains(&first.key),
-                "G2 violated\n{}",
-                self.trace
-            );
+            assert!(decided.iter().all(|(v, _)| v.key == first.key), "G1 violated\n{}", self.trace);
+            assert!(self.inputs.contains(&first.key), "G2 violated\n{}", self.trace);
             // G3: once decided in round r, recorder state from round r+1 on carries v.
             let r = decided.iter().map(|(_, s)| s / 4).min().unwrap_or(1);
             // `prev_agg` holds the previous step's aggregate, so it is bound one step later.
             for reg in &self.regs {
                 let locked = 4 * (r + 1);
-                let cur = [&reg.first, &reg.agg]
-                    .into_iter()
-                    .filter(|_| reg.step >= locked);
+                let cur = [&reg.first, &reg.agg].into_iter().filter(|_| reg.step >= locked);
                 let prev = [&reg.prev_agg].into_iter().filter(|_| reg.step > locked);
                 for p in cur.chain(prev).flatten() {
                     assert_eq!(p.key, first.key, "G3 violated\n{}", self.trace);
@@ -285,12 +233,7 @@ impl Sim {
         let locked = self
             .regs
             .iter()
-            .filter(|r| {
-                r.step == 4
-                    && r.first
-                        .as_ref()
-                        .is_some_and(|f| f.priority == LEADER_PRIORITY)
-            })
+            .filter(|r| r.step == 4 && r.first.as_ref().is_some_and(|f| f.priority == LEADER_PRIORITY))
             .count();
         if locked > n / 2 {
             for (v, _) in &decided {
@@ -311,11 +254,7 @@ impl Sim {
 
     pub fn heal_and_stop_faults(&mut self) {
         self.cut.clear();
-        self.faults = Faults {
-            drop: 0,
-            dup: 0,
-            partition: 0,
-        };
+        self.faults = Faults { drop: 0, dup: 0, partition: 0 };
     }
 
     pub fn all_decided(&self) -> bool {
@@ -351,11 +290,7 @@ mod tests {
         sim
     }
 
-    const HOSTILE: Faults = Faults {
-        drop: 100,
-        dup: 50,
-        partition: 5,
-    };
+    const HOSTILE: Faults = Faults { drop: 100, dup: 50, partition: 5 };
 
     #[test]
     fn single_slot_is_safe_and_live_across_1000_seeds() {
@@ -374,16 +309,7 @@ mod tests {
 
     #[test]
     fn fault_free_leader_decides_its_value_on_the_fast_path() {
-        let sim = run(
-            seed(7),
-            3,
-            1,
-            Faults {
-                drop: 0,
-                dup: 0,
-                partition: 0,
-            },
-        );
+        let sim = run(seed(7), 3, 1, Faults { drop: 0, dup: 0, partition: 0 });
         let (v, step) = &sim.decisions[&0];
         assert_eq!((v.key, *step), (value(0).key, 4));
     }

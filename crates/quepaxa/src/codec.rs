@@ -18,6 +18,7 @@ const KIND_RECORD_REPLY: u8 = 2;
 const KIND_DECIDED: u8 = 3;
 const KIND_CATCH_UP: u8 = 4;
 const KIND_ENTRIES: u8 = 5;
+const KIND_FORWARD: u8 = 6;
 
 const VALUE_INLINE: u8 = 0;
 
@@ -53,11 +54,7 @@ impl WireProposal {
             None if self.key == request.key => request.value.clone(),
             None => return None,
         };
-        Some(Proposal {
-            priority: self.priority,
-            key: self.key,
-            value,
-        })
+        Some(Proposal { priority: self.priority, key: self.key, value })
     }
 }
 
@@ -76,13 +73,22 @@ pub(crate) enum Body {
         prev_agg: Option<WireProposal>,
     },
     /// A slot's decided value, broadcast by the decider or sent instead of a record reply.
-    Decided { slot: Slot, proposal: Proposal },
+    Decided {
+        slot: Slot,
+        proposal: Proposal,
+    },
     /// Asks a peer for decided slots starting at `from`.
-    CatchUp { from: Slot },
+    CatchUp {
+        from: Slot,
+    },
     /// Contiguous decided slots starting at `first`.
     Entries {
         first: Slot,
         proposals: Vec<Proposal>,
+    },
+    /// Entries a follower hands to the leader (an encoded batch).
+    Forward {
+        batch: Bytes,
     },
 }
 
@@ -117,11 +123,7 @@ pub(crate) enum DecodeError {
 /// Builds a reply proposal, eliding its value when it is the request's own proposal.
 pub(crate) fn reply_proposal(p: &Proposal, request_key: ValueKey) -> WireProposal {
     let value = (p.key != request_key).then(|| p.value.clone());
-    WireProposal {
-        priority: p.priority,
-        key: p.key,
-        value,
-    }
+    WireProposal { priority: p.priority, key: p.key, value }
 }
 
 impl Message {
@@ -135,6 +137,7 @@ impl Message {
             Body::Decided { .. } => KIND_DECIDED,
             Body::CatchUp { .. } => KIND_CATCH_UP,
             Body::Entries { .. } => KIND_ENTRIES,
+            Body::Forward { .. } => KIND_FORWARD,
         });
         let e = &self.env;
         out.put_slice(&e.cluster_id);
@@ -143,23 +146,13 @@ impl Message {
         out.put_u32_le(e.to.0);
         out.put_u64_le(e.commit_index);
         match &self.body {
-            Body::RecordRequest {
-                slot,
-                step,
-                proposal,
-            } => {
+            Body::RecordRequest { slot, step, proposal } => {
                 out.put_u64_le(slot.0);
                 out.put_u32_le(*step);
                 put_head(&mut out, proposal.priority, proposal.key);
                 put_value(&mut out, &proposal.value);
             }
-            Body::RecordReply {
-                slot,
-                req_step,
-                step,
-                first,
-                prev_agg,
-            } => {
+            Body::RecordReply { slot, req_step, step, first, prev_agg } => {
                 out.put_u64_le(slot.0);
                 out.put_u32_le(*req_step);
                 out.put_u32_le(*step);
@@ -178,24 +171,18 @@ impl Message {
                     put_proposal(&mut out, p);
                 }
             }
+            Body::Forward { batch } => put_value(&mut out, batch),
         }
         Bytes::from(out)
     }
 
     fn payload_len(&self) -> usize {
-        let len = |p: &Option<WireProposal>| {
-            p.as_ref()
-                .and_then(|p| p.value.as_ref())
-                .map_or(0, Bytes::len)
-        };
+        let len = |p: &Option<WireProposal>| p.as_ref().and_then(|p| p.value.as_ref()).map_or(0, Bytes::len);
         match &self.body {
-            Body::RecordRequest { proposal, .. } | Body::Decided { proposal, .. } => {
-                proposal.value.len()
-            }
-            Body::RecordReply {
-                first, prev_agg, ..
-            } => len(first) + len(prev_agg),
+            Body::RecordRequest { proposal, .. } | Body::Decided { proposal, .. } => proposal.value.len(),
+            Body::RecordReply { first, prev_agg, .. } => len(first) + len(prev_agg),
             Body::CatchUp { .. } => 0,
+            Body::Forward { batch } => batch.len(),
             Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len() + 33).sum(),
         }
     }
@@ -232,11 +219,7 @@ impl Message {
             KIND_RECORD_REQUEST => {
                 let slot = Slot(r.u64()?);
                 let step = r.u32()?;
-                Body::RecordRequest {
-                    slot,
-                    step,
-                    proposal: r.proposal()?,
-                }
+                Body::RecordRequest { slot, step, proposal: r.proposal()? }
             }
             KIND_RECORD_REPLY => Body::RecordReply {
                 slot: Slot(r.u64()?),
@@ -245,13 +228,8 @@ impl Message {
                 first: r.wire_proposal()?,
                 prev_agg: r.wire_proposal()?,
             },
-            KIND_DECIDED => Body::Decided {
-                slot: Slot(r.u64()?),
-                proposal: r.proposal()?,
-            },
-            KIND_CATCH_UP => Body::CatchUp {
-                from: Slot(r.u64()?),
-            },
+            KIND_DECIDED => Body::Decided { slot: Slot(r.u64()?), proposal: r.proposal()? },
+            KIND_CATCH_UP => Body::CatchUp { from: Slot(r.u64()?) },
             KIND_ENTRIES => {
                 let first = Slot(r.u64()?);
                 let n = r.u32()? as usize;
@@ -262,6 +240,7 @@ impl Message {
                 }
                 Body::Entries { first, proposals }
             }
+            KIND_FORWARD => Body::Forward { batch: r.value()? },
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -326,20 +305,12 @@ impl<'a> Reader<'a> {
     }
 
     pub fn finish(&self) -> Result<(), DecodeError> {
-        if self.pos == self.buf.len() {
-            Ok(())
-        } else {
-            Err(DecodeError::Trailing)
-        }
+        if self.pos == self.buf.len() { Ok(()) } else { Err(DecodeError::Trailing) }
     }
 
     pub fn proposal(&mut self) -> Result<Proposal, DecodeError> {
         let (priority, key) = self.head()?;
-        Ok(Proposal {
-            priority,
-            key,
-            value: self.value()?,
-        })
+        Ok(Proposal { priority, key, value: self.value()? })
     }
 
     pub fn opt_proposal(&mut self) -> Result<Option<Proposal>, DecodeError> {
@@ -351,11 +322,7 @@ impl<'a> Reader<'a> {
     }
 
     pub fn take(&mut self, n: usize) -> Result<&[u8], DecodeError> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .filter(|&e| e <= self.buf.len())
-            .ok_or(DecodeError::Truncated)?;
+        let end = self.pos.checked_add(n).filter(|&e| e <= self.buf.len()).ok_or(DecodeError::Truncated)?;
         let s = &self.buf[self.pos..end];
         self.pos = end;
         Ok(s)
@@ -377,11 +344,7 @@ impl<'a> Reader<'a> {
 
     pub fn head(&mut self) -> Result<(u64, ValueKey), DecodeError> {
         let priority = self.u64()?;
-        let key = ValueKey {
-            origin: NodeId(self.u32()?),
-            incarnation: self.u64()?,
-            seq: self.u64()?,
-        };
+        let key = ValueKey { origin: NodeId(self.u32()?), incarnation: self.u64()?, seq: self.u64()? };
         Ok((priority, key))
     }
 
@@ -405,16 +368,8 @@ impl<'a> Reader<'a> {
             return Err(DecodeError::BadTag);
         }
         let (priority, key) = self.head()?;
-        let value = if tag == PRESENT {
-            Some(self.value()?)
-        } else {
-            None
-        };
-        Ok(Some(WireProposal {
-            priority,
-            key,
-            value,
-        }))
+        let value = if tag == PRESENT { Some(self.value()?) } else { None };
+        Ok(Some(WireProposal { priority, key, value }))
     }
 }
 
@@ -423,56 +378,31 @@ mod tests {
     use super::*;
     use crate::proposal::tests::prop;
 
-    const CTX: WireCtx = WireCtx {
-        cluster_id: [0xAB; 16],
-        config_epoch: 7,
-        max_message_bytes: 1 << 20,
-    };
+    const CTX: WireCtx = WireCtx { cluster_id: [0xAB; 16], config_epoch: 7, max_message_bytes: 1 << 20 };
 
     fn env() -> Envelope {
-        Envelope {
-            cluster_id: [0xAB; 16],
-            config_epoch: 7,
-            from: NodeId(1),
-            to: NodeId(2),
-            commit_index: 9,
-        }
+        Envelope { cluster_id: [0xAB; 16], config_epoch: 7, from: NodeId(1), to: NodeId(2), commit_index: 9 }
     }
 
     fn hex(s: &str) -> Vec<u8> {
         let s: Vec<u8> = s.bytes().filter(u8::is_ascii_hexdigit).collect();
-        s.chunks(2)
-            .map(|c| u8::from_str_radix(core::str::from_utf8(c).unwrap(), 16).unwrap())
-            .collect()
+        s.chunks(2).map(|c| u8::from_str_radix(core::str::from_utf8(c).unwrap(), 16).unwrap()).collect()
     }
 
-    const ENVELOPE_HEX: &str = "5150 01 KK abababababababababababababababab 0700000000000000 01000000 02000000 0900000000000000";
+    const ENVELOPE_HEX: &str =
+        "5150 01 KK abababababababababababababababab 0700000000000000 01000000 02000000 0900000000000000";
 
     fn golden(kind: &str, body: &str) -> Vec<u8> {
-        hex(&ENVELOPE_HEX.replace("KK", kind).replace(' ', ""))
-            .into_iter()
-            .chain(hex(body))
-            .collect()
+        hex(&ENVELOPE_HEX.replace("KK", kind).replace(' ', "")).into_iter().chain(hex(body)).collect()
     }
 
     fn request() -> Message {
         let proposal = Proposal {
             priority: 0x0102,
-            key: ValueKey {
-                origin: NodeId(3),
-                incarnation: 4,
-                seq: 5,
-            },
+            key: ValueKey { origin: NodeId(3), incarnation: 4, seq: 5 },
             value: Bytes::from_static(b"hi"),
         };
-        Message {
-            env: env(),
-            body: Body::RecordRequest {
-                slot: Slot(6),
-                step: 4,
-                proposal,
-            },
-        }
+        Message { env: env(), body: Body::RecordRequest { slot: Slot(6), step: 4, proposal } }
     }
 
     #[test]
@@ -485,11 +415,7 @@ mod tests {
     fn record_reply_matches_golden_bytes_v1() {
         let first = WireProposal {
             priority: 1,
-            key: ValueKey {
-                origin: NodeId(3),
-                incarnation: 4,
-                seq: 5,
-            },
+            key: ValueKey { origin: NodeId(3), incarnation: 4, seq: 5 },
             value: None,
         };
         let msg = Message {
@@ -509,8 +435,7 @@ mod tests {
     #[test]
     fn decode_shares_the_input_buffer() {
         let bytes = request().encode();
-        let Body::RecordRequest { proposal, .. } = Message::decode(&bytes, &CTX).unwrap().body
-        else {
+        let Body::RecordRequest { proposal, .. } = Message::decode(&bytes, &CTX).unwrap().body else {
             panic!()
         };
         assert_eq!(proposal.value.as_ptr(), bytes[bytes.len() - 2..].as_ptr());
@@ -521,22 +446,13 @@ mod tests {
         let bytes = request().encode();
         let mut other = CTX;
         other.cluster_id = [0; 16];
-        assert_eq!(
-            Message::decode(&bytes, &other),
-            Err(DecodeError::WrongCluster)
-        );
+        assert_eq!(Message::decode(&bytes, &other), Err(DecodeError::WrongCluster));
         let mut other = CTX;
         other.config_epoch = 8;
-        assert_eq!(
-            Message::decode(&bytes, &other),
-            Err(DecodeError::WrongEpoch)
-        );
+        assert_eq!(Message::decode(&bytes, &other), Err(DecodeError::WrongEpoch));
         let mut v = bytes.to_vec();
         v[2] = 2;
-        assert_eq!(
-            Message::decode(&Bytes::from(v), &CTX),
-            Err(DecodeError::BadVersion)
-        );
+        assert_eq!(Message::decode(&Bytes::from(v), &CTX), Err(DecodeError::BadVersion));
     }
 
     #[test]
@@ -544,32 +460,20 @@ mod tests {
         let mut v = request().encode().to_vec();
         let n = v.len();
         v[n - 6..n - 2].copy_from_slice(&u32::MAX.to_le_bytes());
-        assert_eq!(
-            Message::decode(&Bytes::from(v), &CTX),
-            Err(DecodeError::Truncated)
-        );
+        assert_eq!(Message::decode(&Bytes::from(v), &CTX), Err(DecodeError::Truncated));
     }
 
     #[test]
     fn message_above_limit_is_rejected() {
-        let small = WireCtx {
-            max_message_bytes: 10,
-            ..CTX
-        };
-        assert_eq!(
-            Message::decode(&request().encode(), &small),
-            Err(DecodeError::TooLarge)
-        );
+        let small = WireCtx { max_message_bytes: 10, ..CTX };
+        assert_eq!(Message::decode(&request().encode(), &small), Err(DecodeError::TooLarge));
     }
 
     #[test]
     fn trailing_bytes_are_rejected() {
         let mut v = request().encode().to_vec();
         v.push(0);
-        assert_eq!(
-            Message::decode(&Bytes::from(v), &CTX),
-            Err(DecodeError::Trailing)
-        );
+        assert_eq!(Message::decode(&Bytes::from(v), &CTX), Err(DecodeError::Trailing));
     }
 
     #[test]
@@ -584,10 +488,7 @@ mod tests {
     #[test]
     fn other_proposals_keep_their_value_in_replies() {
         let other = prop(9, 2, 0);
-        assert_eq!(
-            reply_proposal(&other, prop(1, 1, 0).key).value,
-            Some(other.value.clone())
-        );
+        assert_eq!(reply_proposal(&other, prop(1, 1, 0).key).value, Some(other.value.clone()));
     }
 
     fn arb_prop() -> impl proptest::strategy::Strategy<Value = Proposal> {
@@ -601,24 +502,18 @@ mod tests {
         )
             .prop_map(|(priority, o, i, s, v)| Proposal {
                 priority,
-                key: ValueKey {
-                    origin: NodeId(o),
-                    incarnation: i,
-                    seq: s,
-                },
+                key: ValueKey { origin: NodeId(o), incarnation: i, seq: s },
                 value: Bytes::from(v),
             })
     }
 
     fn arb_wire() -> impl proptest::strategy::Strategy<Value = Option<WireProposal>> {
         use proptest::prelude::*;
-        proptest::option::of(
-            (arb_prop(), any::<bool>()).prop_map(|(p, elide)| WireProposal {
-                priority: p.priority,
-                key: p.key,
-                value: (!elide).then_some(p.value),
-            }),
-        )
+        proptest::option::of((arb_prop(), any::<bool>()).prop_map(|(p, elide)| WireProposal {
+            priority: p.priority,
+            key: p.key,
+            value: (!elide).then_some(p.value),
+        }))
     }
 
     proptest::proptest! {
@@ -642,7 +537,8 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn catch_up_kinds_round_trip(from: u64, ps in proptest::collection::vec(arb_prop(), 0..4)) {
-            for body in [Body::CatchUp { from: Slot(from) }, Body::Entries { first: Slot(from), proposals: ps.clone() }] {
+            let batch = ps.first().map(|p| p.value.clone()).unwrap_or_default();
+            for body in [Body::CatchUp { from: Slot(from) }, Body::Entries { first: Slot(from), proposals: ps.clone() }, Body::Forward { batch }] {
                 let m = Message { env: env(), body };
                 proptest::prop_assert_eq!(Message::decode(&m.encode(), &CTX).unwrap(), m);
             }
@@ -659,14 +555,12 @@ mod tests {
     #[test]
     fn decode_never_panics_on_mutated_valid_messages() {
         let base = request().encode().to_vec();
-        bolero::check!()
-            .with_type::<(u16, u8, u8)>()
-            .for_each(|&(pos, val, cut)| {
-                let mut v = base.clone();
-                let i = pos as usize % v.len();
-                v[i] = val;
-                v.truncate(v.len() - (cut as usize % 4));
-                let _ = Message::decode(&Bytes::from(v), &CTX);
-            });
+        bolero::check!().with_type::<(u16, u8, u8)>().for_each(|&(pos, val, cut)| {
+            let mut v = base.clone();
+            let i = pos as usize % v.len();
+            v[i] = val;
+            v.truncate(v.len() - (cut as usize % 4));
+            let _ = Message::decode(&Bytes::from(v), &CTX);
+        });
     }
 }
