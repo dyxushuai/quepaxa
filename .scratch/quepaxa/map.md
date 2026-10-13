@@ -24,6 +24,7 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
 
 - [QuePaxa protocol, precisely](issues/01-paper-protocol-spec.md): proposer→recorder RPC over 4-phase rounds with a per-slot interval summary register; leader fast path at step 4; paper is crash-stop only and leaves durability, δ-tuning, reconfig, snapshots unspecified (A1–A16).
 - [How do existing Rust consensus crates shape a sans-IO API](issues/04-sans-io-api-prior-art.md): pull loop `handle`/`poll_actions`, persist-before-send encoded structurally in `Action::Persist{then}`, injected `Timestamp`+seed; openraft#2118 is the cautionary bug.
+- [What toolchain delivers the C ABI across our platform tiers](issues/05-ffi-cross-platform-toolchain.md): hand-written `extern "C"` + committed cbindgen header + cargo-c; catch_unwind per export; all 6 Tier 1 targets run natively on GH-hosted runners; MSRV 1.89 proposed; wasm gets wasm-bindgen/wasip2 later, not C ABI.
 
 ## Not yet specified
 
