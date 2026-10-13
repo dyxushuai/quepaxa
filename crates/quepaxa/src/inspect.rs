@@ -7,7 +7,8 @@ use alloc::vec::Vec;
 use crate::proposal::Proposal;
 use crate::recorder::Register;
 
-/// A proposal without its value: `(priority, origin, incarnation, batch sequence)`.
+/// A proposal: priority, value key, and a digest of the value bytes (keys can collide
+/// when a crash loses the incarnation record, so identity includes the bytes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProposalView {
     /// Priority; `u64::MAX` is the leader's.
@@ -18,18 +19,30 @@ pub struct ProposalView {
     pub incarnation: u64,
     /// Origin batch sequence.
     pub seq: u64,
+    /// FNV-1a of the value bytes.
+    pub digest: u64,
 }
 
 impl ProposalView {
     /// Identity of the value (independent of priority).
-    pub fn value(&self) -> (u32, u64, u64) {
-        (self.origin, self.incarnation, self.seq)
+    pub fn value(&self) -> (u32, u64, u64, u64) {
+        (self.origin, self.incarnation, self.seq, self.digest)
     }
 }
 
 impl From<&Proposal> for ProposalView {
     fn from(p: &Proposal) -> Self {
-        Self { priority: p.priority, origin: p.key.origin.0, incarnation: p.key.incarnation, seq: p.key.seq }
+        let digest = p
+            .value
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+        Self {
+            priority: p.priority,
+            origin: p.key.origin.0,
+            incarnation: p.key.incarnation,
+            seq: p.key.seq,
+            digest,
+        }
     }
 }
 

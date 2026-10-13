@@ -1,84 +1,126 @@
 //! The paper's global invariants checked across real replicas (spec §9; paper deep read
 //! §10), on protocol-internal state exposed by `Replica::inspect` (feature `model`).
 //!
-//! - **G1 agreement**: every replica that knows a slot's decision knows the same value.
+//! - **G1 agreement**: a slot is only ever decided to one value.
 //! - **G3 value lock**: once some proposer decided `v` in round `r`, every value stored at a
 //!   step `≥ 4(r+1)` (and every previous-step aggregate above it) carries `v`.
-//! - **G4 fast-path lock**: if a majority of recorders hold the leader's top-priority
+//! - **G4 fast-path lock**: once a majority of recorders held the leader's top-priority
 //!   proposal as the first value of step 4, the slot can only decide that value.
-//! - **G5 unique H**: at most one distinct value carries the leader priority per slot.
+//! - **G5 unique H**: at most one distinct value ever carries the leader priority per slot.
+//!
+//! Registers move on and are discarded after a durable decision, so the evidence behind
+//! G1, G4 and G5 is accumulated in a [`History`] rather than re-derived from the current
+//! state alone. Evidence remembers which replicas showed it: a crash discards what only the
+//! crashed replica's volatile state showed (it never had an effect: replies wait for
+//! durability), while durable state is observed again after recovery.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use quepaxa::inspect::{Inspection, ProposalView};
 
-type Value = (u32, u64, u64);
+type Value = (u32, u64, u64, u64);
 
-/// Checks G1, G3, G4 and G5 over the live replicas of a cluster of `n`.
-pub fn check(n: usize, replicas: &[(usize, Inspection)]) -> Result<(), String> {
-    let mut decided: BTreeMap<u64, BTreeSet<Value>> = BTreeMap::new();
-    let mut lock_step: BTreeMap<u64, u32> = BTreeMap::new();
-    for (_, ins) in replicas {
-        for (slot, v) in &ins.decided {
-            decided.entry(*slot).or_default().insert(v.value());
-        }
-        for (slot, v, step) in &ins.decided_here {
-            decided.entry(*slot).or_default().insert(v.value());
-            let lock = 4 * (step / 4 + 1);
-            lock_step.entry(*slot).and_modify(|l| *l = (*l).min(lock)).or_insert(lock);
-        }
-    }
-    for (slot, values) in &decided {
-        if values.len() > 1 {
-            return Err(format!("G1 agreement: slot {slot} decided {values:?}"));
-        }
-    }
-    let mut leader_values: BTreeMap<u64, BTreeSet<Value>> = BTreeMap::new();
-    let mut fast_locks: BTreeMap<u64, BTreeMap<Value, usize>> = BTreeMap::new();
-    for (i, ins) in replicas {
-        for (slot, reg) in &ins.registers {
-            let fields = [reg.first, reg.agg, reg.prev_agg];
-            for p in fields.iter().flatten().filter(|p| p.priority == u64::MAX) {
-                leader_values.entry(*slot).or_default().insert(p.value());
+/// Evidence observed so far in one execution.
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+pub struct History {
+    decided: BTreeMap<u64, Value>,
+    lock_step: BTreeMap<u64, u32>,
+    /// Leader-priority values per slot, with the replicas whose registers showed them.
+    leader_values: BTreeMap<u64, BTreeMap<Value, BTreeSet<usize>>>,
+    /// Step-4 fast-path locks per slot, with the replicas forming the majority.
+    fast_locked: BTreeMap<u64, (Value, BTreeSet<usize>)>,
+}
+
+impl History {
+    /// A replica crashed: evidence only its volatile state showed is gone.
+    pub fn forget(&mut self, n: usize, replica: usize) {
+        for values in self.leader_values.values_mut() {
+            for seen in values.values_mut() {
+                seen.remove(&replica);
             }
-            if reg.step == 4
-                && let Some(f) = reg.first.filter(|f| f.priority == u64::MAX)
-            {
-                *fast_locks.entry(*slot).or_default().entry(f.value()).or_default() += 1;
+            values.retain(|_, seen| !seen.is_empty());
+        }
+        for (_, seen) in self.fast_locked.values_mut() {
+            seen.remove(&replica);
+        }
+        self.fast_locked.retain(|_, (_, seen)| seen.len() > n / 2);
+    }
+
+    /// Folds the live replicas' state into the history and checks G1, G3, G4 and G5.
+    pub fn observe(&mut self, n: usize, replicas: &[(usize, Inspection)]) -> Result<(), String> {
+        for (_, ins) in replicas {
+            let decided = ins.decided.iter().map(|(s, v)| (*s, v, None));
+            let here = ins.decided_here.iter().map(|(s, v, step)| (*s, v, Some(*step)));
+            for (slot, v, step) in decided.chain(here) {
+                match self.decided.get(&slot) {
+                    Some(d) if *d != v.value() => {
+                        return Err(format!("G1 agreement: slot {slot} decided {d:?} and {:?}", v.value()));
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.decided.insert(slot, v.value());
+                    }
+                }
+                if let Some(step) = step {
+                    let lock = 4 * (step / 4 + 1);
+                    self.lock_step.entry(slot).and_modify(|l| *l = (*l).min(lock)).or_insert(lock);
+                }
             }
-            if let (Some(lock), Some(v)) = (lock_step.get(slot), decided.get(slot).and_then(|s| s.first())) {
-                let current = [reg.first, reg.agg].into_iter().filter(|_| reg.step >= *lock);
-                let previous = [reg.prev_agg].into_iter().filter(|_| reg.step > *lock);
-                for p in current.chain(previous).flatten() {
-                    if p.value() != *v {
-                        return Err(format!(
-                            "G3 value lock: n{i} slot {slot} step {} holds {:?}, decided {v:?} locks from step {lock}",
-                            reg.step,
-                            show(&p)
-                        ));
+        }
+        let mut step4_firsts: BTreeMap<u64, BTreeMap<Value, BTreeSet<usize>>> = BTreeMap::new();
+        for (i, ins) in replicas {
+            for (slot, reg) in &ins.registers {
+                for p in [reg.first, reg.agg, reg.prev_agg].into_iter().flatten() {
+                    if p.priority == u64::MAX {
+                        self.leader_values.entry(*slot).or_default().entry(p.value()).or_default().insert(*i);
+                    }
+                }
+                if reg.step == 4
+                    && let Some(f) = reg.first.filter(|f| f.priority == u64::MAX)
+                {
+                    step4_firsts.entry(*slot).or_default().entry(f.value()).or_default().insert(*i);
+                }
+                if let (Some(lock), Some(v)) = (self.lock_step.get(slot), self.decided.get(slot)) {
+                    let current = [reg.first, reg.agg].into_iter().filter(|_| reg.step >= *lock);
+                    let previous = [reg.prev_agg].into_iter().filter(|_| reg.step > *lock);
+                    for p in current.chain(previous).flatten() {
+                        if p.value() != *v {
+                            return Err(format!(
+                                "G3 value lock: n{i} slot {slot} step {} holds {}, decided {v:?} locks from step {lock}",
+                                reg.step,
+                                show(&p)
+                            ));
+                        }
                     }
                 }
             }
         }
-    }
-    for (slot, values) in &leader_values {
-        if values.len() > 1 {
-            return Err(format!("G5 unique H: slot {slot} has leader-priority values {values:?}"));
+        for (slot, holders) in step4_firsts {
+            for (v, seen) in holders {
+                if seen.len() > n / 2 {
+                    self.fast_locked.entry(slot).or_insert((v, seen));
+                }
+            }
         }
-    }
-    for (slot, counts) in &fast_locks {
-        for (v, count) in counts {
-            if *count > n / 2
-                && let Some(d) = decided.get(slot).and_then(|s| s.first())
-                && d != v
-            {
+        for (slot, values) in &self.leader_values {
+            if values.len() > 1 {
+                let values: Vec<_> = values.iter().collect();
                 return Err(format!(
-                    "G4 fast-path lock: slot {slot} locked to {v:?} by a majority but decided {d:?}"
+                    "G5 unique H: slot {slot} had leader-priority values (value, seen at) {values:?}"
                 ));
             }
         }
+        for (slot, (v, _)) in &self.fast_locked {
+            if let Some(d) = self.decided.get(slot)
+                && d != v
+            {
+                return Err(format!(
+                    "G4 fast-path lock: slot {slot} was locked to {v:?} by a majority but decided {d:?}"
+                ));
+            }
+        }
+        Ok(())
     }
-    Ok(())
 }
 
 fn show(p: &ProposalView) -> String {

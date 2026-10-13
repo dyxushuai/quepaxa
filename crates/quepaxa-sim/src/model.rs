@@ -10,7 +10,7 @@
 //! States are deduplicated by fingerprint; every state is checked for agreement, ordered
 //! commits, and `Committed` only for logged entries.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use bytes::Bytes;
@@ -61,6 +61,8 @@ struct MNode {
     starts: u64,
     /// Own proposals of the current incarnation, by id.
     proposed: BTreeMap<ProposalId, Bytes>,
+    /// Proposals whose client received `Committed`.
+    acked: BTreeSet<ProposalId>,
 }
 
 #[derive(Clone)]
@@ -70,6 +72,7 @@ struct State {
     deviations: u32,
     crashes: u32,
     isolated: Option<usize>,
+    history: crate::invariants::History,
     log: BTreeMap<u64, Vec<Entry>>,
     /// Slot each committed payload first appeared in.
     committed_at: BTreeMap<Bytes, u64>,
@@ -89,6 +92,8 @@ enum Step {
     Timeout(usize),
     /// Cuts a replica off the network from now on (one deviation).
     Isolate(usize),
+    /// Ends the partition (the default step once nothing else is pending).
+    Heal,
     /// Crash-restart, losing a suffix of the write in progress (its own budget).
     Crash {
         node: usize,
@@ -112,7 +117,7 @@ impl State {
         for n in &self.nodes {
             (n.replica.fingerprint(), &n.durable, n.now, n.next_commit, &n.proposed).hash(&mut h);
         }
-        (&self.events, self.deviations, self.crashes, self.isolated, &self.log).hash(&mut h);
+        (&self.events, self.deviations, self.crashes, self.isolated, &self.log, &self.history).hash(&mut h);
         h.finish()
     }
 
@@ -159,6 +164,8 @@ impl State {
             // The front event is always runnable: no earlier persist of its node precedes it.
             (false, _) => steps.push((Step::Run(0), false)),
             (true, Some(i)) => steps.push((Step::Timeout(i), false)),
+            // A partition that outlives all other activity heals.
+            (true, None) if self.isolated.is_some() => steps.push((Step::Heal, false)),
             (true, None) => {}
         }
         self.crash_steps(&mut steps);
@@ -232,6 +239,10 @@ impl State {
                 n.replica.handle_timeout(Timestamp(n.now)).map_err(|e| e.to_string())?;
                 self.drain(i)
             }
+            Step::Heal => {
+                self.isolated = None;
+                Ok(())
+            }
             Step::Isolate(node) => {
                 self.isolated = Some(node);
                 self.events.retain(
@@ -245,6 +256,7 @@ impl State {
 
     fn crash(&mut self, node: usize, keep: usize) -> Result<(), String> {
         self.crashes -= 1;
+        self.history.forget(self.nodes.len(), node);
         let mut first = true;
         let mut kept = Vec::new();
         let mut replaced = None;
@@ -270,12 +282,17 @@ impl State {
         n.durable.extend(kept);
         n.starts += 1;
         n.next_commit = 0;
-        let lost: Vec<Bytes> = std::mem::take(&mut n.proposed).into_values().collect();
+        // The client retries exactly the writes it never saw acknowledged.
+        let acked = std::mem::take(&mut n.acked);
+        let lost: Vec<Bytes> = std::mem::take(&mut n.proposed)
+            .into_iter()
+            .filter(|(id, _)| !acked.contains(id))
+            .map(|(_, p)| p)
+            .collect();
         n.replica = Replica::new(config(total, node, n.starts), n.durable.clone(), Timestamp(n.now))
             .map_err(|e| e.to_string())?;
         self.drain(node)?;
         // The client retries writes whose outcome it never learned, as new payloads.
-        let lost: Vec<Bytes> = lost.into_iter().filter(|p| !self.committed_at.contains_key(p)).collect();
         for p in lost {
             self.required.retain(|r| *r != p);
             let retry =
@@ -338,6 +355,7 @@ impl State {
                             es.iter().any(|e| e.origin == NodeId(i as u32) && e.id == id && e.payload == *p)
                         })
                     });
+                    self.nodes[i].acked.insert(id);
                     if !logged {
                         return Err(format!(
                             "n{i} reported Committed {id:?} at {slot:?} but it is not logged there"
@@ -348,6 +366,12 @@ impl State {
             }
         }
         Ok(())
+    }
+
+    /// Checks the protocol invariants on every replica, accumulating their evidence.
+    fn observe(&mut self) -> Result<(), String> {
+        let live: Vec<_> = self.nodes.iter().enumerate().map(|(i, n)| (i, n.replica.inspect())).collect();
+        self.history.observe(self.nodes.len(), &live)
     }
 
     fn complete(&self) -> bool {
@@ -367,6 +391,7 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
             next_commit: 0,
             starts: 0,
             proposed: BTreeMap::new(),
+            acked: BTreeSet::new(),
         });
     }
     let mut init = State {
@@ -375,6 +400,7 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         deviations: cfg.deviations,
         crashes: cfg.crashes,
         isolated: None,
+        history: crate::invariants::History::default(),
         log: BTreeMap::new(),
         committed_at: BTreeMap::new(),
         proposals: Vec::new(),
@@ -431,11 +457,7 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
             }
             let mut p = path.clone();
             p.push(step);
-            let checked = next.apply(step).and_then(|()| {
-                let live: Vec<_> =
-                    next.nodes.iter().enumerate().map(|(i, n)| (i, n.replica.inspect())).collect();
-                crate::invariants::check(cfg.nodes, &live)
-            });
+            let checked = next.apply(step).and_then(|()| next.observe());
             if let Err(e) = checked {
                 return Err(format!("{e}\nschedule ({} steps): {p:?}", p.len()));
             }
@@ -459,11 +481,12 @@ fn settle(mut st: State, max: usize) -> Result<(), String> {
             return Ok(());
         }
         let Some((step, _)) =
-            st.steps().into_iter().find(|(s, _)| matches!(s, Step::Run(0) | Step::Timeout(_)))
+            st.steps().into_iter().find(|(s, _)| matches!(s, Step::Run(0) | Step::Timeout(_) | Step::Heal))
         else {
             return Ok(());
         };
         st.apply(step)?;
+        st.observe()?;
     }
     Err(format!("liveness: still busy after {max} default steps (log {} slots)", st.log.len()))
 }

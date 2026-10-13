@@ -189,6 +189,7 @@ pub struct Sim {
     last_new_slot_at: u64,
     kv: kv::Kv,
     pending_installs: Vec<(usize, usize, u64)>,
+    history: invariants::History,
 }
 
 fn cluster_id() -> [u8; 16] {
@@ -232,6 +233,7 @@ impl Sim {
             last_new_slot_at: 0,
             kv: kv::Kv::new(nodes_len),
             pending_installs: Vec::new(),
+            history: invariants::History::default(),
         };
         if let Some((node, at)) = sim.cfg.kill {
             sim.push(at * MS, Event::Kill { node });
@@ -391,6 +393,7 @@ impl Sim {
         if node.replica.take().is_none() {
             return;
         }
+        self.history.forget(self.cfg.nodes, i);
         // The write in progress may be torn: a prefix of its records reaches the disk.
         let pending = std::mem::take(&mut node.pending);
         if let Some(first) = pending.into_iter().next() {
@@ -482,14 +485,15 @@ impl Sim {
     }
 
     /// G1, G3–G5 across every live replica's protocol state.
-    fn check_internal(&self) -> Result<(), String> {
+    fn check_internal(&mut self) -> Result<(), String> {
         let live: Vec<_> = self
             .nodes
             .iter()
             .enumerate()
             .filter_map(|(i, n)| n.replica.as_ref().map(|r| (i, r.inspect())))
             .collect();
-        invariants::check(self.cfg.nodes, &live).map_err(|e| self.fail(&e))
+        let result = self.history.observe(self.cfg.nodes, &live);
+        result.map_err(|e| self.fail(&e))
     }
 
     fn inject_faults(&mut self) {
