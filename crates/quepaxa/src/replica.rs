@@ -80,6 +80,8 @@ pub struct Replica {
     emitted: u64,
     peer_committed: u64,
     seen: BTreeMap<Slot, Timestamp>,
+    /// When the outstanding catch-up request was sent.
+    catch_up_sent: Option<Timestamp>,
 
     // Proposer side.
     proposers: BTreeMap<Slot, Active>,
@@ -160,6 +162,7 @@ impl Replica {
             emitted: 0,
             peer_committed: 0,
             seen: BTreeMap::new(),
+            catch_up_sent: None,
             proposers: BTreeMap::new(),
             batches: BTreeMap::new(),
             queue: VecDeque::new(),
@@ -448,6 +451,19 @@ impl Replica {
         if self.peer_committed > self.committed {
             self.seen.entry(Slot(self.committed)).or_insert(self.now);
         }
+        // More than the slot in progress behind: fetch the decided prefix in bulk.
+        let idle = self
+            .catch_up_sent
+            .is_none_or(|t| t.after(self.cfg.retransmit_interval) <= self.now);
+        if msg.env.commit_index > self.committed + 1 && idle {
+            self.catch_up_sent = Some(self.now);
+            self.send(
+                from,
+                Body::CatchUp {
+                    from: Slot(self.committed),
+                },
+            );
+        }
         self.inbox.push_back((from, msg.body));
     }
 
@@ -468,12 +484,45 @@ impl Replica {
                         prev_agg,
                     } => self.on_reply(from, slot, req_step, step, first, prev_agg),
                     Body::Decided { slot, proposal } => self.learn(slot, proposal, false),
+                    Body::CatchUp { from: start } => self.on_catch_up(from, start),
+                    Body::Entries { first, proposals } => {
+                        self.catch_up_sent = None;
+                        for (slot, p) in (first.0..).zip(proposals) {
+                            self.learn(Slot(slot), p, false);
+                        }
+                    }
                 }
             }
             self.schedule();
             if self.inbox.is_empty() {
                 break;
             }
+        }
+    }
+
+    /// Serves contiguous decided slots from `start`, within half a message budget.
+    fn on_catch_up(&mut self, to: NodeId, start: Slot) {
+        let budget = self.cfg.max_message_bytes as usize / 2;
+        let mut size = 0;
+        let mut proposals = Vec::new();
+        for slot in start.0.. {
+            let Some(d) = self.log.get(&Slot(slot)) else {
+                break;
+            };
+            size += d.proposal.value.len() + 64;
+            if !proposals.is_empty() && size > budget {
+                break;
+            }
+            proposals.push(d.proposal.clone());
+        }
+        if !proposals.is_empty() {
+            self.send(
+                to,
+                Body::Entries {
+                    first: start,
+                    proposals,
+                },
+            );
         }
     }
 

@@ -51,6 +51,19 @@ fn crash_heavy_runs_never_lose_acknowledged_state() {
 }
 
 #[test]
+fn replica_absent_for_the_whole_run_catches_up_quickly() {
+    for seed in 0..5 {
+        let cfg = SimConfig {
+            absent: Some(2),
+            heal_budget_ms: 300,
+            ..calm(3, seed)
+        };
+        let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
+        assert!(report.slots > 100, "{report:?}");
+    }
+}
+
+#[test]
 fn same_seed_replays_identically() {
     let a = Sim::new(SimConfig::hostile(3, 7)).run().unwrap();
     let b = Sim::new(SimConfig::hostile(3, 7)).run().unwrap();

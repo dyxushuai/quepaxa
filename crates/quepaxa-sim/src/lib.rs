@@ -47,6 +47,8 @@ pub struct SimConfig {
     pub max_persist_ms: u64,
     /// Replica limit on concurrent slots.
     pub in_flight_slots: u32,
+    /// A replica kept down for the whole fault phase (it starts at heal).
+    pub absent: Option<usize>,
 }
 
 impl SimConfig {
@@ -77,6 +79,7 @@ impl SimConfig {
             max_latency_ms: 20,
             max_persist_ms: 5,
             in_flight_slots: 4,
+            absent: None,
         }
     }
 }
@@ -94,6 +97,8 @@ pub struct Report {
     pub crashes: usize,
     /// Fingerprint of the event trace (same seed ⇒ same fingerprint).
     pub trace_hash: u64,
+    /// The last lines of the trace, for debugging.
+    pub trace_tail: String,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -196,7 +201,9 @@ impl Sim {
             trace: String::new(),
         };
         for i in 0..sim.cfg.nodes {
-            sim.start(i);
+            if sim.cfg.absent != Some(i) {
+                sim.start(i);
+            }
         }
         sim.push(0, Event::Tick);
         sim
@@ -220,6 +227,8 @@ impl Sim {
                 self.report.entries = self.committed_payloads.len();
                 self.report.proposals = self.proposed.len();
                 self.report.trace_hash = fnv(self.trace.as_bytes());
+                let lines: Vec<&str> = self.trace.lines().collect();
+                self.report.trace_tail = lines[lines.len().saturating_sub(400)..].join("\n");
                 return Ok(self.report);
             }
         }
