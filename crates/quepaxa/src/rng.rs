@@ -6,6 +6,7 @@
 
 use crate::proposal::LEADER_PRIORITY;
 
+#[cfg_attr(feature = "model", derive(Clone, Hash))]
 pub(crate) struct ChaCha20 {
     key: [u32; 8],
     counter: u64,

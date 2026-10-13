@@ -33,6 +33,12 @@ impl PartialEq for Proposal {
 
 impl Eq for Proposal {}
 
+impl core::hash::Hash for Proposal {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        (self.priority, self.key).hash(state);
+    }
+}
+
 impl PartialOrd for Proposal {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))

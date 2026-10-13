@@ -20,6 +20,7 @@ pub(crate) const LAG: u64 = 64;
 const ROTATE_AFTER: u32 = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub(crate) struct Schedule {
     /// `(first slot it applies to, order)`, ascending; the first entry starts at slot 0.
     history: Vec<(u64, Vec<NodeId>)>,

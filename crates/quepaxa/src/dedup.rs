@@ -14,6 +14,7 @@ use crate::types::{NodeId, ProposalId};
 const INCARNATIONS_KEPT: usize = 4;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 struct Window {
     /// Every id below this was seen.
     below: u64,
@@ -22,6 +23,7 @@ struct Window {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
 pub(crate) struct Dedup {
     origins: BTreeMap<NodeId, BTreeMap<u64, Window>>,
 }

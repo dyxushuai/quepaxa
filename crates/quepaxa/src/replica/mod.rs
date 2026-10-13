@@ -26,11 +26,13 @@ use crate::rng::ChaCha20;
 use crate::schedule::Schedule;
 use crate::types::{NodeId, PersistId, ProposalId, Slot, Timestamp};
 
+#[cfg_attr(feature = "model", derive(Clone, Hash))]
 struct Decision {
     proposal: Proposal,
     durable: bool,
 }
 
+#[cfg_attr(feature = "model", derive(Clone, Hash))]
 struct Active {
     prop: SlotProposer,
     batch: u64,
@@ -38,6 +40,7 @@ struct Active {
 }
 
 /// A batch this replica proposes, in at most one slot at a time until it is decided.
+#[cfg_attr(feature = "model", derive(Clone, Hash))]
 struct LocalBatch {
     key: ValueKey,
     value: Bytes,
@@ -46,6 +49,7 @@ struct LocalBatch {
 }
 
 /// Work deferred until the next `Persist` is acknowledged.
+#[cfg_attr(feature = "model", derive(Clone, Hash))]
 enum Effect {
     Ready,
     ReservationDurable(u64),
@@ -53,6 +57,7 @@ enum Effect {
     LocalReply(Body),
 }
 
+#[cfg_attr(feature = "model", derive(Clone, Hash))]
 struct InFlight {
     id: u64,
     effects: Vec<Effect>,
@@ -60,6 +65,7 @@ struct InFlight {
 }
 
 /// One member of a QuePaxa cluster. See the crate docs for the driving contract.
+#[cfg_attr(feature = "model", derive(Clone, Hash))]
 pub struct Replica {
     cfg: Config,
     me: NodeId,
@@ -498,5 +504,27 @@ impl Replica {
                 break;
             }
         }
+    }
+}
+
+#[cfg(feature = "model")]
+impl Replica {
+    /// Hash of the complete replica state, for state-space exploration in tests only.
+    #[doc(hidden)]
+    pub fn fingerprint(&self) -> u64 {
+        struct Fnv(u64);
+        impl core::hash::Hasher for Fnv {
+            fn finish(&self) -> u64 {
+                self.0
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                for &b in bytes {
+                    self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+        }
+        let mut h = Fnv(0xcbf2_9ce4_8422_2325);
+        core::hash::Hash::hash(self, &mut h);
+        core::hash::Hasher::finish(&h)
     }
 }
