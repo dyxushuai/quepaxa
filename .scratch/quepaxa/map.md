@@ -29,13 +29,14 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
 - [What the Go reference implementation actually does](issues/02-go-reference-impl.md): faithful Alg. 3/4 but no durability, low-entropy priorities, static hedging δ, leader-order tuner via log pseudo-command; supplies test vectors, scenarios and benchmark baselines.
 - [Who owns the `quepaxa` crate name on crates.io](issues/13-crate-name-ownership.md): owned by the user's `johntaiko` account; placeholder 0.1.0 exists, so first real release is > 0.1.0 and the placeholder gets yanked.
 - [What is the core sans-IO API](issues/06-core-api-shape.md): single `Replica`, `handle`/`poll_actions` pull loop, structural `Action::Persist{then}` (ADR 0002), inline `Bytes` batches, core-side batching/pipelining, at-most-once per local `ProposalId`, injected time + fresh CSPRNG seed per start.
+- [Are reconfiguration and snapshots in the first release](issues/07-phase-one-scope.md): snapshots/compaction in v1 (app-owned snapshot bytes); reconfiguration, dynamic join, witnesses/learners are phase 2 with `config_epoch` + `cluster_id` reserved in every message now.
 
 ## Not yet specified
 
 - **Performance targets & benchmark methodology**: what to measure (throughput/latency under leader failure, WAN, contention), whether to compare against the Go impl or Raft crates.
 - **Reference runtime crate** (`quepaxa-tokio` or similar): whether one ships at all, and its transport.
 - **ValueId indirection** (LAN optimization): agree on fixed-size batch ids and disseminate batches separately; needs its own durability/catch-up/liveness story; revisit after benchmarks.
-- **Reconfiguration & bootstrapping, snapshots/log compaction**: designs, once their phase is decided.
+- **Phase 2: reconfiguration, dynamic join, witness/learner nodes**: protocol design (paper gives none; fn. 5 slot reset per epoch), after v1 tickets settle.
 - **Release engineering**: MSRV, semver/stability policy for the C ABI, docs/examples, supply-chain gates (`cargo-deny`/`cargo-vet`).
 - **Final spec + TDD backlog ordering** (`to-spec` / `to-tickets`), once the decisions above land.
 
