@@ -73,6 +73,7 @@ impl SlotProposer {
         self.step
     }
 
+    #[cfg(test)]
     pub fn decided(&self) -> Option<&Proposal> {
         self.decided.as_ref()
     }
@@ -187,11 +188,6 @@ impl SlotProposer {
             _ => {}
         }
         self.advance(self.step + 1, rng)
-    }
-
-    /// A decision learned elsewhere (a `Decided` reply or broadcast).
-    pub fn on_decided(&mut self, value: Proposal) {
-        self.decided.get_or_insert(value);
     }
 
     fn decide(&mut self, v: Option<Proposal>) -> Progress {
