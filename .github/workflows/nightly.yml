@@ -56,9 +56,9 @@ jobs:
         env:
           QPX_SIM_SEEDS: "100000"
         run: cargo nextest run --release -p quepaxa-sim --test replica_sim --no-fail-fast
-      - name: Model checking with three deviations, exhaustively
+      - name: Model checking with one more deviation per scenario, exhaustively
         env:
-          QPX_MODEL_DEVIATIONS: "3"
+          QPX_MODEL_EXTRA_DEVIATIONS: "1"
           QPX_MODEL_STATES: "200000000"
         run: cargo nextest run --release -p quepaxa-sim --test model_check --no-fail-fast
       - name: Deep property tests

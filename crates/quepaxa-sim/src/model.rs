@@ -25,7 +25,7 @@ pub struct ModelConfig {
     pub proposals: Vec<usize>,
     /// Deviations from the default schedule along one path.
     pub deviations: u32,
-    /// Crashes allowed along one path (each also costs a deviation).
+    /// Crash-restarts allowed along one path (a separate budget; they cost no deviation).
     pub crashes: u32,
     /// Longest path explored.
     pub max_depth: usize,
@@ -48,7 +48,7 @@ pub struct ModelReport {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Event {
-    Deliver { to: usize, bytes: Bytes },
+    Deliver { from: usize, to: usize, bytes: Bytes },
     Persisted { node: usize, id: PersistId, records: Vec<Bytes>, then: Vec<(usize, Bytes)>, replace: bool },
 }
 
@@ -69,11 +69,15 @@ struct State {
     events: VecDeque<Event>,
     deviations: u32,
     crashes: u32,
+    isolated: Option<usize>,
     log: BTreeMap<u64, Vec<Entry>>,
     /// Slot each committed payload first appeared in.
     committed_at: BTreeMap<Bytes, u64>,
-    /// Every payload any client proposed.
+    /// Every payload any client proposed (validity).
     proposals: Vec<Bytes>,
+    /// Payloads that must eventually commit: client writes, minus those whose replica
+    /// crashed before committing them (the client retries those as new payloads).
+    required: Vec<Bytes>,
     depth: usize,
 }
 
@@ -83,7 +87,13 @@ enum Step {
     Lose(usize),
     Duplicate(usize),
     Timeout(usize),
-    Crash { node: usize, keep: usize },
+    /// Cuts a replica off the network from now on (one deviation).
+    Isolate(usize),
+    /// Crash-restart, losing a suffix of the write in progress (its own budget).
+    Crash {
+        node: usize,
+        keep: usize,
+    },
 }
 
 fn config(n: usize, i: usize, starts: u64) -> Config {
@@ -102,8 +112,38 @@ impl State {
         for n in &self.nodes {
             (n.replica.fingerprint(), &n.durable, n.now, n.next_commit, &n.proposed).hash(&mut h);
         }
-        (&self.events, self.deviations, self.crashes, &self.log).hash(&mut h);
+        (&self.events, self.deviations, self.crashes, self.isolated, &self.log).hash(&mut h);
         h.finish()
+    }
+
+    /// Crash-restarts are bounded by their own budget, not by deviations.
+    fn crash_steps(&self, steps: &mut Vec<(Step, bool)>) {
+        if self.crashes == 0 {
+            return;
+        }
+        for i in 0..self.nodes.len() {
+            let first = self.events.iter().find_map(|e| match e {
+                Event::Persisted { node, records, replace, .. } if *node == i => {
+                    Some((records.len(), *replace))
+                }
+                _ => None,
+            });
+            let keeps = match first {
+                None => 1,
+                Some((_, true)) => 2,
+                Some((n, false)) => n + 1,
+            };
+            for keep in 0..keeps {
+                steps.push((Step::Crash { node: i, keep }, false));
+            }
+        }
+    }
+
+    /// Queues a message unless either end is cut off.
+    fn post(&mut self, from: usize, to: usize, bytes: Bytes) {
+        if self.isolated != Some(from) && self.isolated != Some(to) {
+            self.events.push_back(Event::Deliver { from, to, bytes });
+        }
     }
 
     /// The default step, then every deviation still affordable.
@@ -121,6 +161,7 @@ impl State {
             (true, Some(i)) => steps.push((Step::Timeout(i), false)),
             (true, None) => {}
         }
+        self.crash_steps(&mut steps);
         if self.deviations == 0 {
             return steps;
         }
@@ -144,21 +185,8 @@ impl State {
             if Some(i) != default_timer && self.nodes[i].replica.next_deadline().is_some() {
                 steps.push((Step::Timeout(i), true));
             }
-            if self.crashes > 0 {
-                let first = self.events.iter().find_map(|e| match e {
-                    Event::Persisted { node, records, replace, .. } if *node == i => {
-                        Some((records.len(), *replace))
-                    }
-                    _ => None,
-                });
-                let keeps = match first {
-                    None => 1,
-                    Some((_, true)) => 2,
-                    Some((n, false)) => n + 1,
-                };
-                for keep in 0..keeps {
-                    steps.push((Step::Crash { node: i, keep }, true));
-                }
+            if self.isolated.is_none() {
+                steps.push((Step::Isolate(i), true));
             }
         }
         steps
@@ -168,7 +196,7 @@ impl State {
         self.depth += 1;
         match step {
             Step::Run(k) => match self.events.remove(k).expect("offered event exists") {
-                Event::Deliver { to, bytes } => {
+                Event::Deliver { to, bytes, .. } => {
                     let n = &mut self.nodes[to];
                     n.replica.handle(Timestamp(n.now), Input::Message(bytes)).map_err(|e| e.to_string())?;
                     self.drain(to)
@@ -180,7 +208,9 @@ impl State {
                     } else {
                         n.durable.extend(records);
                     }
-                    self.events.extend(then.into_iter().map(|(to, bytes)| Event::Deliver { to, bytes }));
+                    for (to, bytes) in then {
+                        self.post(node, to, bytes);
+                    }
                     let n = &mut self.nodes[node];
                     n.replica.handle(Timestamp(n.now), Input::Persisted(id)).map_err(|e| e.to_string())?;
                     self.drain(node)
@@ -201,6 +231,13 @@ impl State {
                 n.now = n.now.max(at);
                 n.replica.handle_timeout(Timestamp(n.now)).map_err(|e| e.to_string())?;
                 self.drain(i)
+            }
+            Step::Isolate(node) => {
+                self.isolated = Some(node);
+                self.events.retain(
+                    |e| !matches!(e, Event::Deliver { from, to, .. } if *from == node || *to == node),
+                );
+                Ok(())
             }
             Step::Crash { node, keep } => self.crash(node, keep),
         }
@@ -233,10 +270,24 @@ impl State {
         n.durable.extend(kept);
         n.starts += 1;
         n.next_commit = 0;
-        n.proposed.clear();
+        let lost: Vec<Bytes> = std::mem::take(&mut n.proposed).into_values().collect();
         n.replica = Replica::new(config(total, node, n.starts), n.durable.clone(), Timestamp(n.now))
             .map_err(|e| e.to_string())?;
-        self.drain(node)
+        self.drain(node)?;
+        // The client retries writes whose outcome it never learned, as new payloads.
+        let lost: Vec<Bytes> = lost.into_iter().filter(|p| !self.committed_at.contains_key(p)).collect();
+        for p in lost {
+            self.required.retain(|r| *r != p);
+            let retry =
+                Bytes::from(format!("{}/retry{}", String::from_utf8_lossy(&p), self.nodes[node].starts));
+            let n = &mut self.nodes[node];
+            let id = n.replica.propose(Timestamp(n.now), retry.clone()).map_err(|e| e.to_string())?;
+            n.proposed.insert(id, retry.clone());
+            self.proposals.push(retry.clone());
+            self.required.push(retry);
+            self.drain(node)?;
+        }
+        Ok(())
     }
 
     fn drain(&mut self, i: usize) -> Result<(), String> {
@@ -244,9 +295,7 @@ impl State {
         self.nodes[i].replica.poll_actions(&mut actions);
         for a in actions {
             match a {
-                Action::Send(o) => {
-                    self.events.push_back(Event::Deliver { to: o.to.0 as usize, bytes: o.bytes })
-                }
+                Action::Send(o) => self.post(i, o.to.0 as usize, o.bytes),
                 Action::Persist { id, records, then, replace } => {
                     let then = then.into_iter().map(|o| (o.to.0 as usize, o.bytes)).collect();
                     self.events.push_back(Event::Persisted { node: i, id, records, then, replace });
@@ -302,7 +351,7 @@ impl State {
     }
 
     fn complete(&self) -> bool {
-        self.proposals.iter().all(|p| self.committed_at.contains_key(p))
+        self.required.iter().all(|p| self.committed_at.contains_key(p))
             && self.nodes.iter().all(|n| n.next_commit as usize == self.log.len())
     }
 }
@@ -325,9 +374,11 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         events: VecDeque::new(),
         deviations: cfg.deviations,
         crashes: cfg.crashes,
+        isolated: None,
         log: BTreeMap::new(),
         committed_at: BTreeMap::new(),
         proposals: Vec::new(),
+        required: Vec::new(),
         depth: 0,
     };
     for i in 0..cfg.nodes {
@@ -337,7 +388,8 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         let payload = Bytes::from(format!("w{k}@n{i}"));
         let id = init.nodes[i].replica.propose(Timestamp(0), payload.clone()).map_err(|e| e.to_string())?;
         init.nodes[i].proposed.insert(id, payload.clone());
-        init.proposals.push(payload);
+        init.proposals.push(payload.clone());
+        init.required.push(payload);
         init.drain(i)?;
     }
     Ok(init)
@@ -379,7 +431,12 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
             }
             let mut p = path.clone();
             p.push(step);
-            if let Err(e) = next.apply(step) {
+            let checked = next.apply(step).and_then(|()| {
+                let live: Vec<_> =
+                    next.nodes.iter().enumerate().map(|(i, n)| (i, n.replica.inspect())).collect();
+                crate::invariants::check(cfg.nodes, &live)
+            });
+            if let Err(e) = checked {
                 return Err(format!("{e}\nschedule ({} steps): {p:?}", p.len()));
             }
             stack.push((next, p));
@@ -393,13 +450,19 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
 /// content-oblivious schedule), so long tails are expected but must end.
 const SETTLE_STEPS: usize = 5_000;
 
-/// Follows the default schedule until nothing is pending (no events, no timers).
+/// Heals any partition, then follows the default schedule until nothing is pending (no
+/// events, no timers): liveness once the network is whole again.
 fn settle(mut st: State, max: usize) -> Result<(), String> {
+    st.isolated = None;
     for _ in 0..max {
         if st.events.is_empty() && st.nodes.iter().all(|n| n.replica.next_deadline().is_none()) {
             return Ok(());
         }
-        let Some((step, _)) = st.steps().into_iter().next() else { return Ok(()) };
+        let Some((step, _)) =
+            st.steps().into_iter().find(|(s, _)| matches!(s, Step::Run(0) | Step::Timeout(_)))
+        else {
+            return Ok(());
+        };
         st.apply(step)?;
     }
     Err(format!("liveness: still busy after {max} default steps (log {} slots)", st.log.len()))
@@ -416,7 +479,9 @@ fn replay(cfg: &ModelConfig, path: &[Step]) {
             .iter()
             .skip(before.saturating_sub(1))
             .map(|e| match e {
-                Event::Deliver { to, bytes } => format!("msg->{to} k{}", bytes.get(3).copied().unwrap_or(0)),
+                Event::Deliver { to, bytes, .. } => {
+                    format!("msg->{to} k{}", bytes.get(3).copied().unwrap_or(0))
+                }
                 Event::Persisted { node, records, .. } => {
                     let kinds: Vec<u8> = records.iter().map(|r| r.get(3).copied().unwrap_or(0)).collect();
                     format!("persist@{node} rec{kinds:?}")

@@ -6,6 +6,7 @@
 //! restart with a fresh seed. After every action the log-level oracles run; after the
 //! fault phase the cluster must converge and commit every live proposal.
 
+pub mod invariants;
 mod kv;
 pub mod model;
 mod rng;
@@ -477,7 +478,18 @@ impl Sim {
                 self.drain(node);
             }
         }
-        Ok(())
+        self.check_internal()
+    }
+
+    /// G1, G3–G5 across every live replica's protocol state.
+    fn check_internal(&self) -> Result<(), String> {
+        let live: Vec<_> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| n.replica.as_ref().map(|r| (i, r.inspect())))
+            .collect();
+        invariants::check(self.cfg.nodes, &live).map_err(|e| self.fail(&e))
     }
 
     fn inject_faults(&mut self) {

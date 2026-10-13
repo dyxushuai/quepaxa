@@ -161,16 +161,17 @@ ABI major version is 0, any minor bump may be incompatible.
 | Unit / TDD | nextest | worked examples of Alg. 3/4, codec golden bytes, API contracts |
 | Properties | proptest | recorder invariants R1–R6, ordering, codec round-trips, adversarial member messages |
 | Single-slot simulation | `slot_sim` (core, test-only) | G1–G5 after every event under loss, duplication, reordering, partitions |
-| Replica simulation | `quepaxa-sim` | agreement, validity, at-most-once, ordered commits, KV linearizability, convergence; crash-restart losing unsynced or torn writes; snapshots |
-| Model checking | delay-bounded explorer over the real `Replica` | every schedule within k deviations (reorder, loss, duplication, early timer, crash): safety in every state; liveness (settling under the default schedule) at the depth bound |
+| Replica simulation | `quepaxa-sim` | agreement, validity, at-most-once, ordered commits, KV linearizability, convergence; G1/G3/G4/G5 on every replica's recorder state after every event; crash-restart losing unsynced or torn writes; snapshots |
+| Model checking | delay-bounded explorer over the real `Replica` | every schedule within k deviations (reorder, loss, duplication, early timer, partitioning a replica) plus a separate crash-restart budget (losing any suffix of the write in progress; the client then retries): G1/G3/G4/G5, agreement, validity, at-most-once and `Committed` identity in every state; liveness (settling after the partition heals) at the depth bound |
 | Fuzzing | bolero (libFuzzer + ASan) | wire, batch, durable record and core-state decoding |
 | Unsafe code | Miri; ASan/UBSan on the C smoke test | FFI |
 | Mutation | cargo-mutants (weekly) | test strength |
 
 Per PR: fmt, clippy `-D warnings`, nextest on Tier 1, doctests, MSRV and `no_std` builds,
 cargo-deny, FFI header/symbol diff, Miri, C smoke tests, model checking at 2 deviations,
-semver checks once 0.2.0 is published. Nightly: 20 min fuzzing per target, 100k simulator
-seeds per scenario, model checking at 3 deviations, deep proptests, Criterion against the
+semver checks, model checking (release build) of three scenarios exhausted per PR.
+Nightly: 20 min fuzzing per target, 100k simulator seeds per scenario, model checking with
+one more deviation per scenario, deep proptests, Criterion against the
 previous night (fails above 10%), coverage. Weekly: sharded mutants. Failures open issues.
 
 ## 10. Platforms

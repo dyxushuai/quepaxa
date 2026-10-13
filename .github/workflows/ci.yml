@@ -62,8 +62,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace --no-fail-fast --no-tests=pass
+      - run: cargo nextest run --workspace --no-fail-fast --no-tests=pass -E 'not binary(model_check)'
       - run: cargo test --workspace --doc
+      - name: Model checking (release build; every scenario must be exhausted)
+        run: cargo nextest run --release -p quepaxa-sim --test model_check --no-fail-fast
 
   msrv:
     needs: changes
@@ -152,7 +154,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace --no-fail-fast --no-tests=pass
+      # Model checking runs once, in release, in the `test` job.
+      - run: cargo nextest run --workspace --no-fail-fast --no-tests=pass -E 'not binary(model_check)'
       - run: cargo test --workspace --doc
       - name: C smoke test
         if: runner.os != 'Windows'
