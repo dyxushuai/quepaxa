@@ -20,7 +20,10 @@ static int saw_payload[N];
 
 static void check(int32_t rc, const char *what) {
   if (rc < 0) {
-    fprintf(stderr, "%s failed: %s\n", what, qpx_status_str(rc));
+    char detail[256];
+    size_t len;
+    if (qpx_last_error(detail, sizeof detail, &len) != QPX_OK) detail[0] = '\0';
+    fprintf(stderr, "%s failed: %s (%s)\n", what, qpx_status_str(rc), detail);
     exit(1);
   }
 }
@@ -88,7 +91,7 @@ int main(void) {
   qpx_replica *r[N];
   for (int i = 0; i < N; i++) {
     qpx_config cfg;
-    check(qpx_config_init(&cfg), "qpx_config_init");
+    check(qpx_config_init(&cfg, sizeof cfg), "qpx_config_init");
     memcpy(cfg.cluster_id, "c-smoke-cluster!", 16);
     cfg.id = (uint32_t)i;
     cfg.members = members;
