@@ -168,10 +168,10 @@ Gates:
 
 - Tier 1 (native full tests): `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-2025`, `windows-11-arm`, `macos-15`, `macos-15-intel`.
 - Tier 2: Android (cargo-ndk, NDK r28+, emulator smoke), iOS (xcframework, simulator smoke), `wasm32-unknown-unknown` and `thumbv7em-none-eabihf` (core builds only).
-- First release is `quepaxa` 0.2.0. The 0.1.0 placeholder, owned by the user's `johntaiko` account, is yanked after 0.2.0 ships. Also reserve `quepaxa-ffi` then.
+- First release is `quepaxa` 0.2.0. The 0.1.0 placeholder (crate now owned by `dyxushuai`) is yanked after 0.2.0 ships. Also reserve `quepaxa-ffi` then.
 - Publishing uses crates.io trusted publishing from tag CI. GitHub Releases carry the header, Tier 1 libraries (Linux built against glibc 2.28 via cargo-zigbuild), Android `.so` files and an iOS xcframework. This requires a public GitHub repo, which the user creates.
 - Benchmarks: criterion on `record`, the codec and the replica loop. End-to-end runs use `examples/kv-tokio` on loopback and on netem WAN, with the Go repo's 17-byte KV Poisson open-loop workload. Results are hypotheses, not production claims.
 
 ## 11. Backlog
 
-TDD-ordered tickets live in `.scratch/quepaxa-v1/issues/`. Each starts from a failing test.
+TDD-ordered tickets live on GitHub: tracking issue [#1](https://github.com/dyxushuai/quepaxa/issues/1) with sub-issues #2–#18 under milestone `v0.2.0`, blocking edges as native issue dependencies. Each starts from a failing test.
