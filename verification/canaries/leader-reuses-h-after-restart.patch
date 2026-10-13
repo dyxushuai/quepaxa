@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
+index e91314d..26faa76 100644
+--- a/crates/quepaxa/src/replica/mod.rs
++++ b/crates/quepaxa/src/replica/mod.rs
+@@ -228,7 +228,7 @@ impl Replica {
+             next_batch: 0,
+             next_proposal: 0,
+             next_alloc: 0,
+-            h_floor: reservation.map_or(0, |r| r + 1),
++            h_floor: 0,
+             reserved_through: None,
+             reserved_durable: None,
+             floor,

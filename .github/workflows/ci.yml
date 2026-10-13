@@ -35,6 +35,7 @@ jobs:
               - 'Cargo.toml'
               - 'Cargo.lock'
               - 'deny.toml'
+              - 'verification/**'
               - '.github/workflows/ci.yml'
 
   lint:
@@ -265,12 +266,26 @@ jobs:
           fi
           cargo semver-checks -p quepaxa --baseline-version "$latest"
 
+  canaries:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Every seeded bug is still caught (verification/canaries.sh)
+        run: verification/canaries.sh
+
   ci-ok:
     if: always()
-    needs: [changes, lint, test, msrv, no-std, deny, ffi, miri, tier1, wasm, android, ios, semver]
+    needs: [changes, lint, test, msrv, no-std, deny, ffi, miri, tier1, wasm, android, ios, semver, canaries]
     runs-on: ubuntu-24.04
     steps:
       - uses: re-actors/alls-green@release/v1
         with:
-          allowed-skips: lint, test, msrv, no-std, deny, ffi, miri, tier1, wasm, android, ios, semver
+          allowed-skips: lint, test, msrv, no-std, deny, ffi, miri, tier1, wasm, android, ios, semver, canaries
           jobs: ${{ toJSON(needs) }}

@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
+index e91314d..a750f33 100644
+--- a/crates/quepaxa/src/replica/mod.rs
++++ b/crates/quepaxa/src/replica/mod.rs
+@@ -459,7 +459,7 @@ impl Replica {
+             return;
+         }
+         let out = self.encode(to, body);
+-        if self.ready {
++        if true {
+             self.actions.push(Action::Send(out));
+         } else {
+             self.gated.push(out);
