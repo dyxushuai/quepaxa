@@ -146,6 +146,21 @@ fn invalid_configs_are_rejected() {
 }
 
 #[test]
+fn configs_that_would_misbehave_at_runtime_are_rejected() {
+    let bad: [fn(&mut Config); 4] = [
+        |c| (c.hedge_min, c.hedge_max) = (10, 5),
+        |c| c.hedge_max = 0,
+        |c| c.max_in_flight_slots = 65,
+        |c| c.max_message_bytes = 2 * c.max_batch_bytes,
+    ];
+    for tweak in bad {
+        let mut cfg = config(&[0, 1, 2]);
+        tweak(&mut cfg);
+        assert!(matches!(Replica::new(cfg, [], T0), Err(Error::InvalidConfig(_))));
+    }
+}
+
+#[test]
 fn garbage_network_input_is_counted_and_ignored() {
     let mut r = Replica::new(config(&[0, 1, 2]), [], T0).unwrap();
     drain(&mut r);

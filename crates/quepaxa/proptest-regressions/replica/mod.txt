@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2daa4e148ae5b2c38096e52e791ad896dbb6e223db0615fe79e5836d1ece7274 # shrinks to msgs = [(1, Entries { first: Slot(18446744073709551615), proposals: [] })]

@@ -9,6 +9,15 @@ pub struct Slot(pub u64);
 /// Logical clock of one slot: `4 * round + phase`, starting at 4 (round 1, phase 0).
 pub(crate) type Step = u32;
 
+/// Steps beyond this are rejected as malformed, which keeps step arithmetic from
+/// overflowing. Correct replicas stay far below it (a slot needs more than ~256 rounds only
+/// with negligible probability, paper §4.2.2 fn. 5); only a Byzantine member, outside the
+/// crash-fault model, could push a slot near it.
+pub(crate) const MAX_STEP: Step = u32::MAX - 16;
+
+/// Slots past this are rejected so slot arithmetic (window, reservations) cannot overflow.
+pub(crate) const MAX_SLOT: u64 = u64::MAX - (1 << 32);
+
 /// Monotonic time in nanoseconds, supplied by the caller; the epoch is the caller's choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Timestamp(pub u64);

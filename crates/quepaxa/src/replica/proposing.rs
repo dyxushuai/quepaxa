@@ -15,7 +15,7 @@ use crate::codec::{Body, WireProposal};
 use crate::durable::Record;
 use crate::proposal::{LEADER_PRIORITY, Proposal, ValueKey};
 use crate::proposer::{Progress, Reply, SlotProposer};
-use crate::types::{NodeId, Slot, Timestamp};
+use crate::types::{MAX_STEP, NodeId, Slot, Timestamp};
 
 impl Replica {
     pub(super) fn on_reply(
@@ -27,6 +27,11 @@ impl Replica {
         first: Option<WireProposal>,
         prev_agg: Option<WireProposal>,
     ) {
+        // A recorder never reports a step below the request's; huge steps are malformed.
+        if step < req_step || step > MAX_STEP {
+            self.metrics.messages_rejected += 1;
+            return;
+        }
         let Some(active) = self.proposers.get_mut(&slot) else { return };
         if req_step != active.prop.step() {
             return;
@@ -141,6 +146,7 @@ impl Replica {
             let len = batch::encoded_len(&e);
             if !chunk.is_empty() && size + len > max {
                 self.send(leader, Body::Forward { batch: batch::encode(&chunk) });
+                self.metrics.forwarded += 1;
                 chunk.clear();
                 size = 4;
             }

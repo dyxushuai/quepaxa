@@ -14,7 +14,8 @@ use crate::recorder::Register;
 use crate::rng::ChaCha20;
 use crate::types::{NodeId, Slot, Step};
 
-const CTX: WireCtx = WireCtx { cluster_id: [1; 16], config_epoch: 0, max_message_bytes: 1 << 16 };
+const CTX: WireCtx =
+    WireCtx { cluster_id: [1; 16], config_epoch: 0, max_message_bytes: 1 << 16, max_value_bytes: 1 << 15 };
 const SLOT: Slot = Slot(0);
 
 #[derive(Clone, Copy, Debug)]

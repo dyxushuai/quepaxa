@@ -98,7 +98,7 @@ impl Replica {
 
     fn check_state(&self, through: Slot, core_state: &Bytes) -> Result<CoreState, Error> {
         let state = CoreState::decode(core_state, &self.cfg.members).map_err(|_| Error::InvalidCoreState)?;
-        if through.0.checked_add(1) != Some(state.next) {
+        if through.0.checked_add(1) != Some(state.next) || state.next > crate::types::MAX_SLOT {
             return Err(Error::InvalidCoreState);
         }
         Ok(state)

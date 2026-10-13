@@ -24,7 +24,7 @@ use crate::proposer::SlotProposer;
 use crate::recorder::Register;
 use crate::rng::ChaCha20;
 use crate::schedule::Schedule;
-use crate::types::{NodeId, PersistId, ProposalId, Slot, Timestamp};
+use crate::types::{MAX_SLOT, MAX_STEP, NodeId, PersistId, ProposalId, Slot, Timestamp};
 
 #[cfg_attr(feature = "model", derive(Clone, Hash))]
 struct Decision {
@@ -145,6 +145,9 @@ impl Replica {
             match Record::decode(&bytes).map_err(|_| Error::CorruptRecord { index })? {
                 Record::Incarnation(n) => last_incarnation = last_incarnation.max(n),
                 Record::Recorder { slot, reg } => {
+                    if reg.step > MAX_STEP || slot.0 > MAX_SLOT {
+                        return Err(Error::CorruptRecord { index });
+                    }
                     registers.insert(slot, reg);
                 }
                 Record::Reservation { through } => reservation = reservation.max(Some(through.0)),
@@ -154,7 +157,7 @@ impl Replica {
                 Record::Compacted { through, core_state } => {
                     let state = CoreState::decode(&core_state, &cfg.members)
                         .map_err(|_| Error::CorruptRecord { index })?;
-                    if state.next != through.0 + 1 {
+                    if through.0.checked_add(1) != Some(state.next) || state.next > MAX_SLOT {
                         return Err(Error::CorruptRecord { index });
                     }
                     if snapshot.as_ref().is_none_or(|(s, _)| s.next < state.next) {
@@ -167,8 +170,12 @@ impl Replica {
         log = log.split_off(&Slot(floor));
         registers = registers.split_off(&Slot(floor));
         registers.retain(|slot, _| !log.contains_key(slot));
-        let wire =
-            WireCtx { cluster_id: cfg.cluster_id, config_epoch: 0, max_message_bytes: cfg.max_message_bytes };
+        let wire = WireCtx {
+            cluster_id: cfg.cluster_id,
+            config_epoch: 0,
+            max_message_bytes: cfg.max_message_bytes,
+            max_value_bytes: cfg.max_batch_bytes,
+        };
         let mut r = Self {
             me: cfg.id,
             wire,
@@ -491,7 +498,8 @@ impl Replica {
                     Body::CatchUp { from: start } => self.on_catch_up(from, start),
                     Body::Entries { first, proposals } => {
                         self.catch_up_sent = None;
-                        for (slot, p) in (first.0..).zip(proposals) {
+                        for (i, p) in proposals.into_iter().enumerate() {
+                            let Some(slot) = first.0.checked_add(i as u64) else { break };
                             self.learn(Slot(slot), p, false);
                         }
                     }
@@ -526,5 +534,85 @@ impl Replica {
         let mut h = Fnv(0xcbf2_9ce4_8422_2325);
         core::hash::Hash::hash(self, &mut h);
         core::hash::Hasher::finish(&h)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::reply_proposal;
+    use proptest::prelude::*;
+
+    fn replica() -> Replica {
+        let cfg = Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+        let mut r = Replica::new(cfg, [], Timestamp(0)).unwrap();
+        let mut out = Vec::new();
+        r.poll_actions(&mut out);
+        r.handle(Timestamp(0), Input::Persisted(PersistId(0))).unwrap();
+        r.poll_actions(&mut out);
+        r
+    }
+
+    fn proposal(priority: u64, origin: u32, seq: u64) -> Proposal {
+        Proposal {
+            priority,
+            key: ValueKey { origin: NodeId(origin), incarnation: 1, seq },
+            value: batch::encode(&[]),
+        }
+    }
+
+    fn arb_body() -> impl Strategy<Value = Body> {
+        let p = (any::<u64>(), 0u32..4, 0u64..3).prop_map(|(pr, o, s)| proposal(pr, o, s));
+        let slot = prop_oneof![0u64..4, Just(u64::MAX), any::<u64>()].prop_map(Slot);
+        let step = prop_oneof![0u32..12, Just(u32::MAX), any::<u32>()];
+        prop_oneof![
+            (slot.clone(), step.clone(), p.clone()).prop_map(|(slot, step, proposal)| Body::RecordRequest {
+                slot,
+                step,
+                proposal
+            }),
+            (
+                slot.clone(),
+                step.clone(),
+                step,
+                proptest::option::of(p.clone()),
+                proptest::option::of(p.clone())
+            )
+                .prop_map(|(slot, req_step, step, f, a)| {
+                    let key = ValueKey { origin: NodeId(0), incarnation: 1, seq: 0 };
+                    Body::RecordReply {
+                        slot,
+                        req_step,
+                        step,
+                        first: f.map(|f| reply_proposal(&f, key)),
+                        prev_agg: a.map(|a| reply_proposal(&a, key)),
+                    }
+                }),
+            (slot.clone(), p.clone()).prop_map(|(slot, proposal)| Body::Decided { slot, proposal }),
+            slot.clone().prop_map(|from| Body::CatchUp { from }),
+            (slot.clone(), proptest::collection::vec(p, 0..3))
+                .prop_map(|(first, proposals)| Body::Entries { first, proposals }),
+            slot.prop_map(|through| Body::Compacted { through }),
+        ]
+    }
+
+    proptest! {
+        // Well-formed messages with adversarial field values from members never panic or
+        // violate the API contract.
+        #[test]
+        fn arbitrary_member_messages_are_handled(msgs in proptest::collection::vec((1u32..3, arb_body()), 1..40)) {
+            let mut r = replica();
+            r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
+            let mut out = Vec::new();
+            r.poll_actions(&mut out);
+            for (i, (from, body)) in msgs.into_iter().enumerate() {
+                let env = Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(from), to: NodeId(0), commit_index: i as u64 };
+                let bytes = Message { env, body }.encode();
+                prop_assert!(r.handle(Timestamp(2 + i as u64), Input::Message(bytes)).is_ok());
+                r.poll_actions(&mut out);
+                let _ = r.handle_timeout(Timestamp(1_000_000_000 * (i as u64 + 1)));
+                r.poll_actions(&mut out);
+            }
+        }
     }
 }

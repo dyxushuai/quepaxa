@@ -35,7 +35,7 @@ impl Register {
             self.agg = Some(v);
             true
         } else if s > self.step {
-            self.prev_agg = if s == self.step + 1 { self.agg.take() } else { None };
+            self.prev_agg = if self.step.checked_add(1) == Some(s) { self.agg.take() } else { None };
             self.step = s;
             self.first = Some(v.clone());
             self.agg = Some(v);
