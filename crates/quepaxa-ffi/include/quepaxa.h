@@ -18,11 +18,13 @@
 // - Every start (including restarts) needs a fresh CSPRNG seed in qpx_config.seed.
 // - A library panic returns QPX_ERR_PANIC and poisons the handle (QPX_ERR_POISONED).
 
-// ABI major version: incompatible changes bump it.
+// ABI major version: incompatible changes bump it. While it is 0 the ABI is unstable and
+// every minor bump may be incompatible.
 #define QPX_ABI_VERSION_MAJOR 0
 
-// ABI minor version: additive changes bump it.
-#define QPX_ABI_VERSION_MINOR 1
+// ABI minor version: additive changes bump it (any change while the major is 0).
+// 0.2: `qpx_install_snapshot` may return `QPX_IGNORED`.
+#define QPX_ABI_VERSION_MINOR 2
 
 // Success.
 #define QPX_OK 0
@@ -89,13 +91,14 @@
 // Fetch `peer`'s application snapshot covering `slot` and call `qpx_install_snapshot`.
 #define QPX_ACTION_SNAPSHOT_NEEDED 6
 
-// Local proposal `id` will never commit (`flags` = `QPX_DROP_*`).
+// Local proposal `id` will not be reported again (`flags` = `QPX_DROP_*`). With
+// `QPX_DROP_FENCED` the outcome is unknown: it may still commit, as after a crash.
 #define QPX_ACTION_DROPPED 7
 
 // `flags` bit of `QPX_ACTION_PERSIST`: replace all earlier records.
 #define QPX_PERSIST_REPLACE 1
 
-// `flags` of `QPX_ACTION_DROPPED`: the replica is fenced.
+// `flags` of `QPX_ACTION_DROPPED`: the replica is fenced (outcome unknown).
 #define QPX_DROP_FENCED 1
 
 // An opaque replica handle.

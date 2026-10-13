@@ -198,6 +198,8 @@ pub struct Metrics {
     pub messages_rejected: u64,
     /// Record requests re-sent after `retransmit_interval`.
     pub retransmits: u64,
+    /// Bulk catch-up requests re-sent after `retransmit_interval`.
+    pub catch_up_retries: u64,
     /// Slots this replica learned as decided.
     pub slots_decided: u64,
     /// Decisions this replica's proposers reached on the leader fast path.

@@ -273,9 +273,10 @@ impl Replica {
             }
         }
         if self.peer_committed > self.committed + 1 && self.catch_up_due() {
-            let peer = self.catch_up.map(|(p, _)| p).or(self.ahead_peer);
+            // Prefer the most advanced peer; the previous target may be the one that failed.
+            let peer = self.ahead_peer.or(self.catch_up.map(|(p, _)| p));
             if let Some(peer) = peer {
-                self.metrics.retransmits += 1;
+                self.metrics.catch_up_retries += 1;
                 self.request_catch_up(peer);
             }
         }

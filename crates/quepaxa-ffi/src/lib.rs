@@ -19,10 +19,12 @@ use std::{ptr, slice};
 use bytes::Bytes;
 use quepaxa::{Action, Config, DropReason, Error, Input, NodeId, PersistId, Replica, Slot, Timestamp};
 
-/// ABI major version: incompatible changes bump it.
+/// ABI major version: incompatible changes bump it. While it is 0 the ABI is unstable and
+/// every minor bump may be incompatible.
 pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
-/// ABI minor version: additive changes bump it.
-pub const QPX_ABI_VERSION_MINOR: u32 = 1;
+/// ABI minor version: additive changes bump it (any change while the major is 0).
+/// 0.2: `qpx_install_snapshot` may return `QPX_IGNORED`.
+pub const QPX_ABI_VERSION_MINOR: u32 = 2;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -69,12 +71,13 @@ pub const QPX_ACTION_COMMITTED: u32 = 4;
 pub const QPX_ACTION_READ_READY: u32 = 5;
 /// Fetch `peer`'s application snapshot covering `slot` and call `qpx_install_snapshot`.
 pub const QPX_ACTION_SNAPSHOT_NEEDED: u32 = 6;
-/// Local proposal `id` will never commit (`flags` = `QPX_DROP_*`).
+/// Local proposal `id` will not be reported again (`flags` = `QPX_DROP_*`). With
+/// `QPX_DROP_FENCED` the outcome is unknown: it may still commit, as after a crash.
 pub const QPX_ACTION_DROPPED: u32 = 7;
 
 /// `flags` bit of `QPX_ACTION_PERSIST`: replace all earlier records.
 pub const QPX_PERSIST_REPLACE: u32 = 1;
-/// `flags` of `QPX_ACTION_DROPPED`: the replica is fenced.
+/// `flags` of `QPX_ACTION_DROPPED`: the replica is fenced (outcome unknown).
 pub const QPX_DROP_FENCED: u32 = 1;
 
 /// A borrowed byte range. `ptr` may be null when `len` is 0.

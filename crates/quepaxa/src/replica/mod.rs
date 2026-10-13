@@ -518,14 +518,18 @@ impl Replica {
                     Body::Decided { slot, proposal } => self.learn(slot, proposal, false),
                     Body::CatchUp { from: start } => self.on_catch_up(from, start),
                     Body::Entries { first, proposals } => {
-                        self.catch_up = None;
                         for (i, p) in proposals.into_iter().enumerate() {
                             let Some(slot) = first.0.checked_add(i as u64) else { break };
                             self.learn(Slot(slot), p, false);
                         }
-                        // Still behind after one page: ask the same peer for the next one.
-                        if self.peer_committed > self.committed + 1 {
-                            self.request_catch_up(from);
+                        // A late or duplicate page from another peer is still useful, but only
+                        // the active request's answer moves the catch-up along.
+                        if self.catch_up.is_some_and(|(peer, _)| peer == from) {
+                            self.catch_up = None;
+                            // Still behind after one page: ask the same peer for the next one.
+                            if self.peer_committed > self.committed + 1 {
+                                self.request_catch_up(from);
+                            }
                         }
                     }
                     Body::Forward { batch } => self.on_forward(&batch),
@@ -619,6 +623,52 @@ mod tests {
                 .prop_map(|(first, proposals)| Body::Entries { first, proposals }),
             slot.prop_map(|through| Body::Compacted { through }),
         ]
+    }
+
+    #[test]
+    fn lost_catch_up_request_is_retried_on_the_timer() {
+        let mut r = replica();
+        let mut out = Vec::new();
+        let catch_ups = |out: &[Action]| {
+            out.iter()
+                .filter(|a| match a {
+                    Action::Send(o) => {
+                        matches!(
+                            Message::decode(&o.bytes, &r_wire()),
+                            Ok(Message { body: Body::CatchUp { .. }, .. })
+                        )
+                    }
+                    _ => false,
+                })
+                .count()
+        };
+        // A peer advertises ten decided slots; the request it triggers is lost.
+        let env = Envelope {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            from: NodeId(1),
+            to: NodeId(0),
+            commit_index: 10,
+        };
+        let msg = Message { env, body: Body::CatchUp { from: Slot(0) } }.encode();
+        r.handle(Timestamp(1), Input::Message(msg)).unwrap();
+        r.poll_actions(&mut out);
+        assert_eq!(catch_ups(&out), 1);
+        out.clear();
+        let deadline = r.next_deadline().expect("a retry is scheduled");
+        r.handle_timeout(deadline).unwrap();
+        r.poll_actions(&mut out);
+        assert_eq!(catch_ups(&out), 1, "{out:?}");
+        assert_eq!(r.metrics().catch_up_retries, 1);
+    }
+
+    fn r_wire() -> WireCtx {
+        WireCtx {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            max_message_bytes: 16 << 20,
+            max_value_bytes: 1 << 20,
+        }
     }
 
     #[test]

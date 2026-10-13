@@ -9,7 +9,8 @@ use crate::dedup::Dedup;
 use crate::schedule::Schedule;
 use crate::types::NodeId;
 
-const VERSION: u8 = 1;
+/// 2: the schedule is the one as of `next` (version 1 stored the decided-prefix schedule).
+const VERSION: u8 = 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CoreState {
