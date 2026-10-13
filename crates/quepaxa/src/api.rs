@@ -138,6 +138,14 @@ pub enum Action {
         /// Where it was committed.
         slot: Slot,
     },
+    /// A read barrier is in the log: after applying every commit up to and including
+    /// `slot`, application state may serve a linearizable read.
+    ReadReady {
+        /// The barrier.
+        id: ProposalId,
+        /// The barrier's slot.
+        slot: Slot,
+    },
     /// A local proposal will never commit.
     Dropped {
         /// The proposal.

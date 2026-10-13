@@ -109,22 +109,27 @@ impl Replica {
             }
             let slot = Slot(self.emitted);
             let key = d.proposal.key;
-            let mut entries = batch::decode(&d.proposal.value).unwrap_or_else(|_| {
+            let mut items = batch::decode(&d.proposal.value).unwrap_or_else(|_| {
                 self.metrics.corrupt_batches += 1;
                 Vec::new()
             });
-            entries.retain(|e| self.dedup.first_time(e.origin, e.incarnation, e.id));
-            let mine: Vec<ProposalId> = entries
+            items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
+            let mine: Vec<(ProposalId, bool)> = items
                 .iter()
-                .filter(|e| e.origin == self.me && e.incarnation == self.incarnation)
-                .map(|e| e.id)
+                .filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)
+                .map(|i| (i.entry.id, i.barrier))
                 .collect();
+            let entries = items.into_iter().filter(|i| !i.barrier).map(|i| i.entry).collect();
             self.actions.push(Action::Commit { slot, entries });
-            for id in mine {
+            for (id, barrier) in mine {
                 self.forwarded.remove(&id);
                 if let Some(at) = self.outstanding.remove(&id) {
                     self.observe_latency(self.now.0.saturating_sub(at.0));
-                    self.actions.push(Action::Committed { id, slot });
+                    self.actions.push(if barrier {
+                        Action::ReadReady { id, slot }
+                    } else {
+                        Action::Committed { id, slot }
+                    });
                 }
             }
             if key.origin == self.me && key.incarnation == self.incarnation {

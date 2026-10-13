@@ -10,7 +10,10 @@ fn calm(nodes: usize, seed: u64) -> SimConfig {
 fn fault_free_cluster_commits_every_proposal() {
     for n in [1, 3, 5] {
         let report = Sim::new(calm(n, 1)).run().unwrap();
-        assert!(report.entries > 100 && report.entries == report.proposals, "{report:?}");
+        assert!(
+            report.entries > 100 && report.entries == report.proposals && report.reads > 50,
+            "{report:?}"
+        );
     }
 }
 

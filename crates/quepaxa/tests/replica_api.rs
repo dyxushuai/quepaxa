@@ -153,3 +153,28 @@ fn garbage_network_input_is_counted_and_ignored() {
     assert!(drain(&mut r).is_empty());
     assert_eq!(r.metrics().messages_rejected, 1);
 }
+
+#[test]
+fn read_barrier_reports_a_slot_after_earlier_commits() {
+    let mut r = Replica::new(config(&[0]), [], T0).unwrap();
+    let mut disk = Vec::new();
+    settle(&mut r, &mut disk);
+    let write = r.propose(T0, Bytes::from_static(b"x")).unwrap();
+    let mut seen = settle(&mut r, &mut disk);
+    let read = r.read_barrier(T0).unwrap();
+    seen.extend(settle(&mut r, &mut disk));
+    let ws = seen
+        .iter()
+        .find_map(|a| match a {
+            Action::Committed { id, slot } if *id == write => Some(*slot),
+            _ => None,
+        })
+        .expect("write committed");
+    assert!(seen.iter().any(|a| matches!(a, Action::ReadReady { id, slot } if *id == read && *slot > ws)));
+    assert!(
+        !seen
+            .iter()
+            .any(|a| matches!(a, Action::Commit { entries, .. } if entries.iter().any(|e| e.id == read))),
+        "barriers never reach the application"
+    );
+}

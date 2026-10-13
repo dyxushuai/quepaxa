@@ -10,7 +10,7 @@
 use alloc::vec::Vec;
 
 use super::{Active, LocalBatch, Replica};
-use crate::batch::{self, Entry};
+use crate::batch::{self, Item};
 use crate::codec::{Body, WireProposal};
 use crate::durable::Record;
 use crate::proposal::{LEADER_PRIORITY, Proposal, ValueKey};
@@ -128,9 +128,11 @@ impl Replica {
             return;
         }
         let leader = self.schedule.leader(Slot(self.committed));
-        let entries: Vec<Entry> = self.pending.drain(..).collect();
-        for e in entries.iter().filter(|e| e.origin == self.me && e.incarnation == self.incarnation) {
-            self.forwarded.insert(e.id, (e.clone(), self.now));
+        let entries: Vec<Item> = self.pending.drain(..).collect();
+        for i in
+            entries.iter().filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)
+        {
+            self.forwarded.insert(i.entry.id, (i.clone(), self.now));
         }
         let max = self.cfg.max_batch_bytes as usize;
         let mut chunk = Vec::new();
@@ -169,7 +171,8 @@ impl Replica {
                 break;
             }
             let Some(e) = queue.pop_front() else { break };
-            if self.dedup.contains(e.origin, e.incarnation, e.id) {
+            let (o, inc, id) = e.key();
+            if self.dedup.contains(o, inc, id) {
                 continue;
             }
             size += len;
@@ -178,11 +181,11 @@ impl Replica {
         (!entries.is_empty()).then(|| self.new_batch(entries))
     }
 
-    fn new_batch(&mut self, entries: Vec<Entry>) -> u64 {
+    fn new_batch(&mut self, entries: Vec<Item>) -> u64 {
         let seq = self.next_batch;
         self.next_batch += 1;
         let key = ValueKey { origin: self.me, incarnation: self.incarnation, seq };
-        let ids = entries.iter().map(|e| (e.origin, e.incarnation, e.id)).collect();
+        let ids = entries.iter().map(Item::key).collect();
         self.batches
             .insert(seq, LocalBatch { key, value: batch::encode(&entries), entries: ids, slot: None });
         seq
