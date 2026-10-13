@@ -163,17 +163,20 @@ impl Ledger {
         Ok(true)
     }
 
-    /// `origin` reported its proposal `id` with `payload` as committed in `slot`, which is
-    /// exact unless an installed snapshot resolved it (then the proposal is at or before it).
+    /// `origin` reported its proposal `id` with `payload` as committed in `slot`. The slot
+    /// is exact, except that a proposal resolved by installing a snapshot through `installed`
+    /// reports `installed` and is at or before it.
     pub fn acknowledged(
         &self,
         origin: NodeId,
         id: ProposalId,
         payload: &Bytes,
         slot: u64,
+        installed: Option<u64>,
     ) -> Result<(), String> {
         let exact = |e: &Entry| e.origin == origin && e.id == id && e.payload == *payload;
-        if self.log.range(..=slot).any(|(_, es)| es.iter().any(exact)) {
+        let from = if installed == Some(slot) { 0 } else { slot };
+        if self.log.range(from..=slot).any(|(_, es)| es.iter().any(exact)) {
             return Ok(());
         }
         let at: Vec<_> = self
@@ -183,7 +186,7 @@ impl Ledger {
             .map(|(s, _)| s)
             .collect();
         Err(format!(
-            "{origin:?} reported Committed {id:?} at slot {slot} but it is not logged by then (payload {payload:?} logged at {at:?})"
+            "{origin:?} reported Committed {id:?} at slot {slot} but it is not logged there (payload {payload:?} logged at {at:?})"
         ))
     }
 

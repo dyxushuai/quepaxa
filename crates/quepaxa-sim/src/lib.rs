@@ -165,6 +165,8 @@ struct Node {
     next_commit: u64,
     /// Durable application snapshot (survives crashes).
     snapshot: Option<Snapshot>,
+    /// Latest peer snapshot installed (its `through`).
+    installed: Option<u64>,
     /// Local proposals of the current incarnation awaiting `Committed`.
     outstanding: HashMap<ProposalId, Bytes>,
     incarnation_payloads: HashMap<ProposalId, Bytes>,
@@ -210,6 +212,7 @@ impl Sim {
                 timer_at: None,
                 next_commit: 0,
                 snapshot: None,
+                installed: None,
                 outstanding: HashMap::new(),
                 incarnation_payloads: HashMap::new(),
             })
@@ -579,6 +582,7 @@ impl Sim {
             self.kv.set_state(i, snap.state.clone());
             self.nodes[i].next_commit = snap.through + 1;
             self.nodes[i].snapshot = Some(snap.clone());
+            self.nodes[i].installed = Some(snap.through);
             self.report.snapshots_installed += 1;
             let _ = writeln!(self.trace, "{} n{i} install snapshot through {}", self.now, snap.through);
             self.drain(i);
@@ -655,8 +659,13 @@ impl Sim {
                 if let Some(p) = &payload {
                     self.kv.write_completed(p);
                 }
-                let logged =
-                    self.ledger.acknowledged(NodeId(i as u32), id, &payload.unwrap_or_default(), slot.0);
+                let logged = self.ledger.acknowledged(
+                    NodeId(i as u32),
+                    id,
+                    &payload.unwrap_or_default(),
+                    slot.0,
+                    self.nodes[i].installed,
+                );
                 if let Err(e) = logged {
                     panic!("{}", self.fail(&e));
                 }

@@ -325,7 +325,7 @@ impl State {
                 Action::Committed { id, slot } => {
                     self.nodes[i].acked.insert(id);
                     let payload = self.nodes[i].proposed.get(&id).cloned().unwrap_or_default();
-                    self.ledger.acknowledged(NodeId(i as u32), id, &payload, slot.0)?;
+                    self.ledger.acknowledged(NodeId(i as u32), id, &payload, slot.0, None)?;
                 }
                 _ => {}
             }
