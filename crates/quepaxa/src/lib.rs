@@ -9,6 +9,7 @@ extern crate alloc;
 
 mod proposal;
 mod recorder;
+mod rng;
 mod types;
 
 pub use types::{NodeId, Slot};
