@@ -55,7 +55,7 @@ fn leader_crash_stalls_commits_only_briefly() {
             .run()
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(report.max_commit_gap_ms < 600, "seed {seed}: {report:?}");
-        assert!(report.slots > 150, "seed {seed}: commits continue without the leader: {report:?}");
+        assert!(report.slots_after_kill > 50, "seed {seed}: commits continue without the leader: {report:?}");
     }
 }
 
