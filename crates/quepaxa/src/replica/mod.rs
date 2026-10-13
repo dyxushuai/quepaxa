@@ -24,7 +24,7 @@ use crate::proposer::SlotProposer;
 use crate::recorder::Register;
 use crate::rng::ChaCha20;
 use crate::schedule::Schedule;
-use crate::types::{NodeId, PersistId, ProposalId, Slot, Timestamp};
+use crate::types::{MAX_SLOT, MAX_STEP, NodeId, PersistId, ProposalId, Slot, Timestamp};
 
 #[cfg_attr(feature = "model", derive(Clone, Hash))]
 struct Decision {
@@ -145,6 +145,9 @@ impl Replica {
             match Record::decode(&bytes).map_err(|_| Error::CorruptRecord { index })? {
                 Record::Incarnation(n) => last_incarnation = last_incarnation.max(n),
                 Record::Recorder { slot, reg } => {
+                    if reg.step > MAX_STEP || slot.0 > MAX_SLOT {
+                        return Err(Error::CorruptRecord { index });
+                    }
                     registers.insert(slot, reg);
                 }
                 Record::Reservation { through } => reservation = reservation.max(Some(through.0)),
@@ -154,7 +157,7 @@ impl Replica {
                 Record::Compacted { through, core_state } => {
                     let state = CoreState::decode(&core_state, &cfg.members)
                         .map_err(|_| Error::CorruptRecord { index })?;
-                    if through.0.checked_add(1) != Some(state.next) {
+                    if through.0.checked_add(1) != Some(state.next) || state.next > MAX_SLOT {
                         return Err(Error::CorruptRecord { index });
                     }
                     if snapshot.as_ref().is_none_or(|(s, _)| s.next < state.next) {

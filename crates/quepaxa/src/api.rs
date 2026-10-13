@@ -12,8 +12,9 @@ const MILLI: u64 = 1_000_000;
 /// Envelope and proposal framing budget on top of the values a message carries.
 const MESSAGE_OVERHEAD: u64 = 1024;
 
-/// Static configuration of one replica. Every member must use the same `cluster_id` and
-/// `members`; `seed` must be fresh CSPRNG output on every start, including restarts.
+/// Static configuration of one replica. Every member must use the same `cluster_id`,
+/// `members` and `max_batch_bytes` (receivers reject values larger than their own limit);
+/// `seed` must be fresh CSPRNG output on every start, including restarts.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "model", derive(Hash))]
 #[non_exhaustive]
@@ -27,7 +28,8 @@ pub struct Config {
     /// Randomness for proposal priorities. Liveness relies on the network being unable to
     /// predict it, so never reuse a seed across starts.
     pub seed: [u8; 32],
-    /// Upper bound on the encoded entries of one batch (one slot).
+    /// Upper bound on the encoded entries of one batch (one slot). Cluster-wide: every
+    /// member must use the same value.
     pub max_batch_bytes: u32,
     /// Upper bound on one encoded network message; larger inputs are dropped unread. Must be
     /// at least `2 * max_batch_bytes + 1024` (a reply can carry two full values).

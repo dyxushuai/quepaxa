@@ -9,11 +9,11 @@ use crate::batch;
 use crate::codec::{Body, reply_proposal};
 use crate::durable::Record;
 use crate::proposal::Proposal;
-use crate::types::{MAX_STEP, NodeId, ProposalId, Slot};
+use crate::types::{MAX_SLOT, MAX_STEP, NodeId, ProposalId, Slot};
 
 impl Replica {
     pub(super) fn on_request(&mut self, from: NodeId, slot: Slot, step: u32, proposal: Proposal) {
-        if step > MAX_STEP {
+        if step > MAX_STEP || slot.0 > MAX_SLOT {
             self.metrics.messages_rejected += 1;
             return;
         }
@@ -81,7 +81,7 @@ impl Replica {
     }
 
     pub(super) fn learn(&mut self, slot: Slot, proposal: Proposal, broadcast: bool) {
-        if slot.0 < self.emitted || self.log.contains_key(&slot) {
+        if slot.0 < self.emitted || slot.0 > MAX_SLOT || self.log.contains_key(&slot) {
             return;
         }
         self.metrics.slots_decided += 1;

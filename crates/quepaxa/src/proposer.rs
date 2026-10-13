@@ -164,7 +164,10 @@ impl SlotProposer {
             },
             _ => {}
         }
-        self.advance(self.step + 1, rng)
+        match self.step.checked_add(1) {
+            Some(next) => self.advance(next, rng),
+            None => Progress::Waiting,
+        }
     }
 
     fn decide(&mut self, v: Option<Proposal>) -> Progress {
