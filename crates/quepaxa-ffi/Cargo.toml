@@ -1,0 +1,17 @@
+[package]
+name = "quepaxa-ffi"
+description = "Stable C ABI for the quepaxa consensus core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+quepaxa = { path = "../quepaxa", version = "0.2.0" }
+
+[lints]
+workspace = true

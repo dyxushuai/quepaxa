@@ -1,0 +1,13 @@
+[package]
+name = "quepaxa"
+description = "QuePaxa consensus as a sans-IO, no_std replicated log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+categories = ["algorithms", "no-std"]
+keywords = ["consensus", "paxos", "quepaxa", "replication", "sans-io"]
+
+[lints]
+workspace = true
