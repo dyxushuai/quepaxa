@@ -105,6 +105,19 @@ pub(crate) struct Message {
     pub body: Body,
 }
 
+impl Body {
+    fn largest_value(&self) -> usize {
+        let wire = |p: &Option<WireProposal>| p.as_ref().and_then(|p| p.value.as_ref()).map_or(0, Bytes::len);
+        match self {
+            Body::RecordRequest { proposal, .. } | Body::Decided { proposal, .. } => proposal.value.len(),
+            Body::RecordReply { first, prev_agg, .. } => wire(first).max(wire(prev_agg)),
+            Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len()).max().unwrap_or(0),
+            Body::Forward { batch } => batch.len(),
+            Body::CatchUp { .. } | Body::Compacted { .. } => 0,
+        }
+    }
+}
+
 /// What the receiver expects from every message.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "model", derive(Hash))]
@@ -112,6 +125,8 @@ pub(crate) struct WireCtx {
     pub cluster_id: [u8; 16],
     pub config_epoch: u64,
     pub max_message_bytes: u32,
+    /// Largest proposal value (encoded batch) accepted.
+    pub max_value_bytes: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -255,6 +270,9 @@ impl Message {
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
+        if body.largest_value() > ctx.max_value_bytes as usize {
+            return Err(DecodeError::TooLarge);
+        }
         Ok(Self { env, body })
     }
 }
@@ -389,7 +407,12 @@ mod tests {
     use super::*;
     use crate::proposal::tests::prop;
 
-    const CTX: WireCtx = WireCtx { cluster_id: [0xAB; 16], config_epoch: 7, max_message_bytes: 1 << 20 };
+    const CTX: WireCtx = WireCtx {
+        cluster_id: [0xAB; 16],
+        config_epoch: 7,
+        max_message_bytes: 1 << 20,
+        max_value_bytes: 1 << 19,
+    };
 
     fn env() -> Envelope {
         Envelope { cluster_id: [0xAB; 16], config_epoch: 7, from: NodeId(1), to: NodeId(2), commit_index: 9 }
@@ -472,6 +495,12 @@ mod tests {
         let n = v.len();
         v[n - 6..n - 2].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(Message::decode(&Bytes::from(v), &CTX), Err(DecodeError::Truncated));
+    }
+
+    #[test]
+    fn value_above_the_batch_limit_is_rejected() {
+        let tight = WireCtx { max_value_bytes: 1, ..CTX };
+        assert_eq!(Message::decode(&request().encode(), &tight), Err(DecodeError::TooLarge));
     }
 
     #[test]

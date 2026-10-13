@@ -9,6 +9,9 @@ use crate::types::{NodeId, PersistId, ProposalId, Slot};
 
 const MILLI: u64 = 1_000_000;
 
+/// Envelope and proposal framing budget on top of the values a message carries.
+const MESSAGE_OVERHEAD: u64 = 1024;
+
 /// Static configuration of one replica. Every member must use the same `cluster_id` and
 /// `members`; `seed` must be fresh CSPRNG output on every start, including restarts.
 #[derive(Clone, Debug)]
@@ -26,7 +29,8 @@ pub struct Config {
     pub seed: [u8; 32],
     /// Upper bound on the encoded entries of one batch (one slot).
     pub max_batch_bytes: u32,
-    /// Upper bound on one encoded network message; larger inputs are dropped unread.
+    /// Upper bound on one encoded network message; larger inputs are dropped unread. Must be
+    /// at least `2 * max_batch_bytes + 1024` (a reply can carry two full values).
     pub max_message_bytes: u32,
     /// How many slots this replica may drive concurrently.
     pub max_in_flight_slots: u32,
@@ -67,8 +71,19 @@ impl Config {
             (sorted.len() == self.members.len(), "members must be unique"),
             (sorted.contains(&self.id), "id must be a member"),
             (self.max_batch_bytes > 0, "max_batch_bytes must be positive"),
-            (self.max_message_bytes > self.max_batch_bytes, "max_message_bytes must exceed max_batch_bytes"),
+            (
+                u64::from(self.max_message_bytes) >= 2 * u64::from(self.max_batch_bytes) + MESSAGE_OVERHEAD,
+                "max_message_bytes must hold two full batches plus 1 KiB of framing",
+            ),
             (self.max_in_flight_slots > 0, "max_in_flight_slots must be positive"),
+            (
+                u64::from(self.max_in_flight_slots) <= crate::schedule::LAG,
+                "max_in_flight_slots must be at most 64",
+            ),
+            (
+                self.hedge_max > 0 && self.hedge_min <= self.hedge_max,
+                "hedge bounds must satisfy 0 <= hedge_min <= hedge_max, hedge_max > 0",
+            ),
             (self.max_outstanding_proposals > 0, "max_outstanding_proposals must be positive"),
             (self.retransmit_interval > 0, "retransmit_interval must be positive"),
         ];

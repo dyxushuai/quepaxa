@@ -9,10 +9,14 @@ use crate::batch;
 use crate::codec::{Body, reply_proposal};
 use crate::durable::Record;
 use crate::proposal::Proposal;
-use crate::types::{NodeId, ProposalId, Slot};
+use crate::types::{MAX_STEP, NodeId, ProposalId, Slot};
 
 impl Replica {
     pub(super) fn on_request(&mut self, from: NodeId, slot: Slot, step: u32, proposal: Proposal) {
+        if step > MAX_STEP {
+            self.metrics.messages_rejected += 1;
+            return;
+        }
         if slot.0 < self.floor {
             self.send(from, Body::Compacted { through: Slot(self.floor - 1) });
             return;
@@ -60,8 +64,11 @@ impl Replica {
         let budget = self.cfg.max_message_bytes as usize / 2;
         let mut size = 0;
         let mut proposals = Vec::new();
-        for slot in start.0.. {
-            let Some(d) = self.log.get(&Slot(slot)) else { break };
+        // Entries must be contiguous from `start`.
+        for (expected, (slot, d)) in (start.0..=u64::MAX).zip(self.log.range(start..)) {
+            if slot.0 != expected {
+                break;
+            }
             size += d.proposal.value.len() + 64;
             if !proposals.is_empty() && size > budget {
                 break;
@@ -86,9 +93,6 @@ impl Replica {
         {
             b.slot = None;
         }
-        for gap in self.committed..slot.0 {
-            self.seen.entry(Slot(gap)).or_insert(self.now);
-        }
         if broadcast {
             let peers: Vec<NodeId> = self.cfg.members.iter().copied().filter(|&m| m != self.me).collect();
             for peer in peers {
@@ -108,6 +112,13 @@ impl Replica {
             self.committed += 1;
         }
         self.seen = self.seen.split_off(&Slot(self.committed));
+        // Something past our prefix is decided (or a peer is ahead): keep the next slot
+        // driven so a quiet cluster cannot strand us behind.
+        let ahead =
+            self.peer_committed > self.committed || self.log.range(Slot(self.committed)..).next().is_some();
+        if ahead {
+            self.seen.entry(Slot(self.committed)).or_insert(self.now);
+        }
     }
 
     pub(super) fn emit_commits(&mut self) {

@@ -45,9 +45,10 @@ impl Schedule {
         self.order(slot)[0]
     }
 
-    /// 0 for the leader, then the hedging order.
+    /// 0 for the leader, then the hedging order; a non-member ranks last.
     pub fn position(&self, node: NodeId, slot: Slot) -> u64 {
-        self.order(slot).iter().position(|&n| n == node).unwrap_or(0) as u64
+        let order = self.order(slot);
+        order.iter().position(|&n| n == node).unwrap_or(order.len()) as u64
     }
 
     pub fn encode(&self, out: &mut Vec<u8>) {
@@ -66,6 +67,9 @@ impl Schedule {
     /// Restores a schedule; `members` must be the same set the encoder had.
     pub fn decode(r: &mut Reader<'_>, members: &[NodeId]) -> Result<Self, DecodeError> {
         let streak = r.u32()?;
+        if streak >= ROTATE_AFTER {
+            return Err(DecodeError::BadTag);
+        }
         let quiet_until = r.u64()?;
         let n = r.u32()? as usize;
         let mut history = Vec::new();

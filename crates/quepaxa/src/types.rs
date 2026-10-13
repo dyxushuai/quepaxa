@@ -9,6 +9,10 @@ pub struct Slot(pub u64);
 /// Logical clock of one slot: `4 * round + phase`, starting at 4 (round 1, phase 0).
 pub(crate) type Step = u32;
 
+/// Steps beyond this are rejected as malformed: a slot needs ~256 rounds with negligible
+/// probability (paper §4.2.2 fn. 5), and the bound keeps step arithmetic far from overflow.
+pub(crate) const MAX_STEP: Step = 1 << 24;
+
 /// Monotonic time in nanoseconds, supplied by the caller; the epoch is the caller's choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Timestamp(pub u64);

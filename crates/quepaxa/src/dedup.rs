@@ -55,9 +55,16 @@ impl Dedup {
                 let below = r.u64()?;
                 let mut above = BTreeSet::new();
                 for _ in 0..r.u32()? {
-                    above.insert(r.u64()?);
+                    let id = r.u64()?;
+                    if id <= below {
+                        return Err(DecodeError::BadTag);
+                    }
+                    above.insert(id);
                 }
                 incs.insert(inc, Window { below, above });
+            }
+            if incs.len() > INCARNATIONS_KEPT {
+                return Err(DecodeError::BadTag);
             }
             origins.insert(origin, incs);
         }
