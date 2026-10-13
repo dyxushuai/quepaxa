@@ -1,8 +1,8 @@
 # Replica behaviour is mostly verified by quepaxa-sim (simulation and model checking), so
 # every mutant of the core is tested against the whole workspace.
 test_workspace = true
-# Test support only.
-exclude_re = ["fingerprint"]
+# Test support, and capacity hints that only affect allocation sizes.
+exclude_re = ["fingerprint", "Message::payload_len"]
 # Optimized: unoptimized, the workspace tests take minutes.
 profile = "mutants"
 # The baseline runs only the mutated package's tests (about 1 s), so the auto-set timeout floor

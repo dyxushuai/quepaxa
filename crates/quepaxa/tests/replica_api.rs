@@ -165,11 +165,15 @@ fn installing_a_stale_snapshot_reports_it_was_ignored() {
 
 #[test]
 fn configs_that_would_misbehave_at_runtime_are_rejected() {
-    let bad: [fn(&mut Config); 4] = [
+    let bad: [fn(&mut Config); 8] = [
         |c| (c.hedge_min, c.hedge_max) = (10, 5),
-        |c| c.hedge_max = 0,
+        |c| (c.hedge_min, c.hedge_max) = (0, 0),
         |c| c.max_in_flight_slots = 65,
+        |c| c.max_in_flight_slots = 0,
         |c| c.max_message_bytes = 2 * c.max_batch_bytes,
+        |c| c.max_batch_bytes = 0,
+        |c| c.max_outstanding_proposals = 0,
+        |c| c.retransmit_interval = 0,
     ];
     for tweak in bad {
         let mut cfg = config(&[0, 1, 2]);
