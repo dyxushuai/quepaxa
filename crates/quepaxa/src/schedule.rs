@@ -166,6 +166,28 @@ mod tests {
         assert_eq!(s.leader(Slot(8 + LAG)), NodeId(1));
     }
 
+    #[test]
+    fn decode_rejects_an_empty_or_unsorted_history() {
+        let members = ids(&[0, 1, 2]);
+        let encoded = |froms: &[u64]| {
+            let mut out = Vec::new();
+            out.put_u32_le(0);
+            out.put_u64_le(0);
+            out.put_u32_le(froms.len() as u32);
+            for from in froms {
+                out.put_u64_le(*from);
+                out.put_u32_le(3);
+                [0, 1, 2].into_iter().for_each(|n| out.put_u32_le(n));
+            }
+            bytes::Bytes::from(out)
+        };
+        let decode =
+            |b: &bytes::Bytes| Schedule::decode(&mut Reader::new(b), &members).map(|s| s.history.len());
+        assert_eq!(decode(&encoded(&[0, 9])), Ok(2));
+        assert!(decode(&encoded(&[])).is_err());
+        assert!(decode(&encoded(&[9, 0])).is_err());
+    }
+
     proptest::proptest! {
         // Replicas that observe the same decided prefix agree on every slot's leader.
         #[test]
