@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+mod codec;
 mod proposal;
 mod recorder;
 mod rng;
