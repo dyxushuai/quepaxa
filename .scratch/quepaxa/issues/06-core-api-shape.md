@@ -23,3 +23,5 @@ Decided 2026-10-13 (user accepted all recommendations). Detail on mechanisms def
 8. **Outputs**: `Action::Commit { slot, entries }` in strict slot order, entries tagged with origin `(NodeId, ProposalId)`; `Input::ReadBarrier { token }` → `Action::ReadReady { token, slot }`; `Action::Dropped { id, reason }` for rejected/abandoned proposals.
 9. **Time/randomness**: caller-supplied monotonic `Timestamp(u64)` nanos; `Config.seed: [u8; 32]` from a CSPRNG, ChaCha inside the core; documented contract: a fresh seed on every start incl. restart (liveness needs priorities unpredictable to the network). Fixed seeds only in simulation.
 10. **Errors**: `Err` only for caller contract violations (undrained actions, out-of-order `PersistId`, non-member sender); malformed/stale network messages dropped and counted in `metrics()`; core never panics, invariants via `debug_assert` + simulator.
+
+Amendment (hedging/leader ticket): with leader forwarding plus hedging, the guarantee in item 7 is enforced by commit-time dedup and reads "a local `ProposalId` appears in at most one `Commit` entry". Item 4's inline batch now carries a `value_key` (wire-format ticket).

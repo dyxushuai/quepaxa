@@ -18,6 +18,7 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
   - License `MIT OR Apache-2.0`.
 - Skills every session should consult: `rust`, `rust-best-practices`, `tdd`, `domain-modeling` (GLOSSARY.md + docs/adr/), `preferences`.
 - Research findings live as `docs/research/<name>.md` on local `research/<name>` branches (never merged, never pushed).
+- **User directive (2026-10-13, "一步到位")**: remaining tickets are resolved by the agent's recommendations without per-round HITL; the user reviews the result afterwards. Any decision can be reopened by reopening its ticket.
 - Repo artifacts in English; conversation in 简体中文.
 
 ## Decisions so far
@@ -30,17 +31,22 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
 - [Who owns the `quepaxa` crate name on crates.io](issues/13-crate-name-ownership.md): owned by the user's `johntaiko` account; placeholder 0.1.0 exists, so first real release is > 0.1.0 and the placeholder gets yanked.
 - [What is the core sans-IO API](issues/06-core-api-shape.md): single `Replica`, `handle`/`poll_actions` pull loop, structural `Action::Persist{then}` (ADR 0002), inline `Bytes` batches, core-side batching/pipelining, at-most-once per local `ProposalId`, injected time + fresh CSPRNG seed per start.
 - [Are reconfiguration and snapshots in the first release](issues/07-phase-one-scope.md): snapshots/compaction in v1 (app-owned snapshot bytes); reconfiguration, dynamic join, witnesses/learners are phase 2 with `config_epoch` + `cluster_id` reserved in every message now.
+- [What is the wire format and its compatibility policy](issues/08-wire-format.md): core-owned hand-rolled LE codec for messages and CRC32C'd durable records; envelope with cluster_id/config_epoch/commit_index; exact-match wire version in 0.x, N−1 interop from 1.0.
+- [What is the assurance strategy](issues/09-assurance-strategy.md): invariant checkers R/P/G, proptest, `quepaxa-sim` DST with disk faults, stateright model check with crash-restart, linearizability, bolero fuzz, Miri; per-PR / nightly / weekly gates.
+- [What does the C ABI expose](issues/10-ffi-surface.md): opaque handle, `qpx_poll` tagged actions with borrowed bytes valid until next call, status codes + poisoning, ABI major/minor; C example only in v1.
+- [What are the CI matrix, MSRV and release policy](issues/11-platform-ci-release.md): 6 native Tier 1 runners + 4 Tier 2 jobs, MSRV 1.89, first release 0.2.0 via trusted publishing, cargo-deny; criterion + e2e benchmarks; `examples/kv-tokio` as reference runtime.
+- [What must persist, and how does a replica recover from crash-restart](issues/12-durability-recovery.md): replies released only after the state they report is durable; leader-H reservation + incarnation; durable Decided before Commit; Decided broadcast + CatchUp; A1/A2/A12/A13 closed.
+- [How are the hedging delay and leader order chosen](issues/14-hedging-leader-policy.md): schedule as log entry effective W slots later; corrected epoch tuner (2n explore, ascending); adaptive δ; per-step progress evidence; forward-to-leader + commit-time dedup.
+- [How do compaction and snapshot catch-up work safely](issues/15-compaction-snapshots.md): recorder state dropped once Decided is durable; app snapshot + `core_state()` then `compact`; `SnapshotNeeded`/`install_snapshot`.
 
 ## Not yet specified
 
-- **Performance targets & benchmark methodology**: what to measure (throughput/latency under leader failure, WAN, contention), whether to compare against the Go impl or Raft crates.
-- **Reference runtime crate** (`quepaxa-tokio` or similar): whether one ships at all, and its transport.
-- **ValueId indirection** (LAN optimization): agree on fixed-size batch ids and disseminate batches separately; needs its own durability/catch-up/liveness story; revisit after benchmarks.
-- **Phase 2: reconfiguration, dynamic join, witness/learner nodes**: protocol design (paper gives none; fn. 5 slot reset per epoch), after v1 tickets settle.
-- **Release engineering**: MSRV, semver/stability policy for the C ABI, docs/examples, supply-chain gates (`cargo-deny`/`cargo-vet`).
-- **Final spec + TDD backlog ordering** (`to-spec` / `to-tickets`), once the decisions above land.
+_(empty — the way to the destination is clear; see [the v1 spec](../quepaxa-v1/spec.md))_
 
 ## Out of scope
 
 - BFT variants — different protocol family; CFT only (charting decision).
 - Application layers (KV store, leases, transactions) — built on top of the log, not in the crate.
+- Phase 2: reconfiguration, dynamic join, witness/learner nodes — redrawn out of this map on 2026-10-13 ("一步到位"); v1 reserves `cluster_id`/`config_epoch`/per-epoch slots so it needs no wire break. A future effort.
+- ValueId indirection (agree on batch ids, disseminate separately) — a performance effort to revisit with benchmark data.
+- Published runtime crate (`quepaxa-tokio`), Kotlin/Swift/Python packages, wasm bindings — later efforts.
