@@ -1,9 +1,10 @@
 //! The sans-IO replica: one proposer and one recorder per slot, a decided log, and the
 //! durability gate that keeps replies behind the writes they depend on (ADR 0002).
 //!
-//! `log` holds the recorder and decided-log side, `proposing` the proposer side (batching,
+//! `gate` holds the durability gate, `log` the recorder and decided-log side, `proposing` the proposer side (batching,
 //! forwarding to the leader, hedging, stalled slots).
 
+mod gate;
 mod log;
 mod proposing;
 mod snapshot;
@@ -12,6 +13,8 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use bytes::Bytes;
 use core::mem;
+
+use self::gate::Gate;
 
 use crate::api::{Action, Config, DropReason, Error, Input, Metrics, Outbound};
 use crate::batch::{self, Entry, Item};
@@ -51,17 +54,9 @@ struct LocalBatch {
 /// Work deferred until the next `Persist` is acknowledged.
 #[cfg_attr(feature = "model", derive(Clone, Hash))]
 enum Effect {
-    Ready,
     ReservationDurable(u64),
     DecidedDurable(Slot),
     LocalReply(Body),
-}
-
-#[cfg_attr(feature = "model", derive(Clone, Hash))]
-struct InFlight {
-    id: u64,
-    effects: Vec<Effect>,
-    parked: Vec<Outbound>,
 }
 
 /// One member of a QuePaxa cluster. See the crate docs for the driving contract.
@@ -76,15 +71,7 @@ pub struct Replica {
     fenced: bool,
     metrics: Metrics,
 
-    // Durability gate.
-    ready: bool,
-    next_persist: u64,
-    acked: Option<u64>,
-    writes: Vec<Bytes>,
-    gated: Vec<Outbound>,
-    effects: Vec<Effect>,
-    /// Issued persists awaiting acknowledgement, with the effects and sends parked behind each.
-    in_flight: VecDeque<InFlight>,
+    gate: Gate<Effect>,
     actions: Vec<Action>,
     inbox: VecDeque<(NodeId, Body)>,
 
@@ -132,8 +119,6 @@ pub struct Replica {
     floor: u64,
     /// Core state of the latest snapshot, carried into checkpoints.
     snapshot_state: Option<Bytes>,
-    /// The next `Persist` replaces all earlier records.
-    replace_next: bool,
     snapshot_asked: Option<Timestamp>,
     /// Steps at which this replica's proposers decided, for verification only.
     #[cfg(feature = "model")]
@@ -197,13 +182,7 @@ impl Replica {
             now,
             fenced: false,
             metrics: Metrics::default(),
-            ready: false,
-            next_persist: 0,
-            acked: None,
-            writes: Vec::new(),
-            gated: Vec::new(),
-            effects: Vec::new(),
-            in_flight: VecDeque::new(),
+            gate: Gate::new(Record::Incarnation(last_incarnation + 1).encode()),
             actions: Vec::new(),
             inbox: VecDeque::new(),
             registers,
@@ -230,7 +209,6 @@ impl Replica {
             reserved_durable: None,
             floor,
             snapshot_state: snapshot.map(|(_, b)| b),
-            replace_next: false,
             snapshot_asked: None,
             #[cfg(feature = "model")]
             decided_steps: BTreeMap::new(),
@@ -243,8 +221,6 @@ impl Replica {
         }
         r.emit_commits();
         // Nothing leaves this replica until its new incarnation is durable.
-        r.writes.push(Record::Incarnation(r.incarnation).encode());
-        r.effects.push(Effect::Ready);
         r.flush();
         Ok(r)
     }
@@ -288,7 +264,7 @@ impl Replica {
         let id = ProposalId(self.next_proposal);
         let item =
             Item { entry: Entry { origin: self.me, incarnation: self.incarnation, id, payload }, barrier };
-        if 4 + batch::encoded_len(&item) > self.cfg.max_batch_bytes as usize {
+        if !batch::fits_alone(&item, self.cfg.max_batch_bytes as usize) {
             return Err(Error::PayloadTooLarge);
         }
         self.next_proposal += 1;
@@ -352,62 +328,28 @@ impl Replica {
 
     // ---- durability gate ----
 
-    fn idle_storage(&self) -> bool {
-        self.ready && self.writes.is_empty() && self.in_flight.is_empty()
-    }
-
-    /// Runs `e` now if nothing is waiting on storage, else once the next `Persist` lands.
+    /// Runs `e` now if nothing is waiting on storage, else once it is durable.
     fn after_durable(&mut self, e: Effect) {
-        if self.idle_storage() {
+        if let Some(e) = self.gate.after_durable(e) {
             self.apply(e);
-        } else {
-            self.effects.push(e);
         }
     }
 
-    /// Emits a `Persist` for new writes. Sends and effects that only wait for writes
-    /// already in flight are parked behind the last one instead, so idle replies never
-    /// cost an extra (empty) write.
     fn flush(&mut self) {
         self.metrics.retained_slots = self.log.len() as u64;
         self.metrics.live_registers = self.registers.len() as u64;
-        if self.writes.is_empty() {
-            if let Some(last) = self.in_flight.back_mut() {
-                last.effects.append(&mut self.effects);
-                last.parked.append(&mut self.gated);
-            }
-            debug_assert!(self.gated.is_empty() && self.effects.is_empty(), "gated work without a write");
-            return;
-        }
-        let id = self.next_persist;
-        self.next_persist += 1;
-        self.actions.push(Action::Persist {
-            id: PersistId(id),
-            records: mem::take(&mut self.writes),
-            then: mem::take(&mut self.gated),
-            replace: mem::take(&mut self.replace_next),
-        });
-        self.in_flight.push_back(InFlight { id, effects: mem::take(&mut self.effects), parked: Vec::new() });
+        self.gate.flush(&mut self.actions);
     }
 
-    fn on_persisted(&mut self, PersistId(id): PersistId) -> Result<(), Error> {
-        if id >= self.next_persist || self.acked.is_some_and(|a| id <= a) {
-            return Err(Error::UnknownPersistId);
-        }
-        self.acked = Some(id);
-        while self.in_flight.front().is_some_and(|f| f.id <= id) {
-            let Some(done) = self.in_flight.pop_front() else { break };
-            self.actions.extend(done.parked.into_iter().map(Action::Send));
-            for e in done.effects {
-                self.apply(e);
-            }
+    fn on_persisted(&mut self, id: PersistId) -> Result<(), Error> {
+        for e in self.gate.persisted(id, &mut self.actions)? {
+            self.apply(e);
         }
         Ok(())
     }
 
     fn apply(&mut self, e: Effect) {
         match e {
-            Effect::Ready => self.ready = true,
             Effect::ReservationDurable(t) => self.reserved_durable = self.reserved_durable.max(Some(t)),
             Effect::DecidedDurable(slot) => {
                 if let Some(d) = self.log.get_mut(&slot) {
@@ -431,9 +373,7 @@ impl Replica {
         self.forwarded.clear();
         self.batches.clear();
         self.inbox.clear();
-        self.writes.clear();
-        self.gated.clear();
-        self.effects.clear();
+        self.gate.fence();
     }
 
     // ---- network ----
@@ -456,21 +396,13 @@ impl Replica {
             return;
         }
         let out = self.encode(to, body);
-        if self.ready {
-            self.actions.push(Action::Send(out));
-        } else {
-            self.gated.push(out);
-        }
+        self.gate.send(out, &mut self.actions);
     }
 
     /// A send that reports state possibly not yet durable.
     fn send_gated(&mut self, to: NodeId, body: Body) {
         let out = self.encode(to, body);
-        if self.idle_storage() {
-            self.actions.push(Action::Send(out));
-        } else {
-            self.gated.push(out);
-        }
+        self.gate.send_after_durable(out, &mut self.actions);
     }
 
     fn on_message(&mut self, bytes: &Bytes) {

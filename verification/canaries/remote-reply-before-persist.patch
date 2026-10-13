@@ -1,13 +1,12 @@
-diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
-index e91314d..479bac4 100644
---- a/crates/quepaxa/src/replica/mod.rs
-+++ b/crates/quepaxa/src/replica/mod.rs
-@@ -469,7 +469,7 @@ impl Replica {
+diff --git a/crates/quepaxa/src/replica/gate.rs b/crates/quepaxa/src/replica/gate.rs
+--- a/crates/quepaxa/src/replica/gate.rs
++++ b/crates/quepaxa/src/replica/gate.rs
+@@ -78,7 +78,7 @@
+ 
      /// A send that reports state possibly not yet durable.
-     fn send_gated(&mut self, to: NodeId, body: Body) {
-         let out = self.encode(to, body);
--        if self.idle_storage() {
+     pub fn send_after_durable(&mut self, out: Outbound, actions: &mut Vec<Action>) {
+-        if self.idle() {
 +        if true {
-             self.actions.push(Action::Send(out));
+             actions.push(Action::Send(out));
          } else {
              self.gated.push(out);

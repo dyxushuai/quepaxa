@@ -74,7 +74,7 @@ impl Replica {
             let body = Body::RecordRequest { slot, step, proposal };
             if gate {
                 let out = self.encode(j, body);
-                self.gated.push(out);
+                self.gate.hold(out);
             } else {
                 self.send(j, body);
             }
@@ -141,30 +141,22 @@ impl Replica {
         {
             self.forwarded.insert(i.entry.id, (i.clone(), self.now));
         }
-        let max = self.cfg.max_batch_bytes as usize;
-        let mut chunk = Vec::new();
-        let mut size = 4;
+        let mut chunk = batch::Builder::new(self.cfg.max_batch_bytes as usize);
         for e in entries {
-            let len = batch::encoded_len(&e);
-            if !chunk.is_empty() && size + len > max {
-                self.send(leader, Body::Forward { batch: batch::encode(&chunk) });
+            if !chunk.fits(&e) {
+                self.send(leader, Body::Forward { batch: batch::encode(&chunk.take()) });
                 self.metrics.forwarded += 1;
-                chunk.clear();
-                size = 4;
             }
-            size += len;
             chunk.push(e);
         }
-        self.send(leader, Body::Forward { batch: batch::encode(&chunk) });
+        self.send(leader, Body::Forward { batch: batch::encode(&chunk.take()) });
         self.metrics.forwarded += 1;
     }
 
     /// Cuts the next batch: hedged entries always, pending ones only while leading.
     fn cut_batch(&mut self) -> Option<u64> {
         let lead = self.leads_now();
-        let max = self.cfg.max_batch_bytes as usize;
-        let mut entries = Vec::new();
-        let mut size = 4;
+        let mut entries = batch::Builder::new(self.cfg.max_batch_bytes as usize);
         loop {
             let queue = if !self.hedged.is_empty() {
                 &mut self.hedged
@@ -174,8 +166,7 @@ impl Replica {
                 break;
             };
             let Some(e) = queue.front() else { break };
-            let len = batch::encoded_len(e);
-            if !entries.is_empty() && size + len > max {
+            if !entries.fits(e) {
                 break;
             }
             let Some(e) = queue.pop_front() else { break };
@@ -183,10 +174,9 @@ impl Replica {
             if self.dedup.contains(o, inc, id) {
                 continue;
             }
-            size += len;
             entries.push(e);
         }
-        (!entries.is_empty()).then(|| self.new_batch(entries))
+        (!entries.is_empty()).then(|| self.new_batch(entries.take()))
     }
 
     fn new_batch(&mut self, entries: Vec<Item>) -> u64 {
@@ -224,7 +214,7 @@ impl Replica {
         if leader && self.reserved_through.is_none_or(|t| slot.0 > t) {
             let through = slot.0 + 4 * self.window();
             self.reserved_through = Some(through);
-            self.writes.push(Record::Reservation { through: Slot(through) }.encode());
+            self.gate.write(Record::Reservation { through: Slot(through) }.encode());
             self.after_durable(super::Effect::ReservationDurable(through));
         }
         let prop = SlotProposer::new(self.cfg.members.clone(), leader, proposal, &mut self.rng);

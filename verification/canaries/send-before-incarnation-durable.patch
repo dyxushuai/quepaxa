@@ -1,13 +1,12 @@
-diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
-index e91314d..a750f33 100644
---- a/crates/quepaxa/src/replica/mod.rs
-+++ b/crates/quepaxa/src/replica/mod.rs
-@@ -459,7 +459,7 @@ impl Replica {
-             return;
-         }
-         let out = self.encode(to, body);
--        if self.ready {
+diff --git a/crates/quepaxa/src/replica/gate.rs b/crates/quepaxa/src/replica/gate.rs
+--- a/crates/quepaxa/src/replica/gate.rs
++++ b/crates/quepaxa/src/replica/gate.rs
+@@ -69,7 +69,7 @@
+ 
+     /// A send that does not depend on durable state.
+     pub fn send(&mut self, out: Outbound, actions: &mut Vec<Action>) {
+-        if self.ready() {
 +        if true {
-             self.actions.push(Action::Send(out));
+             actions.push(Action::Send(out));
          } else {
              self.gated.push(out);

@@ -38,12 +38,52 @@ impl Item {
     }
 }
 
-pub(crate) fn encoded_len(i: &Item) -> usize {
+const HEADER: usize = 4;
+
+fn encoded_len(i: &Item) -> usize {
     4 + 8 + 8 + 1 + 4 + i.entry.payload.len()
 }
 
+/// Whether `item` fits in a batch of at most `max` encoded bytes on its own.
+pub(crate) fn fits_alone(item: &Item, max: usize) -> bool {
+    HEADER + encoded_len(item) <= max
+}
+
+/// Collects items into a batch of at most `max` encoded bytes; the first item is always
+/// taken (items too large on their own are rejected when proposed).
+pub(crate) struct Builder {
+    items: Vec<Item>,
+    size: usize,
+    max: usize,
+}
+
+impl Builder {
+    pub fn new(max: usize) -> Self {
+        Self { items: Vec::new(), size: HEADER, max }
+    }
+
+    pub fn fits(&self, item: &Item) -> bool {
+        self.items.is_empty() || self.size + encoded_len(item) <= self.max
+    }
+
+    pub fn push(&mut self, item: Item) {
+        self.size += encoded_len(&item);
+        self.items.push(item);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// The items collected so far; the builder starts over empty.
+    pub fn take(&mut self) -> Vec<Item> {
+        self.size = HEADER;
+        core::mem::take(&mut self.items)
+    }
+}
+
 pub(crate) fn encode(items: &[Item]) -> Bytes {
-    let mut out = Vec::with_capacity(4 + items.iter().map(encoded_len).sum::<usize>());
+    let mut out = Vec::with_capacity(HEADER + items.iter().map(encoded_len).sum::<usize>());
     out.put_u32_le(items.len() as u32);
     for Item { entry: e, barrier } in items {
         out.put_u32_le(e.origin.0);
@@ -100,6 +140,26 @@ mod tests {
     fn batch_round_trips() {
         let es = vec![entry(1, 7, b"put a"), entry(3, 9, b"")];
         assert_eq!(decode(&encode(&es)), Ok(es));
+    }
+
+    #[test]
+    fn builder_fills_batches_exactly_up_to_the_limit() {
+        let item = entry(1, 7, b"put a");
+        let max = encode(&[item.clone(), item.clone()]).len();
+        assert!(fits_alone(&item, max) && !fits_alone(&item, encode(core::slice::from_ref(&item)).len() - 1));
+        let mut b = Builder::new(max);
+        for _ in 0..2 {
+            assert!(b.fits(&item));
+            b.push(item.clone());
+        }
+        assert!(!b.fits(&item));
+        assert_eq!(encode(&b.take()).len(), max);
+        assert!(b.is_empty() && b.fits(&item));
+    }
+
+    #[test]
+    fn builder_takes_one_oversized_item() {
+        assert!(Builder::new(1).fits(&entry(1, 7, b"put a")));
     }
 
     #[test]
