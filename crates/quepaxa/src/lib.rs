@@ -9,6 +9,7 @@ extern crate alloc;
 
 mod codec;
 mod proposal;
+mod proposer;
 mod recorder;
 mod rng;
 mod types;
