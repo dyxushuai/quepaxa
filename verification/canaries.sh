@@ -17,8 +17,11 @@ ran=0
 index=$(mktemp)
 cp "$(git -C "$root" rev-parse --path-format=absolute --git-path index)" "$index"
 GIT_INDEX_FILE=$index git -C "$root" add -A
-rev=$(git -C "$root" commit-tree "$(GIT_INDEX_FILE=$index git -C "$root" write-tree)" -p HEAD -m canaries)
+rev=$(GIT_AUTHOR_NAME=canaries GIT_AUTHOR_EMAIL=canaries@localhost GIT_COMMITTER_NAME=canaries \
+  GIT_COMMITTER_EMAIL=canaries@localhost \
+  git -C "$root" commit-tree "$(GIT_INDEX_FILE=$index git -C "$root" write-tree)" -p HEAD -m canaries)
 rm -f "$index"
+[[ -n "$rev" ]] || { echo "cannot snapshot the working tree"; exit 1; }
 for patch in "$root"/verification/canaries/*.patch; do
   name=$(basename "$patch" .patch)
   if ! cut -f1 "$root/verification/canaries.tsv" | grep -qx "$name"; then
