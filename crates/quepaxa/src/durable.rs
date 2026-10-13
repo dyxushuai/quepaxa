@@ -18,6 +18,7 @@ const KIND_INCARNATION: u8 = 1;
 const KIND_RECORDER: u8 = 2;
 const KIND_RESERVATION: u8 = 3;
 const KIND_DECIDED: u8 = 4;
+const KIND_COMPACTED: u8 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Record {
@@ -29,6 +30,8 @@ pub(crate) enum Record {
     Reservation { through: Slot },
     /// A slot's decided value.
     Decided { slot: Slot, proposal: Proposal },
+    /// Every slot up to `through` is covered by an application snapshot carrying `core_state`.
+    Compacted { through: Slot, core_state: Bytes },
 }
 
 impl Record {
@@ -57,6 +60,11 @@ impl Record {
                 out.put_u8(KIND_DECIDED);
                 out.put_u64_le(slot.0);
                 put_proposal(&mut out, proposal);
+            }
+            Record::Compacted { through, core_state } => {
+                out.put_u8(KIND_COMPACTED);
+                out.put_u64_le(through.0);
+                crate::codec::put_value(&mut out, core_state);
             }
         }
         let crc = crc32c(&out);
@@ -94,6 +102,7 @@ impl Record {
             }
             KIND_RESERVATION => Record::Reservation { through: Slot(r.u64()?) },
             KIND_DECIDED => Record::Decided { slot: Slot(r.u64()?), proposal: r.proposal()? },
+            KIND_COMPACTED => Record::Compacted { through: Slot(r.u64()?), core_state: r.value()? },
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -106,7 +115,7 @@ mod tests {
     use super::*;
     use crate::proposal::tests::prop;
 
-    fn samples() -> [Record; 4] {
+    fn samples() -> [Record; 5] {
         [
             Record::Incarnation(3),
             Record::Recorder {
@@ -120,6 +129,7 @@ mod tests {
             },
             Record::Reservation { through: Slot(40) },
             Record::Decided { slot: Slot(9), proposal: prop(8, 2, 1) },
+            Record::Compacted { through: Slot(7), core_state: Bytes::from_static(b"state") },
         ]
     }
 

@@ -13,6 +13,10 @@ use crate::types::{NodeId, ProposalId, Slot};
 
 impl Replica {
     pub(super) fn on_request(&mut self, from: NodeId, slot: Slot, step: u32, proposal: Proposal) {
+        if slot.0 < self.floor {
+            self.send(from, Body::Compacted { through: Slot(self.floor - 1) });
+            return;
+        }
         if let Some(d) = self.log.get(&slot) {
             let proposal = d.proposal.clone();
             self.send(from, Body::Decided { slot, proposal });
@@ -49,6 +53,10 @@ impl Replica {
 
     /// Serves contiguous decided slots from `start`, within half a message budget.
     pub(super) fn on_catch_up(&mut self, to: NodeId, start: Slot) {
+        if start.0 < self.floor {
+            self.send(to, Body::Compacted { through: Slot(self.floor - 1) });
+            return;
+        }
         let budget = self.cfg.max_message_bytes as usize / 2;
         let mut size = 0;
         let mut proposals = Vec::new();
@@ -123,7 +131,7 @@ impl Replica {
             self.actions.push(Action::Commit { slot, entries });
             for (id, barrier) in mine {
                 self.forwarded.remove(&id);
-                if let Some(at) = self.outstanding.remove(&id) {
+                if let Some((at, _)) = self.outstanding.remove(&id) {
                     self.observe_latency(self.now.0.saturating_sub(at.0));
                     self.actions.push(if barrier {
                         Action::ReadReady { id, slot }

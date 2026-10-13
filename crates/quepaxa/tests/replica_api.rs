@@ -45,7 +45,7 @@ fn fresh_replica_first_persists_its_incarnation() {
     let mut r = Replica::new(config(&[0]), [], T0).unwrap();
     let actions = drain(&mut r);
     assert!(
-        matches!(&actions[..], [Action::Persist { id: PersistId(0), records, then }] if records.len() == 1 && then.is_empty())
+        matches!(&actions[..], [Action::Persist { id: PersistId(0), records, then, replace: false }] if records.len() == 1 && then.is_empty())
     );
 }
 

@@ -8,6 +8,9 @@
 //! their leader (it is down, partitioned or slow), the leader moves to the back.
 
 use alloc::vec::Vec;
+use bytes::BufMut;
+
+use crate::codec::{DecodeError, Reader};
 
 use crate::types::{NodeId, Slot};
 
@@ -44,6 +47,47 @@ impl Schedule {
     /// 0 for the leader, then the hedging order.
     pub fn position(&self, node: NodeId, slot: Slot) -> u64 {
         self.order(slot).iter().position(|&n| n == node).unwrap_or(0) as u64
+    }
+
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.put_u32_le(self.streak);
+        out.put_u64_le(self.quiet_until);
+        out.put_u32_le(self.history.len() as u32);
+        for (from, order) in &self.history {
+            out.put_u64_le(*from);
+            out.put_u32_le(order.len() as u32);
+            for n in order {
+                out.put_u32_le(n.0);
+            }
+        }
+    }
+
+    /// Restores a schedule; `members` must be the same set the encoder had.
+    pub fn decode(r: &mut Reader<'_>, members: &[NodeId]) -> Result<Self, DecodeError> {
+        let streak = r.u32()?;
+        let quiet_until = r.u64()?;
+        let n = r.u32()? as usize;
+        let mut history = Vec::new();
+        for _ in 0..n {
+            let from = r.u64()?;
+            let len = r.u32()? as usize;
+            if len != members.len() {
+                return Err(DecodeError::BadTag);
+            }
+            let mut order = Vec::with_capacity(len);
+            for _ in 0..len {
+                let node = NodeId(r.u32()?);
+                if !members.contains(&node) || order.contains(&node) {
+                    return Err(DecodeError::BadTag);
+                }
+                order.push(node);
+            }
+            history.push((from, order));
+        }
+        if history.is_empty() || !history.is_sorted_by_key(|(f, _)| *f) {
+            return Err(DecodeError::BadTag);
+        }
+        Ok(Self { history, streak, quiet_until })
     }
 
     /// Feeds each decided slot exactly once, in slot order, with its value's origin.

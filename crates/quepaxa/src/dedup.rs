@@ -3,6 +3,10 @@
 //! decided log, so every replica filters identically.
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec::Vec;
+use bytes::BufMut;
+
+use crate::codec::{DecodeError, Reader};
 
 use crate::types::{NodeId, ProposalId};
 
@@ -23,6 +27,41 @@ pub(crate) struct Dedup {
 }
 
 impl Dedup {
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.put_u32_le(self.origins.len() as u32);
+        for (origin, incs) in &self.origins {
+            out.put_u32_le(origin.0);
+            out.put_u32_le(incs.len() as u32);
+            for (inc, w) in incs {
+                out.put_u64_le(*inc);
+                out.put_u64_le(w.below);
+                out.put_u32_le(w.above.len() as u32);
+                for id in &w.above {
+                    out.put_u64_le(*id);
+                }
+            }
+        }
+    }
+
+    pub fn decode(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let mut origins = BTreeMap::new();
+        for _ in 0..r.u32()? {
+            let origin = NodeId(r.u32()?);
+            let mut incs = BTreeMap::new();
+            for _ in 0..r.u32()? {
+                let inc = r.u64()?;
+                let below = r.u64()?;
+                let mut above = BTreeSet::new();
+                for _ in 0..r.u32()? {
+                    above.insert(r.u64()?);
+                }
+                incs.insert(inc, Window { below, above });
+            }
+            origins.insert(origin, incs);
+        }
+        Ok(Self { origins })
+    }
+
     /// Whether the entry was already seen (without recording it).
     pub fn contains(&self, origin: NodeId, incarnation: u64, ProposalId(id): ProposalId) -> bool {
         let Some(incs) = self.origins.get(&origin) else { return false };
