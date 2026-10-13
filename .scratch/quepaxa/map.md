@@ -26,12 +26,12 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
 - [How do existing Rust consensus crates shape a sans-IO API](issues/04-sans-io-api-prior-art.md): pull loop `handle`/`poll_actions`, persist-before-send encoded structurally in `Action::Persist{then}`, injected `Timestamp`+seed; openraft#2118 is the cautionary bug.
 - [What toolchain delivers the C ABI across our platform tiers](issues/05-ffi-cross-platform-toolchain.md): hand-written `extern "C"` + committed cbindgen header + cargo-c; catch_unwind per export; all 6 Tier 1 targets run natively on GH-hosted runners; MSRV 1.89 proposed; wasm gets wasm-bindgen/wasip2 later, not C ABI.
 - [Which tools give us model checking, DST and linearizability checking in Rust](issues/03-assurance-tooling.md): one sans-IO core driven by proptest, hand-rolled DST, stateright (model check + linearizability), bolero fuzzing, cargo-mutants; only Promela/TLA+ single-slot models exist publicly.
+- [What the Go reference implementation actually does](issues/02-go-reference-impl.md): faithful Alg. 3/4 but no durability, low-entropy priorities, static hedging δ, leader-order tuner via log pseudo-command; supplies test vectors, scenarios and benchmark baselines.
 
 ## Not yet specified
 
 - **Performance targets & benchmark methodology**: what to measure (throughput/latency under leader failure, WAN, contention), whether to compare against the Go impl or Raft crates.
 - **Reference runtime crate** (`quepaxa-tokio` or similar): whether one ships at all, and its transport.
-- **Adaptive hedging default policy**: which bandit/tuner ships as default and how it is tested deterministically.
 - **Reconfiguration & bootstrapping, snapshots/log compaction**: designs, once their phase is decided.
 - **Release engineering**: MSRV, semver/stability policy for the C ABI, docs/examples, supply-chain gates (`cargo-deny`/`cargo-vet`).
 - **Final spec + TDD backlog ordering** (`to-spec` / `to-tickets`), once the decisions above land.
