@@ -78,7 +78,9 @@ jobs:
           key: criterion-baseline-${{ github.run_id }}
           restore-keys: criterion-baseline-
       - name: Compare against the previous baseline (fail on a >10% regression)
+        shell: bash
         run: |
+          set -o pipefail
           if [ -d target/criterion ] && ls target/criterion/*/*/nightly >/dev/null 2>&1; then
             cargo bench -p quepaxa --bench replica -- --baseline nightly --noise-threshold 0.10 | tee bench.txt
             if grep -q "Performance has regressed" bench.txt; then
@@ -134,7 +136,12 @@ jobs:
           tool: cargo-mutants,cargo-nextest
       - name: Mutation testing of the core (shard ${{ matrix.shard }}/4)
         run: |
-          cargo mutants -p quepaxa --test-tool nextest --shard ${{ matrix.shard }}/4 --no-shuffle || true
+          # Exit 0: all caught, 2: some missed, 3: some timed out — findings, reported below.
+          # Anything else (baseline failure, usage error, crash) means no valid run.
+          status=0
+          cargo mutants -p quepaxa --test-tool nextest --shard ${{ matrix.shard }}/4 --no-shuffle || status=$?
+          case $status in 0|2|3) ;; *) echo "::error::cargo-mutants failed (exit $status)"; exit 1 ;; esac
+          test -f mutants.out/outcomes.json
           { echo "### Mutants shard ${{ matrix.shard }}"; for f in caught missed timeout unviable; do
               echo "- $f: $(wc -l < mutants.out/$f.txt 2>/dev/null || echo 0)"; done; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
