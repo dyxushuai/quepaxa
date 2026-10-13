@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/snapshot.rs b/crates/quepaxa/src/replica/snapshot.rs
+index 97cea09..fec7c7b 100644
+--- a/crates/quepaxa/src/replica/snapshot.rs
++++ b/crates/quepaxa/src/replica/snapshot.rs
+@@ -149,6 +149,7 @@ impl Replica {
+         records.extend(
+             self.registers
+                 .iter()
++                .filter(|_| false)
+                 .map(|(slot, reg)| Record::Recorder { slot: *slot, reg: reg.clone() }.encode()),
+         );
+         records.extend(

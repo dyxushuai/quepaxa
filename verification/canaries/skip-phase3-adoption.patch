@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/proposer.rs b/crates/quepaxa/src/proposer.rs
+index 96ff8b1..b597f90 100644
+--- a/crates/quepaxa/src/proposer.rs
++++ b/crates/quepaxa/src/proposer.rs
+@@ -159,7 +159,7 @@ impl SlotProposer {
+                 }
+             }
+             3 => match best_agg {
+-                Some(best) => self.p = best,
++                Some(_best) => {}
+                 None => debug_assert!(false, "P6: phase 3 quorum must carry an aggregate"),
+             },
+             _ => {}

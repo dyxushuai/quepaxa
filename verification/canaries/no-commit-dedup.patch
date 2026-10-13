@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/replica/log.rs b/crates/quepaxa/src/replica/log.rs
+index 356fa15..071212f 100644
+--- a/crates/quepaxa/src/replica/log.rs
++++ b/crates/quepaxa/src/replica/log.rs
+@@ -133,7 +133,7 @@ impl Replica {
+                 self.metrics.corrupt_batches += 1;
+                 Vec::new()
+             });
+-            items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
++            items.retain(|i| { self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id); true });
+             let mine: Vec<(ProposalId, bool)> = items
+                 .iter()
+                 .filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)

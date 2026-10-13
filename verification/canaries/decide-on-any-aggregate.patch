@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/proposer.rs b/crates/quepaxa/src/proposer.rs
+index 96ff8b1..fd18050 100644
+--- a/crates/quepaxa/src/proposer.rs
++++ b/crates/quepaxa/src/proposer.rs
+@@ -153,7 +153,7 @@ impl SlotProposer {
+                 }
+             }
+             2 => {
+-                if best_agg.as_ref() == Some(&self.p) {
++                if self.replies.values().any(|r| r.prev_agg.as_ref() == Some(&self.p)) {
+                     let p = self.p.clone();
+                     return self.decide(Some(p));
+                 }

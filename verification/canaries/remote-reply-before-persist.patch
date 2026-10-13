@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
+index e91314d..479bac4 100644
+--- a/crates/quepaxa/src/replica/mod.rs
++++ b/crates/quepaxa/src/replica/mod.rs
+@@ -469,7 +469,7 @@ impl Replica {
+     /// A send that reports state possibly not yet durable.
+     fn send_gated(&mut self, to: NodeId, body: Body) {
+         let out = self.encode(to, body);
+-        if self.idle_storage() {
++        if true {
+             self.actions.push(Action::Send(out));
+         } else {
+             self.gated.push(out);

@@ -1,0 +1,10 @@
+# name	environment	command	expected failure (extended regex)
+skip-phase3-adoption	-	cargo nextest run --release -p quepaxa-sim --test model_check	G3 value lock
+decide-on-any-aggregate	-	cargo nextest run -p quepaxa slot_sim	G1 violated
+local-reply-before-persist	-	cargo nextest run --release -p quepaxa-sim --test model_check	G5 unique H
+remote-reply-before-persist	QPX_SIM_SEEDS=2000	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	agreement|G[1345] |not in the log
+send-before-incarnation-durable	-	cargo nextest run --release -p quepaxa-sim --test model_check	not logged there
+no-commit-dedup	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	committed twice
+checkpoint-drops-registers	QPX_SIM_SEEDS=2000	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	agreement|G[1345] |not in the log
+local-read-barrier	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	linearizability
+leader-reuses-h-after-restart	-	cargo nextest run --release -p quepaxa-sim --test model_check	G5 unique H|G4 fast-path lock|G1
