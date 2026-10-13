@@ -152,6 +152,7 @@ jobs:
         with:
           tool: cargo-nextest
       - run: cargo nextest run --workspace --no-fail-fast --no-tests=pass
+      - run: cargo test --workspace --doc
       - name: C smoke test
         if: runner.os != 'Windows'
         shell: bash
@@ -189,11 +190,14 @@ jobs:
           tool: cargo-ndk
       - name: Build the C ABI for device and emulator ABIs
         run: cargo ndk -t arm64-v8a -t x86_64 --platform 24 build --release -p quepaxa-ffi
-      - name: Build the FFI test binary for the emulator
+      - name: Build the FFI test binary and the C smoke test for the emulator
         run: |
           cargo ndk -t x86_64 --platform 24 test -p quepaxa-ffi --test c_abi --no-run
           find target/x86_64-linux-android/debug/deps -maxdepth 1 -type f -executable -name 'c_abi-*' | head -1 > test-binary.txt
           test -s test-binary.txt && cat test-binary.txt
+          cc="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang"
+          "$cc" -std=c11 -Wall -Wextra -Werror -I crates/quepaxa-ffi/include crates/quepaxa-ffi/examples/smoke.c \
+            target/x86_64-linux-android/release/libquepaxa_ffi.a -lm -ldl -o smoke-android
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -204,7 +208,9 @@ jobs:
         with:
           api-level: 30
           arch: x86_64
-          script: adb push "$(cat test-binary.txt)" /data/local/tmp/c_abi && adb shell chmod +x /data/local/tmp/c_abi && adb shell /data/local/tmp/c_abi
+          script: |
+            adb push "$(cat test-binary.txt)" /data/local/tmp/c_abi && adb shell chmod +x /data/local/tmp/c_abi && adb shell /data/local/tmp/c_abi
+            adb push smoke-android /data/local/tmp/smoke && adb shell chmod +x /data/local/tmp/smoke && adb shell /data/local/tmp/smoke
 
   ios:
     needs: changes
@@ -219,18 +225,46 @@ jobs:
       - run: cargo build --release -p quepaxa-ffi --target aarch64-apple-ios
       - name: Smoke test on the simulator
         run: |
+          rustup target add aarch64-apple-ios-sim
+          cargo build --release -p quepaxa-ffi --target aarch64-apple-ios-sim
+          xcrun -sdk iphonesimulator clang -arch arm64 -mios-simulator-version-min=15.0 -std=c11 -Wall -Wextra -Werror \
+            -I crates/quepaxa-ffi/include crates/quepaxa-ffi/examples/smoke.c \
+            target/aarch64-apple-ios-sim/release/libquepaxa_ffi.a -o smoke-ios
           bin=$(cargo test -p quepaxa-ffi --test c_abi --target aarch64-apple-ios-sim --no-run --message-format=json \
             | jq -rR 'fromjson? | select(.reason == "compiler-artifact" and .profile.test == true) | .executable' | grep c_abi)
           udid=$(xcrun simctl list devices available -j | jq -r '[.devices[][] | select(.name | startswith("iPhone"))][0].udid')
           xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
           xcrun simctl spawn "$udid" "$bin"
+          xcrun simctl spawn "$udid" "$PWD/smoke-ios"
+
+  semver:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Check the Rust API against the latest real release
+        run: |
+          latest=$(curl -fsS -A "quepaxa-ci (github.com/dyxushuai/quepaxa)" https://crates.io/api/v1/crates/quepaxa | jq -r '.crate.max_stable_version // .crate.max_version')
+          # 0.1.0 is a name placeholder with an unrelated API; checks start with 0.2.0.
+          if [ "$(printf '%s\n0.2.0\n' "$latest" | sort -V | head -1)" != "0.2.0" ]; then
+            echo "no real release yet (latest $latest); skipping"
+            exit 0
+          fi
+          cargo semver-checks -p quepaxa --baseline-version "$latest"
 
   ci-ok:
     if: always()
-    needs: [changes, lint, test, msrv, no-std, deny, ffi, miri, tier1, wasm, android, ios]
+    needs: [changes, lint, test, msrv, no-std, deny, ffi, miri, tier1, wasm, android, ios, semver]
     runs-on: ubuntu-24.04
     steps:
       - uses: re-actors/alls-green@release/v1
         with:
-          allowed-skips: lint, test, msrv, no-std, deny, ffi, miri, tier1, wasm, android, ios
+          allowed-skips: lint, test, msrv, no-std, deny, ffi, miri, tier1, wasm, android, ios, semver
           jobs: ${{ toJSON(needs) }}
