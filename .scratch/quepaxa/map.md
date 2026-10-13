@@ -23,6 +23,7 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
 ## Decisions so far
 
 - [QuePaxa protocol, precisely](issues/01-paper-protocol-spec.md): proposer→recorder RPC over 4-phase rounds with a per-slot interval summary register; leader fast path at step 4; paper is crash-stop only and leaves durability, δ-tuning, reconfig, snapshots unspecified (A1–A16).
+- [How do existing Rust consensus crates shape a sans-IO API](issues/04-sans-io-api-prior-art.md): pull loop `handle`/`poll_actions`, persist-before-send encoded structurally in `Action::Persist{then}`, injected `Timestamp`+seed; openraft#2118 is the cautionary bug.
 
 ## Not yet specified
 
