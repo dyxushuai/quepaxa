@@ -29,3 +29,9 @@ codegen-units = 1
 inherits = "dev"
 opt-level = 3
 debug = false
+
+# For profilers (perf, samply): release code with line tables; build with
+# RUSTFLAGS="-C force-frame-pointers=yes" for cheap, reliable stacks.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"

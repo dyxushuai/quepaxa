@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
@@ -25,6 +26,35 @@ pub struct Snapshot {
 pub struct Disk {
     dir: PathBuf,
     log: File,
+    snapshots: SnapshotWriter,
+}
+
+/// Writes application snapshots, from any thread, never replacing a newer one with an
+/// older one: the log below a saved snapshot may already be gone.
+#[derive(Clone)]
+pub struct SnapshotWriter {
+    dir: PathBuf,
+    /// `through` of the newest snapshot saved by this process.
+    newest: Arc<Mutex<Option<u64>>>,
+}
+
+impl SnapshotWriter {
+    /// Durably replaces `snapshot.bin` with `bytes` (a snapshot through `through`); returns
+    /// `false` without writing if a snapshot at least as new was already saved.
+    pub fn save(&self, through: u64, bytes: &[u8]) -> io::Result<bool> {
+        let mut newest = self.newest.lock().unwrap_or_else(|e| e.into_inner());
+        if newest.is_some_and(|n| n >= through) {
+            return Ok(false);
+        }
+        let tmp = self.dir.join("snapshot.tmp");
+        let mut f = File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        fs::rename(&tmp, self.dir.join("snapshot.bin"))?;
+        sync_dir(&self.dir)?;
+        *newest = Some(through);
+        Ok(true)
+    }
 }
 
 /// Makes directory entries (created or renamed files) durable.
@@ -87,7 +117,8 @@ impl Disk {
                 sync_dir(parent)?;
             }
         }
-        Ok((Self { dir: dir.to_path_buf(), log }, records))
+        let snapshots = SnapshotWriter { dir: dir.to_path_buf(), newest: Arc::default() };
+        Ok((Self { dir: dir.to_path_buf(), log, snapshots }, records))
     }
 
     /// Appends records durably (one fsync for the whole group).
@@ -108,13 +139,8 @@ impl Disk {
         Ok(())
     }
 
-    pub fn save_snapshot(&self, snap: &Snapshot) -> io::Result<()> {
-        let tmp = self.dir.join("snapshot.tmp");
-        let mut f = File::create(&tmp)?;
-        f.write_all(&encode_snapshot(snap))?;
-        f.sync_all()?;
-        fs::rename(&tmp, self.dir.join("snapshot.bin"))?;
-        sync_dir(&self.dir)
+    pub fn snapshots(&self) -> SnapshotWriter {
+        self.snapshots.clone()
     }
 
     pub fn load_snapshot(&self) -> io::Result<Option<Bytes>> {
@@ -127,13 +153,14 @@ impl Disk {
 }
 
 /// `[through u64][core len u32][core][count u32]([klen u32][k][vlen u32][v])*`.
-pub fn encode_snapshot(s: &Snapshot) -> Vec<u8> {
-    let mut b = Vec::new();
-    b.extend_from_slice(&s.through.to_le_bytes());
-    b.extend_from_slice(&(s.core.len() as u32).to_le_bytes());
-    b.extend_from_slice(&s.core);
-    b.extend_from_slice(&(s.kv.len() as u32).to_le_bytes());
-    for (k, v) in &s.kv {
+pub fn encode_snapshot(through: u64, core: &[u8], kv: &BTreeMap<String, String>) -> Vec<u8> {
+    let size = 16 + core.len() + kv.iter().map(|(k, v)| 8 + k.len() + v.len()).sum::<usize>();
+    let mut b = Vec::with_capacity(size);
+    b.extend_from_slice(&through.to_le_bytes());
+    b.extend_from_slice(&(core.len() as u32).to_le_bytes());
+    b.extend_from_slice(core);
+    b.extend_from_slice(&(kv.len() as u32).to_le_bytes());
+    for (k, v) in kv {
         for part in [k.as_bytes(), v.as_bytes()] {
             b.extend_from_slice(&(part.len() as u32).to_le_bytes());
             b.extend_from_slice(part);
@@ -206,7 +233,18 @@ mod tests {
     fn snapshot_round_trips() {
         let kv = BTreeMap::from([("k".to_owned(), "v".to_owned())]);
         let s = Snapshot { through: 7, core: Bytes::from_static(b"core"), kv };
-        let d = decode_snapshot(&Bytes::from(encode_snapshot(&s))).unwrap();
+        let d = decode_snapshot(&Bytes::from(encode_snapshot(s.through, &s.core, &s.kv))).unwrap();
         assert_eq!((d.through, d.core, d.kv), (s.through, s.core, s.kv));
+    }
+
+    #[test]
+    fn an_older_snapshot_never_replaces_a_newer_one() {
+        let dir = temp_dir("snapshots");
+        let (disk, _) = Disk::open(&dir).unwrap();
+        let w = disk.snapshots();
+        assert!(w.save(9, b"nine").unwrap());
+        assert!(!w.save(5, b"five").unwrap());
+        assert!(!w.save(9, b"nine again").unwrap());
+        assert_eq!(disk.load_snapshot().unwrap().as_deref(), Some(&b"nine"[..]));
     }
 }
