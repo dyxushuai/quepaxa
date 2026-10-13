@@ -606,6 +606,70 @@ mod tests {
         assert_eq!(r.metrics().catch_up_retries, 1);
     }
 
+    #[test]
+    fn misaddressed_and_out_of_range_messages_are_rejected_at_the_exact_bounds() {
+        let req =
+            |slot: u64, step| Body::RecordRequest { slot: Slot(slot), step, proposal: proposal(1, 1, 0) };
+        let reply =
+            |req_step, step| Body::RecordReply { slot: Slot(0), req_step, step, first: None, prev_agg: None };
+        let cases = [
+            (1, 2, Body::CatchUp { from: Slot(0) }, true),
+            (0, 0, Body::CatchUp { from: Slot(0) }, true),
+            (7, 0, Body::CatchUp { from: Slot(0) }, true),
+            (1, 0, Body::CatchUp { from: Slot(0) }, false),
+            (1, 0, req(0, MAX_STEP + 1), true),
+            (1, 0, req(0, MAX_STEP), false),
+            (1, 0, req(MAX_SLOT + 1, 4), true),
+            (1, 0, req(MAX_SLOT, 4), false),
+            (1, 0, reply(5, 4), true),
+            (1, 0, reply(4, MAX_STEP + 1), true),
+            (1, 0, reply(4, MAX_STEP), false),
+            (1, 0, reply(4, 4), false),
+        ];
+        for (from, to, body, rejected) in cases {
+            let mut r = replica();
+            let env = Envelope {
+                cluster_id: [3; 16],
+                config_epoch: 0,
+                from: NodeId(from),
+                to: NodeId(to),
+                commit_index: 0,
+            };
+            let what = alloc::format!("{from}->{to} {body:?}");
+            r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
+            assert_eq!(r.metrics().messages_rejected, u64::from(rejected), "{what}");
+        }
+    }
+
+    #[test]
+    fn decisions_are_learned_up_to_the_last_valid_slot() {
+        for (slot, learned) in [(0, 1), (MAX_SLOT, 1), (MAX_SLOT + 1, 0)] {
+            let mut r = replica();
+            let env = Envelope {
+                cluster_id: [3; 16],
+                config_epoch: 0,
+                from: NodeId(1),
+                to: NodeId(0),
+                commit_index: 0,
+            };
+            let body = Body::Decided { slot: Slot(slot), proposal: proposal(1, 1, 0) };
+            r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
+            assert_eq!(r.metrics().slots_decided, learned, "slot {slot}");
+        }
+    }
+
+    #[test]
+    fn snapshots_may_cover_slots_up_to_the_last_valid_one() {
+        let members = [NodeId(0), NodeId(1), NodeId(2)];
+        let state =
+            |next| CoreState { next, schedule: Schedule::new(&members), dedup: Dedup::default() }.encode();
+        assert_eq!(replica().install_snapshot(Timestamp(1), Slot(MAX_SLOT - 1), state(MAX_SLOT)), Ok(true));
+        assert_eq!(
+            replica().install_snapshot(Timestamp(1), Slot(MAX_SLOT), state(MAX_SLOT + 1)),
+            Err(Error::InvalidCoreState)
+        );
+    }
+
     fn r_wire() -> WireCtx {
         WireCtx {
             cluster_id: [3; 16],

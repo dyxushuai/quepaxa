@@ -116,6 +116,11 @@ mod tests {
     }
 
     #[test]
+    fn u64s_are_little_endian_word_pairs() {
+        assert_eq!(ChaCha20::new(seq_seed()).next_u64(), 0x6a19_c5d9_7d2b_fd39);
+    }
+
+    #[test]
     fn same_seed_gives_same_priorities() {
         let (mut a, mut b) = (ChaCha20::new([7; 32]), ChaCha20::new([7; 32]));
         let pa: Vec<u64> = (0..100).map(|_| a.priority()).collect();

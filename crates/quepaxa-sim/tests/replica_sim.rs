@@ -98,3 +98,15 @@ fn same_seed_replays_identically() {
     let b = Sim::new(SimConfig::hostile(3, 7)).run().unwrap();
     assert_eq!(a.trace_hash, b.trace_hash);
 }
+
+#[test]
+fn metrics_count_what_happened() {
+    let report = Sim::new(calm(3, 1)).run().unwrap();
+    let total = |f: fn(&quepaxa::Metrics) -> u64| report.metrics.iter().map(f).sum::<u64>();
+    assert!(total(|m| m.slots_decided) >= report.slots, "{report:?}");
+    assert!(total(|m| m.fast_path_decisions) > 0, "{report:?}");
+    assert!(total(|m| m.forwarded) > 0, "{report:?}");
+    let hostile: Vec<_> = (0..10).map(|seed| Sim::new(SimConfig::hostile(3, seed)).run().unwrap()).collect();
+    let total = |f: fn(&quepaxa::Metrics) -> u64| hostile.iter().flat_map(|r| &r.metrics).map(f).sum::<u64>();
+    assert!(total(|m| m.retransmits) > 0 && total(|m| m.hedged) > 0);
+}

@@ -125,6 +125,8 @@ pub struct Report {
     pub snapshots_installed: usize,
     /// New agreed slots during the fault phase after the configured kill.
     pub slots_after_kill: u64,
+    /// Each live replica's counters at the end (since its last restart).
+    pub metrics: Vec<quepaxa::Metrics>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -272,6 +274,11 @@ impl Sim {
                 let lines: Vec<&str> = self.trace.lines().collect();
                 self.report.trace_tail = lines[lines.len().saturating_sub(400)..].join("\n");
                 self.report.reads = self.kv.reads();
+                self.report.metrics = self
+                    .nodes
+                    .iter()
+                    .filter_map(|n| n.replica.as_ref().map(|r| r.metrics().clone()))
+                    .collect();
                 if let Err(e) = self.kv.check() {
                     return Err(self.fail(&format!("linearizability: {e}")));
                 }

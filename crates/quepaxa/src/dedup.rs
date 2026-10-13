@@ -138,6 +138,22 @@ mod tests {
     }
 
     #[test]
+    fn only_a_full_window_forgets_older_incarnations() {
+        let mut d = Dedup::default();
+        assert!(!seen(&mut d, 5, 0));
+        assert!(!d.contains(NodeId(1), 3, ProposalId(0)));
+        assert!(!seen(&mut d, 3, 0));
+        for inc in 6..=7 {
+            assert!(!seen(&mut d, inc, 0));
+        }
+        assert!(d.contains(NodeId(1), 2, ProposalId(0)));
+        assert!(!d.contains(NodeId(1), 4, ProposalId(0)));
+        assert!(!seen(&mut d, 8, 0));
+        assert_eq!(d.origins[&NodeId(1)].len(), INCARNATIONS_KEPT);
+        assert!(d.contains(NodeId(1), 3, ProposalId(9)));
+    }
+
+    #[test]
     fn entries_from_forgotten_incarnations_count_as_seen() {
         let mut d = Dedup::default();
         for inc in 1..=5 {

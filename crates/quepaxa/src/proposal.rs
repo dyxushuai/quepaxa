@@ -33,6 +33,8 @@ impl PartialEq for Proposal {
 
 impl Eq for Proposal {}
 
+// State fingerprints for model checking only.
+#[cfg(feature = "model")]
 impl core::hash::Hash for Proposal {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
         (self.priority, self.key).hash(state);
