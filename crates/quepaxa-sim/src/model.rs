@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use bytes::Bytes;
-use quepaxa::{Action, Config, Input, NodeId, PersistId, Replica, Timestamp};
+use quepaxa::{Action, Config, Entry, Input, NodeId, PersistId, ProposalId, Replica, Timestamp};
 
 /// Bounds of one exploration.
 #[derive(Clone, Debug)]
@@ -57,6 +57,8 @@ struct MNode {
     now: u64,
     next_commit: u64,
     starts: u64,
+    /// Own proposals of the current incarnation, by id.
+    proposed: BTreeMap<ProposalId, Bytes>,
 }
 
 #[derive(Clone)]
@@ -65,7 +67,11 @@ struct State {
     events: VecDeque<Event>,
     deviations: u32,
     crashes: u32,
-    log: BTreeMap<u64, Vec<Bytes>>,
+    log: BTreeMap<u64, Vec<Entry>>,
+    /// Slot each committed payload first appeared in.
+    committed_at: BTreeMap<Bytes, u64>,
+    /// Every payload any client proposed.
+    proposals: Vec<Bytes>,
     depth: usize,
 }
 
@@ -92,9 +98,9 @@ impl State {
     fn fingerprint(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for n in &self.nodes {
-            (n.replica.fingerprint(), &n.durable, n.now, n.next_commit).hash(&mut h);
+            (n.replica.fingerprint(), &n.durable, n.now, n.next_commit, &n.proposed).hash(&mut h);
         }
-        (&self.events, self.deviations, self.crashes).hash(&mut h);
+        (&self.events, self.deviations, self.crashes, &self.log).hash(&mut h);
         h.finish()
     }
 
@@ -131,8 +137,9 @@ impl State {
                 steps.push((Step::Duplicate(k), true));
             }
         }
+        let default_timer = if self.events.is_empty() { earliest_timer() } else { None };
         for i in 0..self.nodes.len() {
-            if !self.events.is_empty() && self.nodes[i].replica.next_deadline().is_some() {
+            if Some(i) != default_timer && self.nodes[i].replica.next_deadline().is_some() {
                 steps.push((Step::Timeout(i), true));
             }
             if self.crashes > 0 {
@@ -224,6 +231,7 @@ impl State {
         n.durable.extend(kept);
         n.starts += 1;
         n.next_commit = 0;
+        n.proposed.clear();
         n.replica = Replica::new(config(total, node, n.starts), n.durable.clone(), Timestamp(n.now))
             .map_err(|e| e.to_string())?;
         self.drain(node)
@@ -247,22 +255,43 @@ impl State {
                         return Err(format!("n{i} committed slot {} out of order", slot.0));
                     }
                     n.next_commit += 1;
-                    let payloads: Vec<Bytes> = entries.into_iter().map(|e| e.payload).collect();
                     match self.log.get(&slot.0) {
-                        Some(agreed) if *agreed != payloads => {
+                        Some(agreed) if *agreed != entries => {
                             return Err(format!(
-                                "agreement broken at slot {}: {agreed:?} vs {payloads:?}",
+                                "agreement broken at slot {}: {agreed:?} vs {entries:?}",
                                 slot.0
                             ));
                         }
                         Some(_) => {}
                         None => {
-                            self.log.insert(slot.0, payloads);
+                            for e in &entries {
+                                if !self.proposals.contains(&e.payload) {
+                                    return Err(format!("validity: {:?} was never proposed", e.payload));
+                                }
+                                if let Some(at) = self.committed_at.insert(e.payload.clone(), slot.0) {
+                                    return Err(format!(
+                                        "{:?} committed in slots {at} and {}",
+                                        e.payload, slot.0
+                                    ));
+                                }
+                            }
+                            self.log.insert(slot.0, entries);
                         }
                     }
                 }
-                Action::Committed { slot, .. } if !self.log.contains_key(&slot.0) => {
-                    return Err(format!("n{i} reported Committed in unknown slot {}", slot.0));
+                Action::Committed { id, slot } => {
+                    // The exact proposal (origin, id, payload) must be logged in that slot.
+                    let payload = self.nodes[i].proposed.get(&id);
+                    let logged = payload.is_some_and(|p| {
+                        self.log.get(&slot.0).is_some_and(|es| {
+                            es.iter().any(|e| e.origin == NodeId(i as u32) && e.id == id && e.payload == *p)
+                        })
+                    });
+                    if !logged {
+                        return Err(format!(
+                            "n{i} reported Committed {id:?} at {slot:?} but it is not logged there"
+                        ));
+                    }
                 }
                 _ => {}
             }
@@ -270,8 +299,8 @@ impl State {
         Ok(())
     }
 
-    fn complete(&self, proposals: usize) -> bool {
-        self.log.values().map(Vec::len).sum::<usize>() >= proposals
+    fn complete(&self) -> bool {
+        self.proposals.iter().all(|p| self.committed_at.contains_key(p))
             && self.nodes.iter().all(|n| n.next_commit as usize == self.log.len())
     }
 }
@@ -281,7 +310,14 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
     let mut nodes = Vec::new();
     for i in 0..cfg.nodes {
         let replica = Replica::new(config(cfg.nodes, i, 0), [], Timestamp(0)).map_err(|e| e.to_string())?;
-        nodes.push(MNode { replica, durable: Vec::new(), now: 0, next_commit: 0, starts: 0 });
+        nodes.push(MNode {
+            replica,
+            durable: Vec::new(),
+            now: 0,
+            next_commit: 0,
+            starts: 0,
+            proposed: BTreeMap::new(),
+        });
     }
     let mut init = State {
         nodes,
@@ -289,6 +325,8 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
         deviations: cfg.deviations,
         crashes: cfg.crashes,
         log: BTreeMap::new(),
+        committed_at: BTreeMap::new(),
+        proposals: Vec::new(),
         depth: 0,
     };
     for i in 0..cfg.nodes {
@@ -296,7 +334,9 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
     }
     for (k, &i) in cfg.proposals.iter().enumerate() {
         let payload = Bytes::from(format!("w{k}@n{i}"));
-        init.nodes[i].replica.propose(Timestamp(0), payload).map_err(|e| e.to_string())?;
+        let id = init.nodes[i].replica.propose(Timestamp(0), payload.clone()).map_err(|e| e.to_string())?;
+        init.nodes[i].proposed.insert(id, payload.clone());
+        init.proposals.push(payload);
         init.drain(i)?;
     }
     let mut report = ModelReport { exhausted: true, ..ModelReport::default() };
@@ -311,7 +351,7 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
             report.exhausted = false;
             break;
         }
-        if state.complete(cfg.proposals.len()) {
+        if state.complete() {
             report.complete += 1;
         }
         if state.depth >= cfg.max_depth {

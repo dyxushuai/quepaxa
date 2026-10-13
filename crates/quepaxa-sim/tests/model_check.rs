@@ -23,8 +23,8 @@ fn leader_and_follower_writes_with_a_crash_are_safe() {
     let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
     println!("{report:?}");
     assert!(report.complete > 0, "{report:?}");
-    // Within the per-PR bounds every schedule is explored; nightly raises the deviations.
-    assert!(report.exhausted || deviations(2) > 2, "{report:?}");
+    // Every schedule within the bounds is explored, whatever bounds the run uses.
+    assert!(report.exhausted, "{report:?}");
 }
 
 #[test]
@@ -40,6 +40,6 @@ fn contending_followers_are_safe() {
     let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
     println!("{report:?}");
     assert!(report.complete > 0, "{report:?}");
-    // Within the per-PR bounds every schedule is explored; nightly raises the deviations.
-    assert!(report.exhausted || deviations(2) > 2, "{report:?}");
+    // Every schedule within the bounds is explored, whatever bounds the run uses.
+    assert!(report.exhausted, "{report:?}");
 }

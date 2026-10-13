@@ -1,5 +1,8 @@
 //! A toy key-value store over the log, and a linearizability oracle for it.
 //!
+//! Every invocation and completion gets the next value of one counter as it happens, so
+//! real-time order is exact even when several events share a virtual timestamp.
+//!
 //! Writes carry unique values (`k<key>:<tag>`), so the log gives every write a position
 //! and the store at any slot is fully determined. A read (via a read barrier) is
 //! linearizable iff the write it returns:
@@ -50,6 +53,8 @@ pub(crate) struct Kv {
     pending_reads: Vec<HashMap<ProposalId, (u8, u64)>>,
     /// Per node: applied state.
     state: Vec<State>,
+    /// Event ordinal: real-time order of invocations and completions.
+    clock: u64,
 }
 
 impl Kv {
@@ -61,22 +66,35 @@ impl Kv {
         }
     }
 
-    pub fn write_invoked(&mut self, payload: Bytes, now: u64) {
-        self.writes.insert(payload, WriteOp { invoked: now, completed: None });
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
     }
 
-    pub fn write_completed(&mut self, payload: &Bytes, now: u64) {
+    pub fn write_invoked(&mut self, payload: Bytes) {
+        let at = self.tick();
+        self.writes.insert(payload, WriteOp { invoked: at, completed: None });
+    }
+
+    pub fn write_completed(&mut self, payload: &Bytes) {
+        let at = self.tick();
         if let Some(w) = self.writes.get_mut(payload) {
-            w.completed.get_or_insert(now);
+            w.completed.get_or_insert(at);
         }
     }
 
-    pub fn read_invoked(&mut self, node: usize, id: ProposalId, key: u8, now: u64) {
-        self.pending_reads[node].insert(id, (key, now));
+    pub fn read_invoked(&mut self, node: usize, id: ProposalId, key: u8) {
+        let at = self.tick();
+        self.pending_reads[node].insert(id, (key, at));
+    }
+
+    pub fn no_pending_reads(&self) -> bool {
+        self.pending_reads.iter().all(HashMap::is_empty)
     }
 
     /// The node applied every commit up to the barrier's slot: read its state now.
-    pub fn read_ready(&mut self, node: usize, id: ProposalId, now: u64) {
+    pub fn read_ready(&mut self, node: usize, id: ProposalId) {
+        let now = self.tick();
         if let Some((key, invoked)) = self.pending_reads[node].remove(&id) {
             let value = self.state[node].get(&key).cloned();
             self.reads.push(ReadOp { key, invoked, completed: now, value });

@@ -122,6 +122,8 @@ pub struct Report {
     pub max_retained_slots: u64,
     /// Snapshots installed from peers.
     pub snapshots_installed: usize,
+    /// New agreed slots during the fault phase after the configured kill.
+    pub slots_after_kill: u64,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -335,6 +337,7 @@ impl Sim {
                     && n.next_commit == target
                     && n.outstanding.is_empty()
             })
+            && self.kv.no_pending_reads()
     }
 
     fn config(&mut self, i: usize) -> Config {
@@ -429,7 +432,8 @@ impl Sim {
                 }
             }
             Event::Restart { node } => {
-                let killed = self.faults_on && self.cfg.kill.is_some_and(|(k, _)| k == node);
+                let killed =
+                    self.faults_on && self.cfg.kill.is_some_and(|(k, at)| k == node && self.now >= at * MS);
                 if self.nodes[node].replica.is_none() && !killed {
                     self.start(node);
                 }
@@ -473,7 +477,7 @@ impl Sim {
                 self.drain(node);
             }
         }
-        self.check_global()
+        Ok(())
     }
 
     fn inject_faults(&mut self) {
@@ -505,7 +509,7 @@ impl Sim {
         match r.propose(Timestamp(self.now), payload.clone()) {
             Ok(id) => {
                 self.proposed.insert(payload.clone());
-                self.kv.write_invoked(payload.clone(), self.now);
+                self.kv.write_invoked(payload.clone());
                 self.nodes[i].outstanding.insert(id, payload.clone());
                 self.nodes[i].incarnation_payloads.insert(id, payload);
             }
@@ -520,7 +524,7 @@ impl Sim {
         let key = b'0' + self.rng.below(kv::KEYS) as u8;
         let Some(r) = self.nodes[i].replica.as_mut() else { return Ok(()) };
         match r.read_barrier(Timestamp(self.now)) {
-            Ok(id) => self.kv.read_invoked(i, id, key, self.now),
+            Ok(id) => self.kv.read_invoked(i, id, key),
             Err(quepaxa::Error::Busy) => {}
             Err(e) => return Err(self.fail(&format!("read_barrier failed: {e}"))),
         }
@@ -634,7 +638,7 @@ impl Sim {
                 let payload = n.incarnation_payloads.get(&id).cloned();
                 n.outstanding.remove(&id);
                 if let Some(p) = &payload {
-                    self.kv.write_completed(p, self.now);
+                    self.kv.write_completed(p);
                 }
                 let in_log = payload.is_some_and(|p| self.kv.slot_of(&p).is_some_and(|at| at <= slot.0));
                 assert!(
@@ -647,7 +651,7 @@ impl Sim {
                 self.nodes[i].outstanding.remove(&id);
                 self.kv.read_dropped(i, id);
             }
-            Action::ReadReady { id, .. } => self.kv.read_ready(i, id, self.now),
+            Action::ReadReady { id, .. } => self.kv.read_ready(i, id),
             Action::SnapshotNeeded { peer, through } => {
                 self.pending_installs.push((i, peer.0 as usize, through.0))
             }
@@ -679,6 +683,9 @@ impl Sim {
                 }
                 self.kv.first_commit(slot.0, &payloads);
                 self.log.insert(slot.0, entries);
+                if self.faults_on && self.cfg.kill.is_some_and(|(_, at)| self.now >= at * MS) {
+                    self.report.slots_after_kill += 1;
+                }
                 if self.faults_on {
                     let gap = (self.now - self.last_new_slot_at) / MS;
                     self.report.max_commit_gap_ms = self.report.max_commit_gap_ms.max(gap);
@@ -686,11 +693,6 @@ impl Sim {
                 self.last_new_slot_at = self.now;
             }
         }
-    }
-
-    fn check_global(&self) -> Result<(), String> {
-        // The agreed log has no holes below its highest slot once every replica passed it.
-        Ok(())
     }
 }
 
