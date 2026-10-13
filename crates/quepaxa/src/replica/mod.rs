@@ -6,6 +6,7 @@
 
 mod log;
 mod proposing;
+mod snapshot;
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -15,6 +16,7 @@ use core::mem;
 use crate::api::{Action, Config, DropReason, Error, Input, Metrics, Outbound};
 use crate::batch::{self, Entry, Item};
 use crate::codec::{Body, Envelope, Message, WireCtx};
+use crate::core_state::CoreState;
 use crate::dedup::Dedup;
 use crate::durable::Record;
 use crate::proposal::{Proposal, ValueKey};
@@ -101,8 +103,8 @@ pub struct Replica {
     hedged: VecDeque<Item>,
     /// Own entries handed to the leader, with when.
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
-    /// Own proposals awaiting commit, with when they were made.
-    outstanding: BTreeMap<ProposalId, Timestamp>,
+    /// Own proposals awaiting commit: when they were made, and whether it is a barrier.
+    outstanding: BTreeMap<ProposalId, (Timestamp, bool)>,
     /// Smoothed propose-to-commit latency of own proposals, in nanoseconds.
     commit_latency: Option<u64>,
     next_batch: u64,
@@ -112,6 +114,15 @@ pub struct Replica {
     h_floor: u64,
     reserved_through: Option<u64>,
     reserved_durable: Option<u64>,
+
+    // Compaction.
+    /// First slot not covered by a snapshot; nothing below it is kept.
+    floor: u64,
+    /// Core state of the latest snapshot, carried into checkpoints.
+    snapshot_state: Option<Bytes>,
+    /// The next `Persist` replaces all earlier records.
+    replace_next: bool,
+    snapshot_asked: Option<Timestamp>,
 }
 
 impl Replica {
@@ -123,6 +134,7 @@ impl Replica {
         let mut registers = BTreeMap::new();
         let mut log = BTreeMap::new();
         let mut reservation: Option<u64> = None;
+        let mut snapshot: Option<(CoreState, Bytes)> = None;
         for (index, bytes) in durable.into_iter().enumerate() {
             match Record::decode(&bytes).map_err(|_| Error::CorruptRecord { index })? {
                 Record::Incarnation(n) => last_incarnation = last_incarnation.max(n),
@@ -133,8 +145,21 @@ impl Replica {
                 Record::Decided { slot, proposal } => {
                     log.insert(slot, Decision { proposal, durable: true });
                 }
+                Record::Compacted { through, core_state } => {
+                    let state = CoreState::decode(&core_state, &cfg.members)
+                        .map_err(|_| Error::CorruptRecord { index })?;
+                    if state.next != through.0 + 1 {
+                        return Err(Error::CorruptRecord { index });
+                    }
+                    if snapshot.as_ref().is_none_or(|(s, _)| s.next < state.next) {
+                        snapshot = Some((state, core_state));
+                    }
+                }
             }
         }
+        let floor = snapshot.as_ref().map_or(0, |(s, _)| s.next);
+        log = log.split_off(&Slot(floor));
+        registers = registers.split_off(&Slot(floor));
         registers.retain(|slot, _| !log.contains_key(slot));
         let wire =
             WireCtx { cluster_id: cfg.cluster_id, config_epoch: 0, max_message_bytes: cfg.max_message_bytes };
@@ -142,7 +167,9 @@ impl Replica {
             me: cfg.id,
             wire,
             rng: ChaCha20::new(cfg.seed),
-            schedule: Schedule::new(&cfg.members),
+            schedule: snapshot
+                .as_ref()
+                .map_or_else(|| Schedule::new(&cfg.members), |(s, _)| s.schedule.clone()),
             cfg,
             incarnation: last_incarnation + 1,
             now,
@@ -159,12 +186,12 @@ impl Replica {
             inbox: VecDeque::new(),
             registers,
             log,
-            committed: 0,
-            emitted: 0,
+            committed: floor,
+            emitted: floor,
             peer_committed: 0,
             seen: BTreeMap::new(),
             catch_up_sent: None,
-            dedup: Dedup::default(),
+            dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
             proposers: BTreeMap::new(),
             batches: BTreeMap::new(),
             pending: VecDeque::new(),
@@ -178,6 +205,10 @@ impl Replica {
             h_floor: reservation.map_or(0, |r| r + 1),
             reserved_through: None,
             reserved_durable: None,
+            floor,
+            snapshot_state: snapshot.map(|(_, b)| b),
+            replace_next: false,
+            snapshot_asked: None,
         };
         r.advance_committed();
         // Slots with recovered recorder state were started by someone; make sure they get driven.
@@ -236,7 +267,7 @@ impl Replica {
             return Err(Error::PayloadTooLarge);
         }
         self.next_proposal += 1;
-        self.outstanding.insert(id, self.now);
+        self.outstanding.insert(id, (self.now, barrier));
         self.pending.push_back(item);
         self.pump();
         self.flush();
@@ -313,6 +344,8 @@ impl Replica {
     /// already in flight are parked behind the last one instead, so idle replies never
     /// cost an extra (empty) write.
     fn flush(&mut self) {
+        self.metrics.retained_slots = self.log.len() as u64;
+        self.metrics.live_registers = self.registers.len() as u64;
         if self.writes.is_empty() {
             if let Some(last) = self.in_flight.back_mut() {
                 last.effects.append(&mut self.effects);
@@ -327,6 +360,7 @@ impl Replica {
             id: PersistId(id),
             records: mem::take(&mut self.writes),
             then: mem::take(&mut self.gated),
+            replace: mem::take(&mut self.replace_next),
         });
         self.in_flight.push_back(InFlight { id, effects: mem::take(&mut self.effects), parked: Vec::new() });
     }
@@ -456,6 +490,7 @@ impl Replica {
                         }
                     }
                     Body::Forward { batch } => self.on_forward(&batch),
+                    Body::Compacted { through } => self.on_compacted(from, through),
                 }
             }
             self.drive();

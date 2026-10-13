@@ -31,7 +31,7 @@
 //!
 //! while let Some(action) = queue.pop_front() {
 //!     match action {
-//!         Action::Persist { id, records, then } => {
+//!         Action::Persist { id, records, then, .. } => {
 //!             disk.extend(records); // append + fsync in a real system
 //!             assert!(then.is_empty()); // a single member has nobody to message
 //!             replica.handle(Timestamp(0), Input::Persisted(id))?;
@@ -52,6 +52,7 @@ extern crate alloc;
 mod api;
 mod batch;
 mod codec;
+mod core_state;
 mod crc;
 mod dedup;
 mod durable;

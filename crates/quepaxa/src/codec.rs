@@ -19,6 +19,7 @@ const KIND_DECIDED: u8 = 3;
 const KIND_CATCH_UP: u8 = 4;
 const KIND_ENTRIES: u8 = 5;
 const KIND_FORWARD: u8 = 6;
+const KIND_COMPACTED: u8 = 7;
 
 const VALUE_INLINE: u8 = 0;
 
@@ -90,6 +91,10 @@ pub(crate) enum Body {
     Forward {
         batch: Bytes,
     },
+    /// The sender no longer has slots up to `through`; fetch its snapshot instead.
+    Compacted {
+        through: Slot,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +143,7 @@ impl Message {
             Body::CatchUp { .. } => KIND_CATCH_UP,
             Body::Entries { .. } => KIND_ENTRIES,
             Body::Forward { .. } => KIND_FORWARD,
+            Body::Compacted { .. } => KIND_COMPACTED,
         });
         let e = &self.env;
         out.put_slice(&e.cluster_id);
@@ -172,6 +178,7 @@ impl Message {
                 }
             }
             Body::Forward { batch } => put_value(&mut out, batch),
+            Body::Compacted { through } => out.put_u64_le(through.0),
         }
         Bytes::from(out)
     }
@@ -181,7 +188,7 @@ impl Message {
         match &self.body {
             Body::RecordRequest { proposal, .. } | Body::Decided { proposal, .. } => proposal.value.len(),
             Body::RecordReply { first, prev_agg, .. } => len(first) + len(prev_agg),
-            Body::CatchUp { .. } => 0,
+            Body::CatchUp { .. } | Body::Compacted { .. } => 0,
             Body::Forward { batch } => batch.len(),
             Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len() + 33).sum(),
         }
@@ -241,6 +248,7 @@ impl Message {
                 Body::Entries { first, proposals }
             }
             KIND_FORWARD => Body::Forward { batch: r.value()? },
+            KIND_COMPACTED => Body::Compacted { through: Slot(r.u64()?) },
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -538,7 +546,7 @@ mod tests {
         #[test]
         fn catch_up_kinds_round_trip(from: u64, ps in proptest::collection::vec(arb_prop(), 0..4)) {
             let batch = ps.first().map(|p| p.value.clone()).unwrap_or_default();
-            for body in [Body::CatchUp { from: Slot(from) }, Body::Entries { first: Slot(from), proposals: ps.clone() }, Body::Forward { batch }] {
+            for body in [Body::CatchUp { from: Slot(from) }, Body::Entries { first: Slot(from), proposals: ps.clone() }, Body::Forward { batch }, Body::Compacted { through: Slot(from) }] {
                 let m = Message { env: env(), body };
                 proptest::prop_assert_eq!(Message::decode(&m.encode(), &CTX).unwrap(), m);
             }

@@ -60,6 +60,23 @@ fn leader_crash_stalls_commits_only_briefly() {
 }
 
 #[test]
+fn compaction_keeps_memory_bounded_on_long_runs() {
+    let cfg = SimConfig { fault_phase_ms: 20_000, propose: 600, ..calm(3, 11) };
+    let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.slots > 1_000, "{report:?}");
+    assert!(report.max_retained_slots <= 32 + 8, "{report:?}");
+}
+
+#[test]
+fn absent_replica_recovers_through_a_peer_snapshot() {
+    for seed in 0..5 {
+        let report =
+            Sim::new(SimConfig { absent: Some(2), ..calm(3, seed) }).run().unwrap_or_else(|e| panic!("{e}"));
+        assert!(report.snapshots_installed >= 1, "seed {seed}: {report:?}");
+    }
+}
+
+#[test]
 fn same_seed_replays_identically() {
     let a = Sim::new(SimConfig::hostile(3, 7)).run().unwrap();
     let b = Sim::new(SimConfig::hostile(3, 7)).run().unwrap();

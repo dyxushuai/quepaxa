@@ -37,6 +37,9 @@ struct ReadOp {
     value: Option<Bytes>,
 }
 
+/// One replica's applied store.
+pub(crate) type State = BTreeMap<u8, Bytes>;
+
 #[derive(Default)]
 pub(crate) struct Kv {
     writes: HashMap<Bytes, WriteOp>,
@@ -46,7 +49,7 @@ pub(crate) struct Kv {
     /// Per node: barrier id → (key, invoked).
     pending_reads: Vec<HashMap<ProposalId, (u8, u64)>>,
     /// Per node: applied state.
-    state: Vec<BTreeMap<u8, Bytes>>,
+    state: Vec<State>,
 }
 
 impl Kv {
@@ -100,6 +103,19 @@ impl Kv {
         for p in payloads {
             self.state[node].insert(key_of(p), p.clone());
         }
+    }
+
+    pub fn state(&self, node: usize) -> State {
+        self.state[node].clone()
+    }
+
+    pub fn set_state(&mut self, node: usize, state: State) {
+        self.state[node] = state;
+    }
+
+    /// Slot where a payload was first committed.
+    pub fn slot_of(&self, payload: &Bytes) -> Option<u64> {
+        self.positions.get(payload).map(|(slot, _)| *slot)
     }
 
     pub fn reads(&self) -> usize {

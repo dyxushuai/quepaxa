@@ -54,13 +54,22 @@ pub struct SimConfig {
     pub absent: Option<usize>,
     /// Crash this replica at this virtual time and keep it down until heal.
     pub kill: Option<(usize, u64)>,
+    /// Snapshot and compact every this many applied slots.
+    pub compact_every: Option<u64>,
 }
 
 impl SimConfig {
     /// Long fsyncs, frequent crashes and heavy loss: maximizes the window in which a reply
     /// could escape before its write is durable.
     pub fn durability_stress(nodes: usize, seed: u64) -> Self {
-        Self { drop: 250, crash: 25, max_persist_ms: 40, in_flight_slots: 2, ..Self::hostile(nodes, seed) }
+        Self {
+            drop: 250,
+            crash: 25,
+            max_persist_ms: 40,
+            in_flight_slots: 2,
+            compact_every: Some(2),
+            ..Self::hostile(nodes, seed)
+        }
     }
 
     /// A hostile default: lossy, reordering, partitioning, crashing.
@@ -81,6 +90,7 @@ impl SimConfig {
             in_flight_slots: 4,
             absent: None,
             kill: None,
+            compact_every: Some(32),
         }
     }
 }
@@ -104,6 +114,10 @@ pub struct Report {
     pub trace_tail: String,
     /// Longest virtual time between two new agreed slots during the fault phase.
     pub max_commit_gap_ms: u64,
+    /// Largest number of decided slots any replica held in memory.
+    pub max_retained_slots: u64,
+    /// Snapshots installed from peers.
+    pub snapshots_installed: usize,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -120,6 +134,15 @@ struct PendingPersist {
     id: u64,
     records: Vec<Bytes>,
     then: Vec<Outbound>,
+    replace: bool,
+}
+
+/// An application snapshot: the KV state after applying every slot up to `through`.
+#[derive(Clone)]
+struct Snapshot {
+    through: u64,
+    state: kv::State,
+    core: Bytes,
 }
 
 struct Node {
@@ -133,6 +156,8 @@ struct Node {
     timer_at: Option<u64>,
     /// Next slot this node's commit stream must deliver.
     next_commit: u64,
+    /// Durable application snapshot (survives crashes).
+    snapshot: Option<Snapshot>,
     /// Local proposals of the current incarnation awaiting `Committed`.
     outstanding: HashMap<ProposalId, Bytes>,
     incarnation_payloads: HashMap<ProposalId, Bytes>,
@@ -156,6 +181,7 @@ pub struct Sim {
     trace: String,
     last_new_slot_at: u64,
     kv: kv::Kv,
+    pending_installs: Vec<(usize, usize, u64)>,
 }
 
 fn cluster_id() -> [u8; 16] {
@@ -177,6 +203,7 @@ impl Sim {
                 disk_next_group: None,
                 timer_at: None,
                 next_commit: 0,
+                snapshot: None,
                 outstanding: HashMap::new(),
                 incarnation_payloads: HashMap::new(),
             })
@@ -197,6 +224,7 @@ impl Sim {
             trace: String::new(),
             last_new_slot_at: 0,
             kv: kv::Kv::new(nodes_len),
+            pending_installs: Vec::new(),
         };
         if let Some((node, at)) = sim.cfg.kill {
             sim.push(at * MS, Event::Kill { node });
@@ -322,13 +350,27 @@ impl Sim {
         let node = &mut self.nodes[i];
         node.replica = Some(replica);
         node.generation += 1;
-        node.next_commit = 0;
         node.outstanding.clear();
         self.kv.restarted(i);
+        node.next_commit = match &node.snapshot {
+            Some(snap) => {
+                self.kv.set_state(i, snap.state.clone());
+                snap.through + 1
+            }
+            None => 0,
+        };
         node.incarnation_payloads.clear();
         node.timer_at = None;
         let _ = writeln!(self.trace, "{} start n{i} g{}", self.now, node.generation);
         self.drain(i);
+        // The application's snapshot may be newer than the replica's last durable compaction.
+        if let Some(snap) = self.nodes[i].snapshot.clone()
+            && let Some(r) = self.nodes[i].replica.as_mut()
+        {
+            r.install_snapshot(Timestamp(self.now), Slot(snap.through), snap.core)
+                .expect("own snapshot is valid");
+            self.drain(i);
+        }
     }
 
     fn crash(&mut self, i: usize) {
@@ -339,8 +381,15 @@ impl Sim {
         // The write in progress may be torn: a prefix of its records reaches the disk.
         let pending = std::mem::take(&mut node.pending);
         if let Some(first) = pending.into_iter().next() {
-            let keep = self.rng.below(first.records.len() as u64 + 1) as usize;
-            self.nodes[i].durable.extend(first.records.into_iter().take(keep));
+            if first.replace {
+                // Replacement is atomic (write-new-then-rename): all or nothing.
+                if self.rng.below(2) == 0 {
+                    self.nodes[i].durable = first.records;
+                }
+            } else {
+                let keep = self.rng.below(first.records.len() as u64 + 1) as usize;
+                self.nodes[i].durable.extend(first.records.into_iter().take(keep));
+            }
         }
         let node = &mut self.nodes[i];
         node.generation += 1;
@@ -392,7 +441,11 @@ impl Sim {
                 let n = &mut self.nodes[node];
                 let pos = n.pending.iter().position(|p| p.id == id).expect("persist completes once");
                 let p = n.pending.remove(pos);
-                n.durable.extend(p.records);
+                if p.replace {
+                    n.durable = p.records;
+                } else {
+                    n.durable.extend(p.records);
+                }
                 for out in p.then {
                     self.net_send(node, out);
                 }
@@ -466,6 +519,44 @@ impl Sim {
         Ok(())
     }
 
+    /// The application snapshots its state (durably, instantly in the sim) and compacts.
+    fn maybe_compact(&mut self, i: usize) {
+        let Some(every) = self.cfg.compact_every else { return };
+        let last = self.nodes[i].snapshot.as_ref().map_or(0, |s| s.through + 1);
+        let next = self.nodes[i].next_commit;
+        if next < last + every {
+            return;
+        }
+        let Some(core) = self.nodes[i].replica.as_ref().map(Replica::core_state) else { return };
+        let through = next - 1;
+        let state = self.kv.state(i);
+        self.nodes[i].snapshot = Some(Snapshot { through, state, core: core.clone() });
+        let r = self.nodes[i].replica.as_mut().expect("checked above");
+        r.compact(Timestamp(self.now), Slot(through), core).expect("valid compaction");
+        self.drain(i);
+    }
+
+    /// Ships snapshots requested by `SnapshotNeeded` (out of band, instantly).
+    fn install_snapshots(&mut self) {
+        while let Some((i, peer, through)) = self.pending_installs.pop() {
+            let Some(snap) = self.nodes[peer].snapshot.clone() else { continue };
+            if snap.through < through
+                || self.nodes[i].next_commit > snap.through
+                || self.nodes[i].replica.is_none()
+            {
+                continue;
+            }
+            self.kv.set_state(i, snap.state.clone());
+            self.nodes[i].next_commit = snap.through + 1;
+            self.nodes[i].snapshot = Some(snap.clone());
+            self.report.snapshots_installed += 1;
+            let _ = writeln!(self.trace, "{} n{i} install snapshot through {}", self.now, snap.through);
+            let r = self.nodes[i].replica.as_mut().expect("checked above");
+            r.install_snapshot(Timestamp(self.now), Slot(snap.through), snap.core).expect("valid snapshot");
+            self.drain(i);
+        }
+    }
+
     fn net_send(&mut self, from: usize, out: Outbound) {
         let to = out.to.0 as usize;
         if self.faults_on
@@ -486,10 +577,16 @@ impl Sim {
             return;
         };
         r.poll_actions(&mut actions);
-        let deadline = r.next_deadline();
         for a in actions {
             self.on_action(i, a);
         }
+        if let Some(r) = self.nodes[i].replica.as_ref() {
+            self.report.max_retained_slots = self.report.max_retained_slots.max(r.metrics().retained_slots);
+        }
+        self.maybe_compact(i);
+        self.install_snapshots();
+        let Some(r) = self.nodes[i].replica.as_mut() else { return };
+        let deadline = r.next_deadline();
         let n = &mut self.nodes[i];
         if let Some(Timestamp(at)) = deadline {
             let at = at.max(self.now);
@@ -504,7 +601,7 @@ impl Sim {
     fn on_action(&mut self, i: usize, a: Action) {
         match a {
             Action::Send(out) => self.net_send(i, out),
-            Action::Persist { id, records, then } => {
+            Action::Persist { id, records, then, replace } => {
                 // Group commit: writes issued while an fsync runs share the next one.
                 let lat = 1 + self.rng.below(self.cfg.max_persist_ms * MS);
                 let n = &mut self.nodes[i];
@@ -518,7 +615,7 @@ impl Sim {
                 } else {
                     *n.disk_next_group.get_or_insert(n.disk_busy_until + lat)
                 };
-                n.pending.push(PendingPersist { id: id.0, records, then });
+                n.pending.push(PendingPersist { id: id.0, records, then, replace });
                 let generation = n.generation;
                 self.push(done, Event::PersistDone { node: i, generation, id: id.0 });
             }
@@ -530,9 +627,7 @@ impl Sim {
                 if let Some(p) = &payload {
                     self.kv.write_completed(p, self.now);
                 }
-                let in_log = payload.is_some_and(|p| {
-                    self.log.get(&slot.0).is_some_and(|es| es.iter().any(|e| e.payload == p))
-                });
+                let in_log = payload.is_some_and(|p| self.kv.slot_of(&p).is_some_and(|at| at <= slot.0));
                 assert!(
                     in_log,
                     "{}",
@@ -544,17 +639,21 @@ impl Sim {
                 self.kv.read_dropped(i, id);
             }
             Action::ReadReady { id, .. } => self.kv.read_ready(i, id, self.now),
+            Action::SnapshotNeeded { peer, through } => {
+                self.pending_installs.push((i, peer.0 as usize, through.0))
+            }
             _ => {}
         }
     }
 
     fn on_commit(&mut self, i: usize, slot: Slot, entries: Vec<Entry>) {
         let expected = self.nodes[i].next_commit;
-        assert_eq!(slot.0, expected, "{}", self.fail(&format!("n{i} commit out of order")));
-        let n = &mut self.nodes[i];
-        n.next_commit += 1;
+        assert!(slot.0 <= expected, "{}", self.fail(&format!("n{i} commit {} skips {expected}", slot.0)));
         let payloads: Vec<Bytes> = entries.iter().map(|e| e.payload.clone()).collect();
-        self.kv.apply(i, &payloads);
+        if slot.0 == expected {
+            self.nodes[i].next_commit += 1;
+            self.kv.apply(i, &payloads);
+        }
         let _ = writeln!(self.trace, "{} n{i} commit {} ({} entries)", self.now, slot.0, entries.len());
         match self.log.get(&slot.0) {
             Some(agreed) => {

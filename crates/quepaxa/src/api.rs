@@ -120,6 +120,9 @@ pub enum Action {
         records: Vec<Bytes>,
         /// Messages gated on this write.
         then: Vec<Outbound>,
+        /// Replace every previously persisted record with `records` (atomically, e.g.
+        /// write-new-then-rename) instead of appending. Emitted after compaction.
+        replace: bool,
     },
     /// Send now; no durability required.
     Send(Outbound),
@@ -145,6 +148,14 @@ pub enum Action {
         id: ProposalId,
         /// The barrier's slot.
         slot: Slot,
+    },
+    /// Slots up to `through` were compacted away at `peer`: fetch that peer's
+    /// application snapshot and pass it to [`crate::Replica::install_snapshot`].
+    SnapshotNeeded {
+        /// A replica that has the snapshot.
+        peer: NodeId,
+        /// The last slot it covers (at least).
+        through: Slot,
     },
     /// A local proposal will never commit.
     Dropped {
@@ -173,6 +184,10 @@ pub struct Metrics {
     pub forwarded: u64,
     /// Own entries proposed directly after the leader did not commit them in time.
     pub hedged: u64,
+    /// Gauge: decided slots held in memory (bounded by compaction).
+    pub retained_slots: u64,
+    /// Gauge: recorder registers held in memory.
+    pub live_registers: u64,
 }
 
 /// A caller contract violation or a refused request.
@@ -196,6 +211,9 @@ pub enum Error {
     NotDrained,
     /// `Persisted` named an id that was never issued or was already reported.
     UnknownPersistId,
+    /// The core state passed to `compact` or `install_snapshot` is malformed or does not
+    /// match the slot it claims to cover.
+    InvalidCoreState,
 }
 
 impl fmt::Display for Error {
@@ -208,6 +226,7 @@ impl fmt::Display for Error {
             Error::Fenced => f.write_str("replica is fenced after a storage failure"),
             Error::NotDrained => f.write_str("poll_actions must drain actions before the next call"),
             Error::UnknownPersistId => f.write_str("unknown persist id"),
+            Error::InvalidCoreState => f.write_str("invalid core state"),
         }
     }
 }
