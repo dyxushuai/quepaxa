@@ -15,10 +15,17 @@ use crate::durable::Record;
 use crate::types::{NodeId, Slot, Timestamp};
 
 impl Replica {
+    /// Number of slots already returned as [`Action::Commit`] or covered by an installed
+    /// snapshot: the application state corresponds to this prefix.
+    pub fn emitted_index(&self) -> u64 {
+        self.emitted
+    }
+
     /// Replica state that must be stored with an application snapshot. It covers exactly
     /// the commits already returned by [`Replica::poll_actions`]; take it after applying them.
     pub fn core_state(&self) -> Bytes {
-        CoreState { next: self.emitted, schedule: self.schedule.clone(), dedup: self.dedup.clone() }.encode()
+        CoreState { next: self.emitted, schedule: self.applied_schedule.clone(), dedup: self.dedup.clone() }
+            .encode()
     }
 
     /// Discards log state up to and including `through`, which the application has
@@ -40,24 +47,29 @@ impl Replica {
         Ok(())
     }
 
-    /// Adopts a snapshot covering slots up to `through` after the application installed
-    /// the matching application state: a peer's, after [`Action::SnapshotNeeded`], or the
-    /// application's own after a restart (its snapshot may be newer than the replica's
-    /// last durable compaction). Snapshots this replica is already past are ignored.
+    /// Adopts a snapshot covering slots up to `through`: a peer's, after
+    /// [`Action::SnapshotNeeded`], or the application's own after a restart (its snapshot
+    /// may be newer than the replica's last durable compaction).
+    ///
+    /// Returns `Ok(false)` without changing anything when this replica already emitted every
+    /// slot the snapshot covers. Compare `through` with [`Replica::emitted_index`] before
+    /// replacing the application state, so a snapshot that went stale in transit never
+    /// rewinds the application.
     pub fn install_snapshot(
         &mut self,
         now: Timestamp,
         through: Slot,
         core_state: Bytes,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         self.begin(now)?;
         if self.fenced {
             return Err(Error::Fenced);
         }
         let state = self.check_state(through, &core_state)?;
         if state.next <= self.emitted {
-            return Ok(());
+            return Ok(false);
         }
+        self.applied_schedule = state.schedule.clone();
         self.schedule = state.schedule;
         self.dedup = state.dedup;
         self.emitted = state.next;
@@ -91,9 +103,16 @@ impl Replica {
         self.raise_floor(state.next, core_state);
         self.advance_committed();
         self.emit_commits();
+        // Resume fetching whatever the cluster decided after the snapshot.
+        self.catch_up = None;
+        if self.peer_committed > self.committed
+            && let Some(peer) = self.ahead_peer
+        {
+            self.request_catch_up(peer);
+        }
         self.pump();
         self.flush();
-        Ok(())
+        Ok(true)
     }
 
     fn check_state(&self, through: Slot, core_state: &Bytes) -> Result<CoreState, Error> {

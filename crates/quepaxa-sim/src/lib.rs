@@ -57,6 +57,8 @@ pub struct SimConfig {
     pub kill: Option<(usize, u64)>,
     /// Snapshot and compact every this many applied slots.
     pub compact_every: Option<u64>,
+    /// Replica message size limit (small values force multi-page catch-up).
+    pub max_message_bytes: u32,
 }
 
 impl SimConfig {
@@ -92,6 +94,7 @@ impl SimConfig {
             absent: None,
             kill: None,
             compact_every: Some(32),
+            max_message_bytes: 1 << 20,
         }
     }
 }
@@ -243,9 +246,14 @@ impl Sim {
     pub fn run(mut self) -> Result<Report, String> {
         let fault_end = self.cfg.fault_phase_ms * MS;
         let heal_end = fault_end + self.cfg.heal_budget_ms * MS;
+        let mut same_time = 0u32;
         while let Some(std::cmp::Reverse((at, _, ev))) = self.queue.pop() {
             if at > heal_end {
                 break;
+            }
+            same_time = if at == self.now { same_time + 1 } else { 0 };
+            if same_time > 100_000 {
+                return Err(self.fail("livelock: events keep firing without time advancing"));
             }
             self.now = at;
             if self.faults_on && self.now >= fault_end {
@@ -340,7 +348,7 @@ impl Sim {
         cfg.hedge_max = 400 * MS;
         cfg.max_in_flight_slots = self.cfg.in_flight_slots;
         cfg.max_batch_bytes = 4096;
-        cfg.max_message_bytes = 1 << 20;
+        cfg.max_message_bytes = self.cfg.max_message_bytes;
         cfg
     }
 

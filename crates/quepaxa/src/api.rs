@@ -118,12 +118,13 @@ pub struct Outbound {
     pub bytes: Bytes,
 }
 
-/// Why a local proposal will never commit.
+/// Why a local proposal is no longer tracked.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "model", derive(Hash))]
 #[non_exhaustive]
 pub enum DropReason {
-    /// The replica fenced itself after a storage failure.
+    /// The replica fenced itself after a storage failure. As after a crash, the outcome is
+    /// unknown: the proposal may already have reached a quorum and may still commit.
     Fenced,
 }
 
@@ -178,7 +179,8 @@ pub enum Action {
         /// The last slot it covers (at least).
         through: Slot,
     },
-    /// A local proposal will never commit.
+    /// A local proposal will not be reported again (see [`DropReason`] for whether it may
+    /// still commit).
     Dropped {
         /// The proposal.
         id: ProposalId,
@@ -196,6 +198,8 @@ pub struct Metrics {
     pub messages_rejected: u64,
     /// Record requests re-sent after `retransmit_interval`.
     pub retransmits: u64,
+    /// Bulk catch-up requests re-sent after `retransmit_interval`.
+    pub catch_up_retries: u64,
     /// Slots this replica learned as decided.
     pub slots_decided: u64,
     /// Decisions this replica's proposers reached on the leader fast path.

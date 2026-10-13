@@ -77,6 +77,22 @@ fn absent_replica_recovers_through_a_peer_snapshot() {
 }
 
 #[test]
+fn quiet_cluster_serves_multi_page_catch_up() {
+    for seed in 0..5 {
+        // Pages of ~4 KiB force many CatchUp/Entries rounds; after heal nobody else talks.
+        let cfg = SimConfig {
+            absent: Some(2),
+            compact_every: None,
+            max_message_bytes: 2 * 4096 + 1024,
+            heal_budget_ms: 500,
+            ..calm(3, seed)
+        };
+        let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
+        assert!(report.slots > 100, "seed {seed}: {report:?}");
+    }
+}
+
+#[test]
 fn same_seed_replays_identically() {
     let a = Sim::new(SimConfig::hostile(3, 7)).run().unwrap();
     let b = Sim::new(SimConfig::hostile(3, 7)).run().unwrap();

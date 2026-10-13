@@ -19,10 +19,12 @@ use std::{ptr, slice};
 use bytes::Bytes;
 use quepaxa::{Action, Config, DropReason, Error, Input, NodeId, PersistId, Replica, Slot, Timestamp};
 
-/// ABI major version: incompatible changes bump it.
+/// ABI major version: incompatible changes bump it. While it is 0 the ABI is unstable and
+/// every minor bump may be incompatible.
 pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
-/// ABI minor version: additive changes bump it.
-pub const QPX_ABI_VERSION_MINOR: u32 = 1;
+/// ABI minor version: additive changes bump it (any change while the major is 0).
+/// 0.2: `qpx_install_snapshot` may return `QPX_IGNORED`.
+pub const QPX_ABI_VERSION_MINOR: u32 = 2;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -30,6 +32,8 @@ pub const QPX_OK: i32 = 0;
 pub const QPX_EMPTY: i32 = 1;
 /// The output buffer is too small; the required length was written.
 pub const QPX_BUFFER_TOO_SMALL: i32 = 2;
+/// The call had no effect: the snapshot is older than what the replica already emitted.
+pub const QPX_IGNORED: i32 = 3;
 /// A null pointer, bad `struct_size` or out-of-range index.
 pub const QPX_ERR_INVALID_ARGUMENT: i32 = -1;
 /// The configuration is invalid.
@@ -67,12 +71,13 @@ pub const QPX_ACTION_COMMITTED: u32 = 4;
 pub const QPX_ACTION_READ_READY: u32 = 5;
 /// Fetch `peer`'s application snapshot covering `slot` and call `qpx_install_snapshot`.
 pub const QPX_ACTION_SNAPSHOT_NEEDED: u32 = 6;
-/// Local proposal `id` will never commit (`flags` = `QPX_DROP_*`).
+/// Local proposal `id` will not be reported again (`flags` = `QPX_DROP_*`). With
+/// `QPX_DROP_FENCED` the outcome is unknown: it may still commit, as after a crash.
 pub const QPX_ACTION_DROPPED: u32 = 7;
 
 /// `flags` bit of `QPX_ACTION_PERSIST`: replace all earlier records.
 pub const QPX_PERSIST_REPLACE: u32 = 1;
-/// `flags` of `QPX_ACTION_DROPPED`: the replica is fenced.
+/// `flags` of `QPX_ACTION_DROPPED`: the replica is fenced (outcome unknown).
 pub const QPX_DROP_FENCED: u32 = 1;
 
 /// A borrowed byte range. `ptr` may be null when `len` is 0.
@@ -246,6 +251,7 @@ pub extern "C" fn qpx_status_str(status: i32) -> *const std::ffi::c_char {
         QPX_OK => b"ok\0",
         QPX_EMPTY => b"empty\0",
         QPX_BUFFER_TOO_SMALL => b"buffer too small\0",
+        QPX_IGNORED => b"ignored: snapshot older than the emitted prefix\0",
         QPX_ERR_INVALID_ARGUMENT => b"invalid argument\0",
         QPX_ERR_INVALID_CONFIG => b"invalid config\0",
         QPX_ERR_CORRUPT_RECORD => b"corrupt durable record\0",
@@ -535,7 +541,8 @@ pub unsafe extern "C" fn qpx_compact(
     mutate(h, |r| r.compact(Timestamp(now_ns), Slot(through), state))
 }
 
-/// Adopts a snapshot covering slots up to `through` (after installing the application state).
+/// Adopts a snapshot covering slots up to `through`; `QPX_IGNORED` if the replica already
+/// emitted past it (do not rewind the application state in that case).
 ///
 /// # Safety
 /// `h` must be a live handle; `state` must point to `len` bytes.
@@ -549,7 +556,12 @@ pub unsafe extern "C" fn qpx_install_snapshot(
 ) -> i32 {
     // SAFETY: guaranteed by the caller.
     let Some(state) = (unsafe { bytes_from(state, len) }) else { return QPX_ERR_INVALID_ARGUMENT };
-    mutate(h, |r| r.install_snapshot(Timestamp(now_ns), Slot(through), state))
+    let mut adopted = true;
+    let rc = mutate(h, |r| {
+        adopted = r.install_snapshot(Timestamp(now_ns), Slot(through), state)?;
+        Ok(())
+    });
+    if rc == QPX_OK && !adopted { QPX_IGNORED } else { rc }
 }
 
 /// Takes the next action into `out`, or returns `QPX_EMPTY`.

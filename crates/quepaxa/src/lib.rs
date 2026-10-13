@@ -31,8 +31,9 @@
 //!
 //! while let Some(action) = queue.pop_front() {
 //!     match action {
-//!         Action::Persist { id, records, then, .. } => {
-//!             disk.extend(records); // append + fsync in a real system
+//!         Action::Persist { id, records, then, replace } => {
+//!             // Append + fsync in a real system; `replace` swaps the whole log atomically.
+//!             if replace { disk = records } else { disk.extend(records) }
 //!             assert!(then.is_empty()); // a single member has nobody to message
 //!             replica.handle(Timestamp(0), Input::Persisted(id))?;
 //!             replica.poll_actions(&mut actions);

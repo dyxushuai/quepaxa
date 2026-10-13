@@ -18,11 +18,13 @@
 // - Every start (including restarts) needs a fresh CSPRNG seed in qpx_config.seed.
 // - A library panic returns QPX_ERR_PANIC and poisons the handle (QPX_ERR_POISONED).
 
-// ABI major version: incompatible changes bump it.
+// ABI major version: incompatible changes bump it. While it is 0 the ABI is unstable and
+// every minor bump may be incompatible.
 #define QPX_ABI_VERSION_MAJOR 0
 
-// ABI minor version: additive changes bump it.
-#define QPX_ABI_VERSION_MINOR 1
+// ABI minor version: additive changes bump it (any change while the major is 0).
+// 0.2: `qpx_install_snapshot` may return `QPX_IGNORED`.
+#define QPX_ABI_VERSION_MINOR 2
 
 // Success.
 #define QPX_OK 0
@@ -32,6 +34,9 @@
 
 // The output buffer is too small; the required length was written.
 #define QPX_BUFFER_TOO_SMALL 2
+
+// The call had no effect: the snapshot is older than what the replica already emitted.
+#define QPX_IGNORED 3
 
 // A null pointer, bad `struct_size` or out-of-range index.
 #define QPX_ERR_INVALID_ARGUMENT -1
@@ -86,13 +91,14 @@
 // Fetch `peer`'s application snapshot covering `slot` and call `qpx_install_snapshot`.
 #define QPX_ACTION_SNAPSHOT_NEEDED 6
 
-// Local proposal `id` will never commit (`flags` = `QPX_DROP_*`).
+// Local proposal `id` will not be reported again (`flags` = `QPX_DROP_*`). With
+// `QPX_DROP_FENCED` the outcome is unknown: it may still commit, as after a crash.
 #define QPX_ACTION_DROPPED 7
 
 // `flags` bit of `QPX_ACTION_PERSIST`: replace all earlier records.
 #define QPX_PERSIST_REPLACE 1
 
-// `flags` of `QPX_ACTION_DROPPED`: the replica is fenced.
+// `flags` of `QPX_ACTION_DROPPED`: the replica is fenced (outcome unknown).
 #define QPX_DROP_FENCED 1
 
 // An opaque replica handle.
@@ -272,7 +278,8 @@ int32_t qpx_compact(qpx_replica *h,
                     const uint8_t *state,
                     size_t len);
 
-// Adopts a snapshot covering slots up to `through` (after installing the application state).
+// Adopts a snapshot covering slots up to `through`; `QPX_IGNORED` if the replica already
+// emitted past it (do not rewind the application state in that case).
 //
 // # Safety
 // `h` must be a live handle; `state` must point to `len` bytes.
