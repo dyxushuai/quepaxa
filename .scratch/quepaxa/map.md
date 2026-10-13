@@ -28,11 +28,13 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
 - [Which tools give us model checking, DST and linearizability checking in Rust](issues/03-assurance-tooling.md): one sans-IO core driven by proptest, hand-rolled DST, stateright (model check + linearizability), bolero fuzzing, cargo-mutants; only Promela/TLA+ single-slot models exist publicly.
 - [What the Go reference implementation actually does](issues/02-go-reference-impl.md): faithful Alg. 3/4 but no durability, low-entropy priorities, static hedging δ, leader-order tuner via log pseudo-command; supplies test vectors, scenarios and benchmark baselines.
 - [Who owns the `quepaxa` crate name on crates.io](issues/13-crate-name-ownership.md): owned by the user's `johntaiko` account; placeholder 0.1.0 exists, so first real release is > 0.1.0 and the placeholder gets yanked.
+- [What is the core sans-IO API](issues/06-core-api-shape.md): single `Replica`, `handle`/`poll_actions` pull loop, structural `Action::Persist{then}` (ADR 0002), inline `Bytes` batches, core-side batching/pipelining, at-most-once per local `ProposalId`, injected time + fresh CSPRNG seed per start.
 
 ## Not yet specified
 
 - **Performance targets & benchmark methodology**: what to measure (throughput/latency under leader failure, WAN, contention), whether to compare against the Go impl or Raft crates.
 - **Reference runtime crate** (`quepaxa-tokio` or similar): whether one ships at all, and its transport.
+- **ValueId indirection** (LAN optimization): agree on fixed-size batch ids and disseminate batches separately; needs its own durability/catch-up/liveness story; revisit after benchmarks.
 - **Reconfiguration & bootstrapping, snapshots/log compaction**: designs, once their phase is decided.
 - **Release engineering**: MSRV, semver/stability policy for the C ABI, docs/examples, supply-chain gates (`cargo-deny`/`cargo-vet`).
 - **Final spec + TDD backlog ordering** (`to-spec` / `to-tickets`), once the decisions above land.

@@ -1,0 +1,3 @@
+# Persist-before-send is encoded in the action type
+
+A recorder must make its register durable before its reply leaves the node, or a crash-restart can make it contradict a reply it already sent. Instead of a flag or a caller-side rule, `Action::Persist { id, ops, then }` owns the outbound messages that depend on the write, so a caller cannot send them without first taking the write; completion is reported back with a strictly increasing `PersistId` tied to that exact write. We chose this after openraft#2118 (an unconditional completion was taken as an fsync and acknowledged a write that was later lost) and raft-rs#426 showed that flag/token-based ordering is easy to get wrong.

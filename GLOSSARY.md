@@ -23,3 +23,29 @@ _Avoid_: Committed, chosen
 **Read barrier**:
 A log entry proposed to obtain a slot position after which a linearizable read may be served.
 _Avoid_: Read index, sync
+
+**Proposer**:
+The active role within a replica that drives consensus on a slot by sending record requests to recorders.
+_Avoid_: Coordinator
+
+**Recorder**:
+The passive role within a replica that holds one register per slot and answers record requests.
+_Avoid_: Acceptor, voter
+
+**Leader**:
+The one proposer allowed the reserved top priority in the first round of a slot, giving a one-round-trip decision; optional for progress.
+_Avoid_: Primary, master
+
+**Proposal**:
+A value paired with a priority and its proposer's identity, ordered as a single comparable quantity.
+_Avoid_: Ballot
+
+**Step**:
+The logical clock of a slot, combining its round and phase; every step is one round trip to a majority of recorders.
+_Avoid_: Term, epoch
+
+**Batch**:
+The opaque payload decided in one slot, made of one or more proposed entries.
+
+**Fenced**:
+The state of a replica that has lost durability guarantees and stops answering until restarted.
