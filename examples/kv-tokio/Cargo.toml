@@ -1,0 +1,18 @@
+[package]
+name = "kv-tokio"
+description = "Reference runtime for quepaxa: TCP transport, fsync'd file storage and a toy KV store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+bytes = "1.12"
+getrandom = "0.4"
+quepaxa = { path = "../../crates/quepaxa" }
+tokio = { version = "1.53", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+
+[lints]
+workspace = true
