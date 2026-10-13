@@ -3,3 +3,8 @@
 test_workspace = true
 # Test support only.
 exclude_re = ["fingerprint"]
+# Optimized: unoptimized, the workspace tests take minutes.
+profile = "mutants"
+# The baseline runs only the mutated package's tests (about 1 s), so the auto-set timeout floor
+# (20 s) is shorter than the workspace tests (about 40 s) and every mutant would time out.
+minimum_test_timeout = 180
