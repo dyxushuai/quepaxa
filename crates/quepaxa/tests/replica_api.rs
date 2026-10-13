@@ -24,7 +24,10 @@ fn settle(r: &mut Replica, durable: &mut Vec<Bytes>) -> Vec<Action> {
         let mut acks = Vec::new();
         for a in pending {
             match a {
-                Action::Persist { id, records, .. } => {
+                Action::Persist { id, records, replace, .. } => {
+                    if replace {
+                        durable.clear();
+                    }
                     durable.extend(records);
                     acks.push(id);
                 }
@@ -164,12 +167,63 @@ fn installing_a_stale_snapshot_reports_it_was_ignored() {
 }
 
 #[test]
+fn compaction_rewrites_durable_state_once_and_restarts_from_the_snapshot() {
+    let mut r = Replica::new(config(&[0]), [], T0).unwrap();
+    let mut disk = Vec::new();
+    settle(&mut r, &mut disk);
+    let mut states = Vec::new();
+    for p in [b"a", b"b", b"c"] {
+        r.propose(T0, Bytes::from_static(p)).unwrap();
+        settle(&mut r, &mut disk);
+        states.push(r.core_state());
+    }
+    let before = disk.len();
+    let state = states[2].clone();
+    assert_eq!(r.compact(T0, Slot(1), state.clone()), Err(Error::InvalidCoreState));
+    // An older snapshot (taken after slot 1) may still compact, then the newest one.
+    assert_eq!(r.compact(T0, Slot(1), states[1].clone()), Ok(()));
+    drain_and_ack(&mut r, &mut disk);
+    assert_eq!(r.compact(T0, Slot(2), state.clone()), Ok(()));
+    let replaced =
+        |a: &[Action]| a.iter().filter(|a| matches!(a, Action::Persist { replace: true, .. })).count();
+    assert_eq!(replaced(&drain_and_ack(&mut r, &mut disk)), 1);
+    assert!(disk.len() < before, "{} records before, {} after", before, disk.len());
+    r.compact(T0, Slot(2), state.clone()).unwrap();
+    assert!(drain(&mut r).is_empty(), "a repeated compaction is ignored");
+    // Restarted from the checkpoint, the replica re-emits nothing the snapshot covers.
+    let mut r = Replica::new(config(&[0]), disk.clone(), T0).unwrap();
+    let commits =
+        settle(&mut r, &mut disk).into_iter().filter(|a| matches!(a, Action::Commit { .. })).count();
+    assert_eq!((commits, r.emitted_index()), (0, 3));
+    assert_eq!(r.install_snapshot(T0, Slot(2), state), Ok(false));
+}
+
+/// Like [`settle`], but also returns the persists.
+fn drain_and_ack(r: &mut Replica, durable: &mut Vec<Bytes>) -> Vec<Action> {
+    let actions = drain(r);
+    for a in &actions {
+        if let Action::Persist { id, records, replace, .. } = a {
+            if *replace {
+                durable.clear();
+            }
+            durable.extend(records.iter().cloned());
+            r.handle(T0, Input::Persisted(*id)).unwrap();
+        }
+    }
+    actions
+}
+
+#[test]
 fn configs_that_would_misbehave_at_runtime_are_rejected() {
-    let bad: [fn(&mut Config); 4] = [
+    let bad: [fn(&mut Config); 8] = [
         |c| (c.hedge_min, c.hedge_max) = (10, 5),
-        |c| c.hedge_max = 0,
+        |c| (c.hedge_min, c.hedge_max) = (0, 0),
         |c| c.max_in_flight_slots = 65,
+        |c| c.max_in_flight_slots = 0,
         |c| c.max_message_bytes = 2 * c.max_batch_bytes,
+        |c| c.max_batch_bytes = 0,
+        |c| c.max_outstanding_proposals = 0,
+        |c| c.retransmit_interval = 0,
     ];
     for tweak in bad {
         let mut cfg = config(&[0, 1, 2]);

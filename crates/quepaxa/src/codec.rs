@@ -501,12 +501,17 @@ mod tests {
     fn value_above_the_batch_limit_is_rejected() {
         let tight = WireCtx { max_value_bytes: 1, ..CTX };
         assert_eq!(Message::decode(&request().encode(), &tight), Err(DecodeError::TooLarge));
+        let exact = WireCtx { max_value_bytes: 2, ..CTX };
+        assert_eq!(Message::decode(&request().encode(), &exact), Ok(request()));
     }
 
     #[test]
     fn message_above_limit_is_rejected() {
-        let small = WireCtx { max_message_bytes: 10, ..CTX };
+        let len = request().encode().len() as u32;
+        let small = WireCtx { max_message_bytes: len - 1, ..CTX };
         assert_eq!(Message::decode(&request().encode(), &small), Err(DecodeError::TooLarge));
+        let exact = WireCtx { max_message_bytes: len, ..CTX };
+        assert_eq!(Message::decode(&request().encode(), &exact), Ok(request()));
     }
 
     #[test]

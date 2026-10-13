@@ -79,4 +79,6 @@ pub struct Inspection {
     pub decided_here: Vec<(u64, ProposalView, u32)>,
     /// Every decision this replica knows: slot and value.
     pub decided: Vec<(u64, ProposalView)>,
+    /// Batches this replica proposed that are not yet committed.
+    pub local_batches: usize,
 }
