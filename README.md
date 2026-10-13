@@ -9,7 +9,7 @@ randomized proposers keep the log moving when the leader is slow, partitioned or
   batches. It never touches the network, disk or clock: you feed it events and execute the
   actions it returns, which makes it deterministic, simulation-tested and embeddable.
 - **`quepaxa-ffi`** — stable C ABI (`cdylib` / `staticlib`, header in
-  [`crates/quepaxa-ffi/include/quepaxa.h`](crates/quepaxa-ffi/include/quepaxa.h)).
+  [`crates/quepaxa-ffi/include/quepaxa.h`](https://github.com/dyxushuai/quepaxa/blob/main/crates/quepaxa-ffi/include/quepaxa.h)).
 - **`examples/kv-tokio`** — reference runtime: a replicated key-value store over TCP with
   fsync'd storage, snapshots and a load generator.
 
@@ -21,9 +21,11 @@ use quepaxa::{Action, Config, Input, NodeId, Replica, Timestamp};
 
 let cfg = Config::new(cluster_id, NodeId(0), members, fresh_csprng_seed);
 let mut replica = Replica::new(cfg, durable_records, Timestamp(now))?;
-replica.propose(Timestamp(now), Bytes::from_static(b"set x 1"))?;
 let mut actions = Vec::new();
-replica.poll_actions(&mut actions); // after every call
+replica.poll_actions(&mut actions); // after every call, before the next one
+// … execute the startup actions (the new incarnation's Persist), then:
+replica.propose(Timestamp(now), Bytes::from_static(b"set x 1"))?;
+replica.poll_actions(&mut actions);
 for action in actions {
     match action {
         // Append durably after earlier persists (or replace the log if `replace`),
@@ -36,20 +38,20 @@ for action in actions {
 }
 ```
 
-The crate docs and [`examples/kv-tokio`](examples/kv-tokio) show the complete driving loop,
+The crate docs and [`examples/kv-tokio`](https://github.com/dyxushuai/quepaxa/tree/main/examples/kv-tokio) show the complete driving loop,
 restart, compaction and snapshot installation. The C ABI follows the same model; see
-[`crates/quepaxa-ffi/examples/smoke.c`](crates/quepaxa-ffi/examples/smoke.c).
+[`crates/quepaxa-ffi/examples/smoke.c`](https://github.com/dyxushuai/quepaxa/blob/main/crates/quepaxa-ffi/examples/smoke.c).
 
 ## Guarantees and testing
 
 - Safety under crash-recovery: replies never leave before the state they report is durable
-  ([ADR 0002](docs/adr/0002-structural-persist-before-send.md)); leaders never reuse their
+  ([ADR 0002](https://github.com/dyxushuai/quepaxa/blob/main/docs/adr/0002-structural-persist-before-send.md)); leaders never reuse their
   fast-path priority after a restart.
 - Linearizable reads through read barriers; commit-time dedup applies each entry once.
 - Verified by unit and property tests, a deterministic simulator (loss, duplication,
   reordering, partitions, crash-restart with lost and torn writes, snapshots) with
   agreement and linearizability oracles, delay-bounded model checking of the real replica,
-  fuzzing, Miri, and mutation testing. See the [spec](.scratch/quepaxa-v1/spec.md) §9.
+  fuzzing, Miri, and mutation testing. See the [spec](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa-v1/spec.md) §9.
 
 ## Platforms
 
@@ -61,11 +63,11 @@ Android (emulator) and iOS (simulator); the core builds for `wasm32-unknown-unkn
 
 Pre-1.0. The wire format, durable format and C ABI may change between minor versions until
 1.0. Not in v1: membership reconfiguration, Byzantine faults, latency-tuned leader order
-(#28). Performance measurements: [docs/benchmarks.md](docs/benchmarks.md). Design record:
-[spec](.scratch/quepaxa-v1/spec.md), [decisions](.scratch/quepaxa/map.md),
-[ADRs](docs/adr/).
+([#28](https://github.com/dyxushuai/quepaxa/issues/28)). Performance measurements: [docs/benchmarks.md](https://github.com/dyxushuai/quepaxa/blob/main/docs/benchmarks.md). Design record:
+[spec](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa-v1/spec.md), [decisions](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa/map.md),
+[ADRs](https://github.com/dyxushuai/quepaxa/tree/main/docs/adr).
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT) at your option.
+Licensed under either of [Apache License, Version 2.0](https://github.com/dyxushuai/quepaxa/blob/main/LICENSE-APACHE) or
+[MIT license](https://github.com/dyxushuai/quepaxa/blob/main/LICENSE-MIT) at your option.
