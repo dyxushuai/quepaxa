@@ -138,25 +138,37 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: rust-lang/crates-io-auth-action@v1
-        id: auth
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        # Versions already on crates.io are skipped (e.g. a crate's first release, which
-        # trusted publishing cannot do and is published by hand with a token).
+      - name: Which crates still need publishing
+        id: pending
         run: |
+          pending=""
           for crate in quepaxa quepaxa-ffi; do
             v=$(cargo metadata --no-deps --format-version 1 | jq -r ".packages[] | select(.name==\"$crate\") | .version")
-            if curl -fsS -A "quepaxa-release (github.com/dyxushuai/quepaxa)" "https://crates.io/api/v1/crates/$crate/$v" >/dev/null 2>&1; then
-              echo "$crate $v is already published"
-            else
-              cargo publish -p "$crate"
+            if ! curl -fsS -A "quepaxa-release (github.com/dyxushuai/quepaxa)" "https://crates.io/api/v1/crates/$crate/$v" >/dev/null 2>&1; then
+              pending="$pending $crate"
             fi
           done
+          echo "crates=${pending# }" >> "$GITHUB_OUTPUT"
+          echo "to publish: ${pending:- none}"
+      # Trusted publishing is only needed (and only configured) when something is left to
+      # publish; a crate's first release is published by hand with a token.
+      - uses: rust-lang/crates-io-auth-action@v1
+        if: steps.pending.outputs.crates != ''
+        id: auth
+      - name: Publish to crates.io
+        if: steps.pending.outputs.crates != ''
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          for crate in ${{ steps.pending.outputs.crates }}; do cargo publish -p "$crate"; done
       - name: GitHub release with prebuilt libraries
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes=$(awk '/^## /{n++} n==1' CHANGELOG.md 2>/dev/null || true)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release $GITHUB_REF_NAME exists; uploading missing assets"
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            exit 0
+          fi
           gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --notes "$notes" --verify-tag
