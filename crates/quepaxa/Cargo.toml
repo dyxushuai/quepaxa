@@ -11,3 +11,9 @@ keywords = ["consensus", "paxos", "quepaxa", "replication", "sans-io"]
 
 [lints]
 workspace = true
+
+[dependencies]
+bytes = { version = "1.12", default-features = false }
+
+[dev-dependencies]
+proptest = "1.12"
