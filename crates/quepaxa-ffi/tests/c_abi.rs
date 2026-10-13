@@ -8,7 +8,7 @@ const N: usize = 3;
 
 unsafe fn new_replica(i: u32, members: &[u32; N]) -> *mut qpx_replica {
     let mut cfg = std::mem::MaybeUninit::<qpx_config>::uninit();
-    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr()) }, QPX_OK);
+    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr(), size_of::<qpx_config>()) }, QPX_OK);
     let mut cfg = unsafe { cfg.assume_init() };
     cfg.cluster_id = *b"rust-c-abi-tests";
     cfg.id = i;
@@ -108,6 +108,9 @@ fn contract_violations_are_reported_not_undefined() {
     // The incarnation persist is still undrained.
     assert_eq!(unsafe { qpx_propose(h, 0, ptr::null(), 0, &mut id) }, QPX_ERR_NOT_DRAINED);
     let mut a = empty_action();
+    // Taking the last action is not enough: the poll must report QPX_EMPTY.
+    assert_eq!(unsafe { qpx_poll(h, &mut a) }, QPX_OK);
+    assert_eq!(unsafe { qpx_propose(h, 0, ptr::null(), 0, &mut id) }, QPX_ERR_NOT_DRAINED);
     while unsafe { qpx_poll(h, &mut a) } == QPX_OK {}
     assert_eq!(unsafe { qpx_propose(h, 0, ptr::null(), 5, &mut id) }, QPX_ERR_INVALID_ARGUMENT);
     assert_eq!(unsafe { qpx_propose(h, 0, ptr::null(), 0, ptr::null_mut()) }, QPX_ERR_INVALID_ARGUMENT);
@@ -127,7 +130,7 @@ fn contract_violations_are_reported_not_undefined() {
 #[test]
 fn bad_config_and_corrupt_records_are_rejected() {
     let mut cfg = std::mem::MaybeUninit::<qpx_config>::uninit();
-    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr()) }, QPX_OK);
+    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr(), size_of::<qpx_config>()) }, QPX_OK);
     let mut cfg = unsafe { cfg.assume_init() };
     let mut h = ptr::null_mut();
     assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_CONFIG);
@@ -148,4 +151,69 @@ fn status_strings_are_static_and_nul_terminated() {
         assert!(!s.to_bytes().is_empty());
     }
     assert_eq!(qpx_abi_version(), (QPX_ABI_VERSION_MAJOR << 16) | QPX_ABI_VERSION_MINOR);
+}
+
+fn last_error() -> String {
+    let mut len = 0;
+    assert_eq!(unsafe { qpx_last_error(ptr::null_mut(), 0, &mut len) }, QPX_BUFFER_TOO_SMALL);
+    let mut buf = vec![0u8; len];
+    assert_eq!(unsafe { qpx_last_error(buf.as_mut_ptr().cast(), len, &mut len) }, QPX_OK);
+    std::ffi::CStr::from_bytes_with_nul(&buf).unwrap().to_string_lossy().into_owned()
+}
+
+#[test]
+fn last_error_explains_an_invalid_config() {
+    let mut cfg = std::mem::MaybeUninit::<qpx_config>::uninit();
+    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr(), size_of::<qpx_config>()) }, QPX_OK);
+    let mut cfg = unsafe { cfg.assume_init() };
+    let members = [0u32, 0];
+    cfg.members = members.as_ptr();
+    cfg.members_len = 2;
+    let mut h = ptr::null_mut();
+    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_CONFIG);
+    assert!(last_error().contains("members must be unique"), "{}", last_error());
+    // A later failure in argument checking replaces the old description.
+    assert_eq!(unsafe { qpx_poll(ptr::null_mut(), ptr::null_mut()) }, QPX_ERR_INVALID_ARGUMENT);
+    assert!(last_error().contains("invalid argument"), "{}", last_error());
+}
+
+#[test]
+fn config_layouts_are_size_aware() {
+    // Too small for any supported layout.
+    let mut small = [0u8; 8];
+    assert_eq!(unsafe { qpx_config_init(small.as_mut_ptr().cast(), small.len()) }, QPX_ERR_INVALID_ARGUMENT);
+    // A caller compiled against a larger (future) layout: only our prefix is touched.
+    #[repr(C)]
+    struct Future {
+        cfg: qpx_config,
+        extra: u64,
+    }
+    let mut f = std::mem::MaybeUninit::<Future>::uninit();
+    unsafe { (&raw mut (*f.as_mut_ptr()).extra).write(0xDEAD_BEEF) };
+    assert_eq!(unsafe { qpx_config_init(f.as_mut_ptr().cast(), size_of::<Future>()) }, QPX_OK);
+    let mut f = unsafe { f.assume_init() };
+    assert_eq!((f.cfg.struct_size, f.extra), (size_of::<qpx_config>(), 0xDEAD_BEEF));
+    let members = [0u32];
+    f.cfg.members = members.as_ptr();
+    f.cfg.members_len = 1;
+    f.cfg.struct_size = size_of::<Future>();
+    let mut h = ptr::null_mut();
+    assert_eq!(unsafe { qpx_replica_new(&f.cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
+    unsafe { qpx_replica_free(h) };
+}
+
+#[test]
+fn metrics_are_readable_over_the_abi() {
+    let members = [0, 1, 2];
+    let h = unsafe { new_replica(0, &members) };
+    let garbage = b"not a message";
+    let mut a = empty_action();
+    while unsafe { qpx_poll(h, &mut a) } == QPX_OK {}
+    assert_eq!(unsafe { qpx_handle_message(h, 0, garbage.as_ptr(), garbage.len()) }, QPX_OK);
+    let mut m = std::mem::MaybeUninit::<qpx_metrics>::zeroed();
+    unsafe { (&raw mut (*m.as_mut_ptr()).struct_size).write(size_of::<qpx_metrics>()) };
+    assert_eq!(unsafe { qpx_get_metrics(h, m.as_mut_ptr()) }, QPX_OK);
+    let m = unsafe { m.assume_init() };
+    assert_eq!(m.messages_rejected, 1);
+    unsafe { qpx_replica_free(h) };
 }

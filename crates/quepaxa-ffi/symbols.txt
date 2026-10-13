@@ -6,9 +6,11 @@ qpx_commit_index
 qpx_compact
 qpx_config_init
 qpx_core_state
+qpx_get_metrics
 qpx_handle_message
 qpx_handle_timeout
 qpx_install_snapshot
+qpx_last_error
 qpx_next_deadline
 qpx_persisted
 qpx_poll

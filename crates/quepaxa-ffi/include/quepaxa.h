@@ -24,7 +24,8 @@
 
 // ABI minor version: additive changes bump it (any change while the major is 0).
 // 0.2: `qpx_install_snapshot` may return `QPX_IGNORED`.
-#define QPX_ABI_VERSION_MINOR 2
+// 0.3: size-aware `qpx_config_init`, `qpx_get_metrics`, `qpx_last_error`, strict draining.
+#define QPX_ABI_VERSION_MINOR 3
 
 // Success.
 #define QPX_OK 0
@@ -142,6 +143,32 @@ typedef struct {
   size_t len;
 } qpx_bytes;
 
+// Replica counters (see the Rust `Metrics`). Set `struct_size` before `qpx_get_metrics`.
+typedef struct {
+  // `sizeof(qpx_metrics)` as compiled by the caller.
+  size_t struct_size;
+  // Network messages rejected (malformed, foreign or from non-members).
+  uint64_t messages_rejected;
+  // Record requests re-sent.
+  uint64_t retransmits;
+  // Catch-up requests re-sent.
+  uint64_t catch_up_retries;
+  // Slots learned as decided.
+  uint64_t slots_decided;
+  // Own decisions on the leader fast path.
+  uint64_t fast_path_decisions;
+  // Decided batches that failed to decode.
+  uint64_t corrupt_batches;
+  // Batches forwarded to the leader.
+  uint64_t forwarded;
+  // Own entries proposed directly after the leader was too slow.
+  uint64_t hedged;
+  // Gauge: decided slots held in memory.
+  uint64_t retained_slots;
+  // Gauge: recorder registers held in memory.
+  uint64_t live_registers;
+} qpx_metrics;
+
 // One action. Borrowed fields stay valid until the next call on the handle.
 typedef struct {
   // `QPX_ACTION_*`.
@@ -184,11 +211,12 @@ uint32_t qpx_abi_version(void);
 // Static, NUL-terminated description of a status code.
 const char *qpx_status_str(int32_t status);
 
-// Fills `cfg` with defaults (including `struct_size`); `members` stays null.
+// Fills the first `size` bytes of `cfg` (pass `sizeof(qpx_config)`) with defaults,
+// including `struct_size`; `members` stays null.
 //
 // # Safety
-// `cfg` must be null or point to writable memory for a `qpx_config`.
-int32_t qpx_config_init(qpx_config *cfg);
+// `cfg` must be null or point to `size` writable bytes.
+int32_t qpx_config_init(qpx_config *cfg, size_t size);
 
 // Creates a replica from `n_records` durable records (in persisted order).
 //
@@ -288,6 +316,23 @@ int32_t qpx_install_snapshot(qpx_replica *h,
                              uint64_t through,
                              const uint8_t *state,
                              size_t len);
+
+// Copies the counters into `out`, writing at most `out->struct_size` bytes (set it to
+// `sizeof(qpx_metrics)` first).
+//
+// # Safety
+// `h` must be a live handle; `out` must point to a `qpx_metrics` whose `struct_size`
+// bytes are writable.
+int32_t qpx_get_metrics(qpx_replica *h, qpx_metrics *out);
+
+// Copies the description of the calling thread's most recent failing call (empty if the
+// last call succeeded) as a NUL-terminated string. Two-call pattern: with too small a
+// `cap` it returns `QPX_BUFFER_TOO_SMALL` after writing the needed size (including the
+// NUL) to `out_len`.
+//
+// # Safety
+// `buf` must be writable for `cap` bytes (or null with `cap` 0); `out_len` writable.
+int32_t qpx_last_error(char *buf, size_t cap, size_t *out_len);
 
 // Takes the next action into `out`, or returns `QPX_EMPTY`.
 //
