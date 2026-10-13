@@ -1,6 +1,7 @@
 # Mutants that survive the workspace tests on purpose. Each group says why; a mutant that
 # drops off this list (because a test now kills it) should be deleted from it.
-# Format: `file: description` as cargo-mutants prints it, without line and column.
+# Format: `file: description` as cargo-mutants prints it, without line and column; one
+# line per mutated site, so the same description may repeat.
 
 # Equivalent: the mutated branch or value is unreachable.
 crates/quepaxa/src/dedup.rs: replace < with <= in Dedup::contains
@@ -26,6 +27,7 @@ crates/quepaxa/src/replica/log.rs: replace > with >= in Replica::on_catch_up
 crates/quepaxa/src/replica/log.rs: replace Replica::observe_latency with ()
 crates/quepaxa/src/replica/log.rs: replace / with % in Replica::observe_latency
 crates/quepaxa/src/replica/mod.rs: replace > with == in Replica::on_message
+crates/quepaxa/src/replica/mod.rs: replace > with >= in Replica::on_message
 crates/quepaxa/src/replica/mod.rs: replace > with >= in Replica::on_message
 crates/quepaxa/src/replica/mod.rs: replace + with * in Replica::on_message
 crates/quepaxa/src/replica/mod.rs: replace Replica::catch_up_due -> bool with true
