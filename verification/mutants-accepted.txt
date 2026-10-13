@@ -30,6 +30,8 @@ crates/quepaxa/src/replica/mod.rs: replace > with >= in Replica::on_message
 crates/quepaxa/src/replica/mod.rs: replace + with * in Replica::on_message
 crates/quepaxa/src/replica/mod.rs: replace Replica::catch_up_due -> bool with true
 crates/quepaxa/src/replica/mod.rs: replace == with != in Replica::pump
+crates/quepaxa/src/replica/mod.rs: replace > with >= in Replica::pump
+crates/quepaxa/src/replica/mod.rs: replace + with * in Replica::pump
 crates/quepaxa/src/replica/proposing.rs: replace / with * in Replica::hedge_delay
 crates/quepaxa/src/replica/proposing.rs: replace < with <= in Replica::drive
 crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::forward_pending
