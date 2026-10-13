@@ -22,18 +22,19 @@ CPU only: messages are delivered and persists acknowledged in memory, no I/O.
 ## End to end (`examples/kv-tokio/run-local.sh <rate> <secs> [delay-ms]`)
 
 Three `kv-tokio` processes on loopback, each persisting with `fsync` to its own data
-directory; `kv-bench` drives an open-loop Poisson workload of 50% `PUT` / 50% `GET`
-(linearizable, via read barriers) on random 8-letter keys over 24 pipelined connections
-spread across the replicas — the workload shape of the Go reference implementation's
-benchmark (17-byte KV commands). Durations of 5 s per point.
+directory; `kv-bench` drives an open-loop Poisson workload in the Go reference
+implementation's shape — 17-byte commands (1-byte operation, 8-byte key, 8-byte value),
+50% `PUT` / 50% `GET` (linearizable, via read barriers), random keys from a 52-letter
+alphabet — over 24 pipelined connections spread across the replicas, 5 s per point.
+Requests unanswered 5 s after the run are counted separately; none occurred.
 
 | Offered rate | Achieved | Errors | p50 | p90 | p99 |
 |---|---|---|---|---|---|
-| 5,000/s | 5,030/s | 0 | 0.32 ms | 0.85 ms | 1.5 ms |
-| 20,000/s | 19,915/s | 0 | 0.37 ms | 0.56 ms | 9.0 ms |
-| 50,000/s | 49,877/s | 0 | 0.51 ms | 0.89 ms | 32.9 ms |
-| 100,000/s | 99,744/s | 0 | 0.76 ms | 40.0 ms | 71.7 ms |
-| 200,000/s | 182,512/s | 86,543 (`Busy`) | 7.2 ms | 55.3 ms | 190 ms |
+| 5,000/s | 4,974/s | 0 | 0.32 ms | 0.82 ms | 1.5 ms |
+| 20,000/s | 20,095/s | 0 | 0.39 ms | 0.58 ms | 2.8 ms |
+| 50,000/s | 49,954/s | 0 | 0.54 ms | 0.89 ms | 30.0 ms |
+| 100,000/s | 99,842/s | 0 | 0.79 ms | 30.7 ms | 124 ms |
+| 200,000/s | 185,812/s | 70,476 (`Busy`) | 5.8 ms | 55.7 ms | 138 ms |
 
 Saturation sets in near 100k operations/s; beyond it `max_outstanding_proposals` (4096
 per replica) pushes back with `Busy` instead of queueing without bound.
@@ -45,7 +46,7 @@ including the client connections (so every client request also pays a 100 ms rou
 
 | Offered rate | Achieved | p50 | p90 | p99 |
 |---|---|---|---|---|
-| 5,000/s | 4,932/s | 315 ms | 630 ms | 915 ms |
+| 5,000/s | 4,926/s | 319 ms | 596 ms | 919 ms |
 
 The median matches the path: client round trip (100 ms) + forward to the leader (50 ms) +
 leader fast path (100 ms) + decision broadcast to the client's replica (50 ms), plus fsync.

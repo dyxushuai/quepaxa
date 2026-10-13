@@ -27,8 +27,17 @@ pub struct Disk {
     log: File,
 }
 
+/// Makes directory entries (created or renamed files) durable.
+#[cfg(unix)]
 fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
+}
+
+/// Windows cannot open a directory as a file to flush it; NTFS journals the rename and
+/// `MoveFileEx` semantics keep the old or the new file, so file-level syncs suffice there.
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn read_frames(bytes: &[u8]) -> (Vec<Bytes>, usize) {
@@ -58,11 +67,20 @@ impl Disk {
         fs::create_dir_all(dir)?;
         let path = dir.join("records.log");
         let mut bytes = Vec::new();
-        if path.exists() {
+        let existed = path.exists();
+        if existed {
             File::open(&path)?.read_to_end(&mut bytes)?;
         }
         let (records, valid) = read_frames(&bytes);
         let log = OpenOptions::new().create(true).append(true).open(&path)?;
+        if !existed {
+            // The new log's directory entry must survive a crash before anything is acknowledged.
+            log.sync_all()?;
+            sync_dir(dir)?;
+            if let Some(parent) = dir.parent() {
+                sync_dir(parent)?;
+            }
+        }
         if valid < bytes.len() {
             log.set_len(valid as u64)?;
             log.sync_all()?;

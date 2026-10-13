@@ -6,8 +6,11 @@ use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+/// `n` distinct free ports: all are held at once, so none repeats, then released for the
+/// children to bind.
+fn free_ports(n: usize) -> Vec<u16> {
+    let held: Vec<TcpListener> = (0..n).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect();
+    held.iter().map(|l| l.local_addr().unwrap().port()).collect()
 }
 
 struct Cluster {
@@ -21,8 +24,9 @@ impl Cluster {
     fn new(n: usize) -> Self {
         let dir = std::env::temp_dir().join(format!("kv-tokio-cluster-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let peers = (0..n).map(|_| free_port()).collect();
-        let clients = (0..n).map(|_| free_port()).collect();
+        let mut ports = free_ports(2 * n);
+        let clients = ports.split_off(n);
+        let peers = ports;
         let mut c = Self { peers, clients, dir, nodes: (0..n).map(|_| None).collect() };
         for i in 0..n {
             c.start(i);

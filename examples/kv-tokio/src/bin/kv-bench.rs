@@ -1,5 +1,6 @@
-//! Open-loop load generator for `kv-tokio` (the Go reference implementation's workload
-//! shape: short PUT/GET commands on random 8-letter keys, Poisson arrivals).
+//! Open-loop load generator for `kv-tokio` with the Go reference implementation's workload
+//! shape: 17-byte commands (1-byte operation, 8-byte key, 8-byte value), 50/50 PUT/GET by
+//! default, random keys from a 52-letter alphabet, Poisson arrivals.
 //!
 //! ```text
 //! kv-bench --targets 127.0.0.1:7200,127.0.0.1:7201 --rate 20000 --secs 10 --conns 16 [--gets 0.5]
@@ -34,14 +35,23 @@ impl SplitMix {
 
 const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
-fn command(rng: &mut SplitMix, gets: f64) -> String {
-    let key: String = (0..8).map(|_| LETTERS[(rng.next() % 52) as usize] as char).collect();
-    if rng.unit() < gets { format!("GET {key}\n") } else { format!("PUT {key} {}\n", rng.next() % 10) }
+fn word(rng: &mut SplitMix) -> String {
+    (0..8).map(|_| LETTERS[(rng.next() % 52) as usize] as char).collect()
 }
 
+fn command(rng: &mut SplitMix, gets: f64) -> String {
+    let key = word(rng);
+    if rng.unit() < gets { format!("GET {key}\n") } else { format!("PUT {key} {}\n", word(rng)) }
+}
+
+#[derive(Default)]
 struct Stats {
     latencies_us: Vec<u64>,
     errors: u64,
+    /// Requests never answered within the grace period after the run (counted as errors).
+    unanswered: u64,
+    /// Arrivals skipped because the sender fell more than a second behind schedule.
+    missed: u64,
 }
 
 async fn connection(
@@ -75,20 +85,33 @@ async fn connection(
     });
     let mut rng = SplitMix(seed);
     let mut next = Instant::now();
-    while next < until {
+    let mut write_failed = false;
+    loop {
         // Exponential inter-arrival times give a Poisson process (open loop).
-        let gap = -(1.0 - rng.unit()).ln() / rate;
-        next += Duration::from_secs_f64(gap);
+        next += Duration::from_secs_f64(-(1.0 - rng.unit()).ln() / rate);
+        if next >= until {
+            break;
+        }
         tokio::time::sleep_until(next.into()).await;
+        if Instant::now() > next + Duration::from_secs(1) {
+            stats.lock().unwrap().missed += 1;
+            continue;
+        }
         sent.lock().unwrap().push_back(Instant::now());
         if w.write_all(command(&mut rng, gets).as_bytes()).await.is_err() {
+            write_failed = true;
             break;
         }
     }
-    // Let in-flight requests finish.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let _ = w.shutdown().await;
+    // Give in-flight requests a grace period, then count the rest as unanswered.
+    let grace = Instant::now() + Duration::from_secs(5);
+    while !sent.lock().unwrap().is_empty() && Instant::now() < grace && !write_failed {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     reader.abort();
+    let _ = w.shutdown().await;
+    let left = sent.lock().unwrap().len() as u64;
+    stats.lock().unwrap().unanswered += left;
 }
 
 fn percentile(sorted: &[u64], p: f64) -> u64 {
@@ -117,7 +140,7 @@ async fn main() {
         }
     }
     assert!(!targets.is_empty(), "--targets is required");
-    let stats = Arc::new(Mutex::new(Stats { latencies_us: Vec::new(), errors: 0 }));
+    let stats = Arc::new(Mutex::new(Stats::default()));
     let start = Instant::now();
     let until = start + Duration::from_secs_f64(secs);
     let tasks: Vec<_> = (0..conns)
@@ -133,9 +156,11 @@ async fn main() {
     st.latencies_us.sort_unstable();
     let done = st.latencies_us.len();
     println!(
-        "offered={rate:.0}/s completed={done} throughput={:.0}/s errors={} p50={}us p90={}us p99={}us max={}us",
+        "offered={rate:.0}/s completed={done} throughput={:.0}/s errors={} unanswered={} missed={} p50={}us p90={}us p99={}us max={}us",
         done as f64 / secs,
         st.errors,
+        st.unanswered,
+        st.missed,
         percentile(&st.latencies_us, 0.5),
         percentile(&st.latencies_us, 0.9),
         percentile(&st.latencies_us, 0.99),

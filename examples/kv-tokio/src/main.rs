@@ -8,6 +8,10 @@
 //! Clients speak lines: `PUT <key> <value>` → `OK`, `GET <key>` (linearizable, through a
 //! read barrier) → `VALUE <v>` | `NONE`, `STALE <key>` (local, possibly stale). Requests
 //! on one connection may be pipelined; replies come back in order.
+//!
+//! Trusted networks only: peer connections are not authenticated or encrypted, and the
+//! peer id is whatever the connecting side claims. Put replicas on a private network or
+//! behind mTLS (e.g. a mesh sidecar) before exposing them.
 
 mod node;
 mod storage;
@@ -15,7 +19,7 @@ mod storage;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -24,7 +28,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc as tmpsc, oneshot};
 
-use node::{Cmd, Ev, Node, PeerFrame};
+use node::{Cmd, Ev, MAX_FRAME, Node, PeerFrame};
 use storage::Disk;
 
 struct Args {
@@ -66,14 +70,34 @@ fn parse_args() -> Result<Args, String> {
     })
 }
 
+/// Reads one length-prefixed frame; the buffer grows with the bytes actually received, so
+/// an advertised length alone cannot reserve memory.
 async fn read_frame(s: &mut TcpStream) -> std::io::Result<Bytes> {
     let len = s.read_u32_le().await? as usize;
-    if len > 64 << 20 {
+    if len > MAX_FRAME {
         return Err(std::io::Error::other("frame too large"));
     }
-    let mut buf = vec![0; len];
-    s.read_exact(&mut buf).await?;
+    let mut buf = Vec::new();
+    (&mut *s).take(len as u64).read_to_end(&mut buf).await?;
+    if buf.len() != len {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
     Ok(Bytes::from(buf))
+}
+
+/// Queues an event for the replica thread, waiting (without blocking the runtime) while
+/// the bounded queue is full; false once the replica thread is gone.
+async fn push(events: &SyncSender<Ev>, mut ev: Ev) -> bool {
+    loop {
+        match events.try_send(ev) {
+            Ok(()) => return true,
+            Err(TrySendError::Full(back)) => {
+                ev = back;
+                tokio::time::sleep(Duration::from_micros(200)).await;
+            }
+            Err(TrySendError::Disconnected(_)) => return false,
+        }
+    }
 }
 
 async fn write_frame(s: &mut TcpStream, frame: &[u8]) -> std::io::Result<()> {
@@ -83,7 +107,7 @@ async fn write_frame(s: &mut TcpStream, frame: &[u8]) -> std::io::Result<()> {
 
 /// Keeps a connection to `peer`, reconnecting forever; lost frames are retransmitted by
 /// the protocol.
-async fn outbound(me: u32, addr: SocketAddr, mut rx: tmpsc::UnboundedReceiver<Vec<u8>>) {
+async fn outbound(me: u32, addr: SocketAddr, mut rx: tmpsc::Receiver<Vec<u8>>) {
     loop {
         let Ok(mut s) = TcpStream::connect(addr).await else {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -101,13 +125,15 @@ async fn outbound(me: u32, addr: SocketAddr, mut rx: tmpsc::UnboundedReceiver<Ve
     }
 }
 
-async fn inbound(mut s: TcpStream, events: mpsc::Sender<Ev>) {
+async fn inbound(mut s: TcpStream, events: SyncSender<Ev>) {
     let _ = s.set_nodelay(true);
-    let Ok(hello) = read_frame(&mut s).await else { return };
+    let Ok(Ok(hello)) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut s)).await else {
+        return;
+    };
     let Ok(from) = <[u8; 4]>::try_from(&hello[..]).map(u32::from_le_bytes) else { return };
     while let Ok(frame) = read_frame(&mut s).await {
         if let Some(frame) = PeerFrame::decode(frame)
-            && events.send(Ev::Peer { from, frame }).is_err()
+            && !push(&events, Ev::Peer { from, frame }).await
         {
             return;
         }
@@ -115,18 +141,18 @@ async fn inbound(mut s: TcpStream, events: mpsc::Sender<Ev>) {
 }
 
 fn parse_cmd(line: &str) -> Option<Cmd> {
-    let mut p = line.split_whitespace();
-    match (p.next()?, p.next(), p.next()) {
-        ("PUT", Some(k), Some(v)) => Some(Cmd::Put(k.to_owned(), v.to_owned())),
-        ("GET", Some(k), None) => Some(Cmd::Get(k.to_owned())),
-        ("STALE", Some(k), None) => Some(Cmd::Stale(k.to_owned())),
+    let words: Vec<&str> = line.split_whitespace().collect();
+    match words[..] {
+        ["PUT", k, v] => Some(Cmd::Put(k.to_owned(), v.to_owned())),
+        ["GET", k] => Some(Cmd::Get(k.to_owned())),
+        ["STALE", k] => Some(Cmd::Stale(k.to_owned())),
         _ => None,
     }
 }
 
 /// Pipelined client connection: requests go to the node as they arrive, replies are
 /// written in request order.
-async fn client(s: TcpStream, events: mpsc::Sender<Ev>) {
+async fn client(s: TcpStream, events: SyncSender<Ev>) {
     let _ = s.set_nodelay(true);
     let (r, mut w) = s.into_split();
     let (tx, mut replies) = tmpsc::unbounded_channel::<oneshot::Receiver<String>>();
@@ -143,7 +169,7 @@ async fn client(s: TcpStream, events: mpsc::Sender<Ev>) {
         let (reply, rx) = oneshot::channel();
         match parse_cmd(&line) {
             Some(cmd) => {
-                if events.send(Ev::Client { cmd, reply }).is_err() {
+                if !push(&events, Ev::Client { cmd, reply }).await {
                     break;
                 }
             }
@@ -188,14 +214,17 @@ async fn main() {
             listen = Some(*addr);
             continue;
         }
-        let (tx, rx) = tmpsc::unbounded_channel();
+        let (tx, rx) = tmpsc::channel(4096);
         peers.insert(*i, tx);
         tokio::spawn(outbound(args.id, *addr, rx));
     }
     let listen = listen.expect("--members must include --id");
-    let (events, rx) = mpsc::channel();
+    let (events, rx) = mpsc::sync_channel(65_536);
     let mut node = Node::new(replica, disk, peers, args.snapshot_every);
-    node.restore();
+    if let Err(e) = node.restore() {
+        eprintln!("kv-tokio: {e}");
+        std::process::exit(1);
+    }
     std::thread::spawn(move || node.run(rx));
 
     let peer_listener = TcpListener::bind(listen).await.expect("bind peer address");

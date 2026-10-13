@@ -9,16 +9,19 @@ cargo build --release -q --manifest-path "$root/Cargo.toml" -p kv-tokio
 bin="$root/target/release"
 data=$(mktemp -d)
 members="0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102"
+pids=()
+owns_netem=0
 cleanup() {
   kill "${pids[@]}" 2>/dev/null || true
-  [ "$delay" != 0 ] && sudo tc qdisc del dev lo root 2>/dev/null || true
+  # Remove only the qdisc this run installed.
+  if [ "$owns_netem" = 1 ]; then sudo tc qdisc del dev lo root 2>/dev/null || true; fi
   rm -rf "$data"
 }
 trap cleanup EXIT
 if [ "$delay" != 0 ]; then
   sudo tc qdisc add dev lo root netem delay "${delay}ms"
+  owns_netem=1
 fi
-pids=()
 for i in 0 1 2; do
   "$bin/kv-tokio" --id $i --members "$members" --client 127.0.0.1:720$i --data "$data/n$i" 2>"$data/n$i.log" &
   pids+=($!)
