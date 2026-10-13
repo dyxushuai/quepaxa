@@ -8,7 +8,7 @@ An implementation-ready spec for the `quepaxa` crate family: verified protocol u
 
 ## Notes
 
-- **Status (2026-10-13)**: destination reached. Implementation is tracked on GitHub ([#1](https://github.com/dyxushuai/quepaxa/issues/1), milestone `v0.2.0`); this map is the decision record.
+- **Status (2026-10-13)**: destination reached and v1 implemented ([#1](https://github.com/dyxushuai/quepaxa/issues/1), milestone `v0.2.0`). Deviations from these decisions made during implementation are listed in [spec §12](../quepaxa-v1/spec.md#12-amendments-made-during-implementation); this map remains the decision record.
 
 - Domain: crash-fault-tolerant consensus (QuePaxa, SOSP'23, n = 2f+1). Paper: https://bford.info/pub/os/quepaxa/quepaxa.pdf. Go reference impl: `dedis/quepaxa`. Industrial context: Cloudflare Meerkat (https://blog.cloudflare.com/meerkat-introduction/) — Rust, internal-only, DST + formal verification.
 - Settled at charting (2026-10-13), all defaults accepted:

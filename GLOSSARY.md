@@ -49,3 +49,15 @@ The opaque payload decided in one slot, made of one or more proposed entries.
 
 **Fenced**:
 The state of a replica that has lost durability guarantees and stops answering until restarted.
+
+**Hedge delay**:
+How long a replica waits for others to make progress before driving work itself; it only affects performance, never safety.
+_Avoid_: Timeout, election timeout
+
+**Checkpoint**:
+A durable rewrite of a replica's records that replaces everything persisted before it, emitted after compaction.
+_Avoid_: Snapshot (that is the application's state)
+
+**Snapshot**:
+The application's state up to some slot, stored together with the replica's core state so log entries before it can be discarded.
+_Avoid_: Checkpoint

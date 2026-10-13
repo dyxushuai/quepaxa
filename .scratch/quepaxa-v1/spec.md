@@ -1,177 +1,208 @@
-# quepaxa v1 — implementation spec
+# quepaxa v1 — spec (as built)
 
-Status: ready for implementation (2026-10-13). Source of truth for *why*: the wayfinder map `.scratch/quepaxa/map.md` and its resolved tickets; this file states *what* to build. Vocabulary: `GLOSSARY.md`. Decisions with lasting trade-offs: `docs/adr/`.
+Status: implemented (2026-10-13). This file states *what* v1 is; §12 lists every place it
+deliberately differs from the spec written before implementation, with the PR that changed
+it. Rationale for the original decisions: the wayfinder map `.scratch/quepaxa/map.md` and its
+tickets. Vocabulary: `GLOSSARY.md`. Lasting trade-offs: `docs/adr/`.
 
 ## 1. Product
 
-An open-source Rust implementation of the QuePaxa crash-fault-tolerant consensus protocol (Tennage et al., SOSP'23; https://bford.info/pub/os/quepaxa/quepaxa.pdf) exposed as a **replicated log of opaque batches**, usable from Rust and, through a stable C ABI, from any language.
+An open-source Rust implementation of the QuePaxa crash-fault-tolerant consensus protocol
+(Tennage et al., SOSP'23; https://bford.info/pub/os/quepaxa/quepaxa.pdf) exposed as a
+**replicated log of opaque batches**, usable from Rust and, through a stable C ABI, from any
+language.
 
 - Fault model: crash-recovery, `n = 2f + 1` replicas, no Byzantine faults.
-- Membership: static in v1. `cluster_id` and `config_epoch` are reserved in every message for phase-2 reconfiguration.
-- Non-goals for v1: reconfiguration/dynamic join/witnesses/learners, ValueId indirection, KV/lease/transaction layers, a published runtime crate, wasm or mobile language packages.
+- Membership: static in v1. `cluster_id` and `config_epoch` are in every message for
+  phase-2 reconfiguration.
+- Non-goals for v1: reconfiguration / dynamic join / witnesses / learners, ValueId
+  indirection, the paper's latency-tuned leader order (#28), KV/lease/transaction layers,
+  a published runtime crate, wasm or mobile language packages.
 
 ## 2. Workspace
 
 | Crate | Kind | Notes |
 |---|---|---|
-| `quepaxa` | lib, `#![no_std]` + `alloc` | sans-IO core ([ADR 0001](../../docs/adr/0001-sans-io-core.md)). Deps: `bytes`, a ChaCha RNG (`rand_chacha` or `chacha20`, pick the smaller audited one). |
-| `quepaxa-ffi` | `cdylib` + `staticlib` + `rlib` | hand-written `extern "C"`, cbindgen header committed at `quepaxa-ffi/include/quepaxa.h`, packaged with cargo-c. |
-| `quepaxa-sim` | lib, `publish = false` | deterministic simulator + invariant oracles + toy KV. |
-| `examples/kv-tokio` | example | TCP transport + fsync'd file storage + toy KV; benchmark harness. |
+| `quepaxa` | lib, `#![no_std]` + `alloc` | sans-IO core ([ADR 0001](../../docs/adr/0001-sans-io-core.md)). Only dependency: `bytes`. ChaCha20 (RFC 8439) and CRC-32C are in-crate. Feature `model` is test support (cloneable, fingerprintable replica), not stable API. |
+| `quepaxa-ffi` | `cdylib` + `staticlib` + `rlib` | hand-written `extern "C"`; cbindgen 0.29.4 header committed at `crates/quepaxa-ffi/include/quepaxa.h`, exported symbols at `symbols.txt`. |
+| `quepaxa-sim` | lib, `publish = false` | deterministic simulator, delay-bounded model checker, KV linearizability oracle. |
+| `examples/kv-tokio` | binaries, `publish = false` | reference runtime: TCP, fsync'd storage, snapshots, `kv-bench` load generator. |
 
 Edition 2024, MSRV 1.89, license `MIT OR Apache-2.0`.
 
 ## 3. Protocol (per slot)
 
-Follows the paper's Alg. 3 (recorder) and Alg. 4 (proposer). The map's paper-protocol ticket holds the citations. Implementation decisions on top of the paper:
+Paper Alg. 3 (recorder) and Alg. 4 (proposer), with:
 
-- **Step clock**: `step = 4·round + phase`, starting at 4. Step is `u32`; overflow is an error (it never happens in practice).
-- **Proposal** = `(priority: u64, value_key, value)`, ordered by `(priority, value_key)`. `value_key = (origin: NodeId, incarnation: u64, batch_seq: u64)` is unique per distinct value, so distinct values never tie. Nil = absent. `H = u64::MAX` is reserved for the leader at step 4. Every other phase-0 priority is drawn **per recorder** (A1: `p_j`) uniformly from `[1, H−1]` using the seeded ChaCha.
-- **Recorder register** `(S, Fc, Ac, Ap)` per slot, exactly as Alg. 3 with `max` over the order above.
-- **Proposer**: as Alg. 4. Catch-up adopts the reply with the **maximum** `s′` (A12). It decides at step 4 if every quorum reply's `Fc` has priority `H`, or at phase 2 if `p = max(a′)`. A `Decided` reply ends the slot with that value.
-- **Decision dissemination**: the deciding proposer broadcasts `Decided { slot, value }`. Every message header carries the sender's commit index. A replica that is behind sends `CatchUp { from_slot }` and gets back `Entries` or `Compacted`.
+- **Step clock** `step = 4·round + phase` from 4, `u32`. Steps above `u32::MAX − 16` are
+  rejected on the wire (overflow guard; correct replicas never approach it).
+- **Proposal** `(priority: u64, value_key, value)`, ordered by `(priority, value_key)`;
+  `value_key = (origin, incarnation, batch_seq)` is unique per value, so distinct values
+  never tie. `H = u64::MAX` only for the slot's leader at step 4; every other phase-0
+  priority is drawn per recorder (A1) uniformly from `[1, H−1]` with the seeded ChaCha20.
+- **Recorder register** `(S, Fc, Ac, Ap)` per slot, as Alg. 3.
+- **Proposer** as Alg. 4. Catch-up adopts the first reply whose step is ahead (any such
+  reply is valid by Lemma C.3). Replies carry `req_step`; a reply to an older request never
+  counts toward the current quorum; replies with `step < req_step` are rejected.
+- **Decisions** are broadcast (`Decided`); a recorder answers requests for a decided slot
+  with `Decided`. Every message carries the sender's commit index; a replica more than one
+  slot behind fetches pages of `Entries` with `CatchUp` (timer-retried, page after page,
+  resumed after snapshot installation).
 
-### Leader schedule and hedging
+### Leader schedule, forwarding and hedging
 
-- The schedule is a core-internal log entry, `ScheduleChange`. The schedule for slot k is the latest one decided at a slot ≤ k − W, where W = `max_in_flight_slots`. No slot k starts before slot k − W is decided. The bootstrap schedule is the members sorted by `NodeId`.
-- Default tuner: epochs of `epoch_slots` (default 256). Explore: 2 epochs per member, round-robin. Exploit: sort members **ascending** by mean epoch commit latency. Only the leader proposes `ScheduleChange`. A static schedule is available through config.
-- Hedging: the proposer at schedule position k waits `(k−1)·δ` and restarts that wait whenever its colocated recorder sees the slot's step advance, or the slot is decided. The default is adaptive: δ = clamp(2 × EWMA of fast-path commit latency, `hedge_min` = 1 ms, `hedge_max` = 5 s). A static δ is available through config.
-- Non-leaders `Forward` their local proposals to the leader. If a proposal is not committed within the forwarding replica's hedge delay, that replica proposes it itself.
+- The schedule is derived from the decided log only: the schedule for slot `k` is the
+  latest one decided at a slot `≤ k − 64` (`max_in_flight_slots ≤ 64` guarantees every
+  replica knows it for every slot it drives). Bootstrap order: members sorted by id. When
+  8 consecutive decided slots did not originate at their leader, the leader moves to the
+  back (effective 64 slots later; no further rotation is counted until then).
+- Non-leaders `Forward` entries to the current leader and propose them themselves if they
+  are not committed within the hedge delay δ = clamp(2 × EWMA(propose→commit),
+  `hedge_min`, `hedge_max`) (`hedge_max/4` before the first sample).
+- A slot someone else started is driven by this replica after `(position + 1)·δ` without
+  progress (the local recorder seeing its step advance restarts the wait).
 
 ### Batching, pipelining, at-most-once
 
-- `propose(payload)` returns `ProposalId(u64)`, monotonic per incarnation. The core cuts batches by `max_batch_bytes` / `max_batch_delay`, keeps ≤ `max_in_flight_slots` slots in flight and ≤ `max_outstanding_proposals` undecided proposals.
-- A batch whose slot decided another value is re-proposed in a later slot (same `value_key`). An origin has each batch in at most one slot at a time.
-- **Commit-time dedup**: a committed entry whose `(origin, incarnation, proposal_id)` has already committed is skipped. The per-origin state is a watermark plus a bitmap of width `max_outstanding_proposals`, and it is part of `core_state`. Guarantee: a local `ProposalId` appears in at most one `Commit` entry. Cross-client dedup belongs to the application.
+- `propose(payload)` / `read_barrier()` return a `ProposalId` (monotonic per incarnation).
+  Batches are cut, up to `max_batch_bytes`, whenever the window (`max_in_flight_slots`)
+  has room; there is no batching delay. `max_outstanding_proposals` bounds pending local
+  proposals (`Busy`).
+- Commit-time dedup: an entry whose `(origin, incarnation, id)` already committed is skipped
+  (per-origin watermark + set, 4 incarnations kept), so forwarding plus hedging applies each
+  entry once. A local id appears in at most one `Commit`.
 
 ## 4. Durability and recovery
 
-[ADR 0002](../../docs/adr/0002-structural-persist-before-send.md): persist-before-send is enforced by the action type.
+[ADR 0002](../../docs/adr/0002-structural-persist-before-send.md): persist-before-send is
+enforced by the action type.
 
-Durable record kinds (`WriteOp`, core-encoded, CRC32C, versioned):
+Durable records (core-encoded, `"QR"` v1, CRC-32C): `Incarnation(n)` (first, every start),
+`RecorderState { slot, register }`, `LeaderReservation { through }`, `Decided { slot,
+proposal }`, `Compacted { through, core_state }`.
 
-| Record | Written when |
-|---|---|
-| `Incarnation(n)` | first action of every start, before anything else |
-| `RecorderState { slot, S, Fc, Ac, Ap }` | a `record` changed `(S, Fc, Ac)` |
-| `LeaderReservation { through_slot }` | before using `H` for a slot beyond the current reservation; reserved W slots ahead |
-| `Decided { slot, batch }` | a slot is learned decided |
-| `Compacted { through_slot }` | `compact` or `install_snapshot` |
-
-Rules:
-1. A reply is released only after every write that produced the state it reports is durable. Replies ride in the `then` of the latest pending `Persist`; if nothing is pending they are sent immediately.
-2. `Commit` for slot k is emitted only after `Decided { k }` is reported `Persisted`.
-3. After restart, the replica never uses `H` for a slot ≤ the recovered reservation.
-4. `Replica::new` receives every durable record in write order and rebuilds all state. A CRC or decode failure is an error, never skipped.
-5. `StorageFailed` fences the replica: it answers nothing and proposes nothing until restart.
-6. The seed must be fresh from a CSPRNG on every start. This is a documented contract, required for liveness.
+1. A reply is released only after every write that produced the state it reports is
+   durable: it rides in the `then` of the persist carrying the write, or is parked behind the
+   last in-flight persist (no empty persists are emitted).
+2. Nothing leaves a replica before its new incarnation is durable; the leader's own `H`
+   leaves only after a durable reservation; `Commit` waits for the durable decision.
+3. After restart a replica never uses `H` for a slot ≤ its recovered reservation.
+4. `Replica::new` takes every durable record in write order; a corrupt record is
+   `CorruptRecord`, never skipped. Slots with recovered recorder state are driven.
+5. `StorageFailed` fences the replica. Fenced proposals are reported `Dropped(Fenced)` with
+   an **unknown** outcome (they may still commit, as after a crash).
+6. The seed must be fresh CSPRNG output on every start (documented contract).
 
 ## 5. Compaction and snapshots
 
-- A recorder drops a slot's register once `Decided` for that slot is durable. Any later `record` for that slot gets `Decided` back.
-- The app persists its snapshot together with `core_state()` (taken as of the last emitted `Commit`), then calls `compact(through_slot)`. Entries ≤ through are dropped after `Compacted` is persisted.
-- A request for a slot that has been compacted gets `Compacted { through }`. The requester then emits `SnapshotNeeded { peer, through }`. The app transfers the snapshot and calls `install_snapshot(through, core_state)`.
-- Local proposals that fall inside an installed range are resolved from the installed dedup state: `Committed { id, slot: None }`, or re-queued. Pending read barriers complete at `max(barrier slot, through)`.
+- A recorder drops a slot's register once `Decided` for it is durable.
+- `core_state()` encodes (v2) the dedup state and the leader schedule **as of the emitted
+  prefix** (`emitted_index()`); the application stores it with its own snapshot, then calls
+  `compact(through, core_state)`. The replica then emits a **checkpoint**:
+  `Persist { replace: true }`, whose records (incarnation, reservation, `Compacted`, live
+  registers, decided slots above the floor) atomically replace every earlier record.
+- Requests or catch-up below the floor get `Compacted { through }`; the requester emits
+  `SnapshotNeeded { peer, through }`. `install_snapshot(through, core_state)` returns
+  `Ok(true)` when adopted, `Ok(false)` when the replica already emitted past it (do not
+  rewind the application). Local proposals the snapshot contains are reported
+  `Committed`/`ReadReady` at `through`. After a restart, an application whose snapshot is
+  newer than the replica's last durable checkpoint calls `install_snapshot` with it.
 
 ## 6. Rust API (`quepaxa`)
 
-```rust
-pub struct Timestamp(pub u64);            // monotonic nanos, caller epoch
-pub struct NodeId(pub u32);
-pub struct ProposalId(pub u64);
-pub struct PersistId(pub u64);            // strictly increasing per incarnation
-pub struct Slot(pub u64);
+`Replica::{new, propose, read_barrier, handle, handle_timeout, next_deadline, poll_actions,
+core_state, compact, install_snapshot, commit_index, emitted_index, metrics, id}`;
+`Input::{Message, Persisted, StorageFailed}`; `Action::{Persist { id, records, then,
+replace }, Send, Commit { slot, entries }, Committed { id, slot }, ReadReady { id, slot },
+SnapshotNeeded { peer, through }, Dropped { id, reason }}`; `Config` (`cluster_id`, `id`,
+`members`, `seed`, `max_batch_bytes`, `max_message_bytes`, `max_in_flight_slots`,
+`max_outstanding_proposals`, `retransmit_interval`, `hedge_min`, `hedge_max`); `Metrics`
+(counters + gauges); `Error`.
 
-pub struct Config {
-    pub cluster_id: [u8; 16], pub id: NodeId, pub members: Vec<NodeId>,
-    pub seed: [u8; 32],                    // fresh CSPRNG seed every start
-    pub max_batch_bytes: u32, pub max_batch_delay: u64, pub max_in_flight_slots: u32,
-    pub max_outstanding_proposals: u32, pub max_message_bytes: u32,
-    pub epoch_slots: u32, pub leader: LeaderConfig, pub hedge: HedgeConfig,
-}
-
-impl Replica {
-    pub fn new(cfg: Config, durable: impl IntoIterator<Item = Bytes>, now: Timestamp) -> Result<Self, Error>;
-    pub fn propose(&mut self, now: Timestamp, payload: Bytes) -> Result<ProposalId, Error>; // Busy => backpressure
-    pub fn handle(&mut self, now: Timestamp, input: Input) -> Result<(), Error>;
-    pub fn handle_timeout(&mut self, now: Timestamp);
-    pub fn next_deadline(&self) -> Option<Timestamp>;
-    pub fn poll_actions(&mut self, out: &mut Vec<Action>);   // must drain before next mutation
-    pub fn read_barrier(&mut self, now: Timestamp, token: u64) -> Result<(), Error>;
-    pub fn core_state(&self) -> Bytes;
-    pub fn compact(&mut self, through: Slot) -> Result<(), Error>;
-    pub fn install_snapshot(&mut self, through: Slot, core_state: Bytes) -> Result<(), Error>;
-    pub fn metrics(&self) -> &Metrics;
-}
-
-#[non_exhaustive] pub enum Input {
-    Message { bytes: Bytes },               // decoded + validated by the core
-    Persisted { id: PersistId },            // cumulative
-    StorageFailed { id: PersistId },
-}
-
-#[non_exhaustive] pub enum Action {
-    Persist { id: PersistId, records: Vec<Bytes>, then: Vec<Outbound> },
-    Send(Outbound),                         // not gated on durability
-    Commit { slot: Slot, entries: Vec<Entry> },   // strict slot order
-    Committed { id: ProposalId, slot: Option<Slot> },
-    Dropped { id: ProposalId, reason: DropReason },
-    ReadReady { token: u64, slot: Slot },
-    SnapshotNeeded { peer: NodeId, through: Slot },
-}
-pub struct Outbound { pub to: NodeId, pub bytes: Bytes }
-pub struct Entry { pub origin: NodeId, pub incarnation: u64, pub id: ProposalId, pub payload: Bytes }
-```
-
-Errors: `Err` only for caller contract violations (undrained actions, `PersistId` out of order, bad config, corrupt recovery records). Malformed or stale network input is dropped and counted in `metrics()`. The core never panics on any input; invariants are checked with `debug_assert`.
+Contracts: drain `poll_actions` after every call; `Err` only for contract violations;
+malformed network input is dropped and counted. `Config` validation: unique members
+including `id`; `max_message_bytes ≥ 2·max_batch_bytes + 1 KiB`; `max_in_flight_slots ∈
+[1, 64]`; `0 ≤ hedge_min ≤ hedge_max > 0`. `cluster_id`, `members` and `max_batch_bytes`
+must be identical on every member.
 
 ## 7. Wire format
 
-The core owns the codec. It is hand-rolled, little-endian, fixed width, with `u32` length prefixes. Payloads are zero-copy `Bytes`. Every length is bounded by config before any allocation. One message is one frame; framing is the transport's job.
+Hand-rolled, little-endian, zero-copy payloads, every length bounded before use; proposal
+values are bounded by `max_batch_bytes` and messages by `max_message_bytes`.
 
-- Envelope: `"QP"`, `wire_version u8`, `kind u8`, `cluster_id [16]`, `config_epoch u64`, `from u32`, `to u32`, `commit_index u64`.
-- Kinds: `RecordRequest {slot, step, proposal}`, `RecordReply {slot, S, Fc, Ap}`, `Decided {slot, value}`, `Compacted {through}`, `CatchUp {from_slot}`, `Entries {first_slot, values}`, `Forward {proposals}`.
-- Proposal: `priority u64`, `value_key (u32, u64, u64)`, `value: kind u8 (0 = inline) + bytes`. A reply omits the bytes when the `value_key` equals the request's.
-- No wire checksum. Durable records carry CRC32C.
-- Compatibility: in 0.x the wire version must match exactly. From 1.0, a release interoperates with N−1 minor. Durable format: new code reads all older versions; old code never reads newer. Golden files pin each version.
+Envelope: `"QP"`, `wire_version` 1, `kind`, `cluster_id[16]`, `config_epoch u64`,
+`from u32`, `to u32`, `commit_index u64`. Kinds: 1 `RecordRequest {slot, step, proposal}`,
+2 `RecordReply {slot, req_step, step, first, prev_agg}` (a value equal to the request's is
+elided), 3 `Decided {slot, proposal}`, 4 `CatchUp {from}`, 5 `Entries {first, proposals}`
+(contiguous), 6 `Forward {batch}`, 7 `Compacted {through}`. No wire checksum; durable
+records carry CRC-32C. In 0.x the wire version must match exactly; from 1.0 a release
+interoperates with the previous minor.
 
-## 8. C ABI (`quepaxa-ffi`)
+## 8. C ABI (`quepaxa-ffi`, ABI 0.3)
 
-- `qpx_replica_new(const qpx_config*, const qpx_bytes* records, size_t n, qpx_replica** out)` / `qpx_replica_free`. `qpx_config` starts with `struct_size`.
-- Inputs: `qpx_propose`, `qpx_handle_message`, `qpx_persisted`, `qpx_storage_failed`, `qpx_read_barrier`, `qpx_handle_timeout`, `qpx_next_deadline`, `qpx_compact`, `qpx_core_state` (two-call buffer), `qpx_install_snapshot`, `qpx_metrics`.
-- `qpx_poll(h, qpx_action*)` → `QPX_OK` / `QPX_EMPTY`. The result is a tagged struct with borrowed `(ptr, len)` fields; `Persist.then` is reached through `qpx_action_then(h, i, …)`. Borrowed pointers are valid until the next call on that handle.
-- `int32_t` status codes. `qpx_last_error`. Every export has `catch_unwind`; a panic returns `QPX_PANIC` and later calls return `QPX_POISONED`.
-- Handles are `Send`, not `Sync`.
-- `QPX_ABI_VERSION_MAJOR/MINOR` and `qpx_abi_version()`; changes within a major are additive only.
-- v1 ships a C example and a smoke test. wasm has no C ABI.
+`qpx_abi_version`, `qpx_status_str`, `qpx_last_error` (thread-local detail of the latest
+failing call), `qpx_config_init(cfg, size)`, `qpx_replica_new/free`, `qpx_propose`,
+`qpx_read_barrier`, `qpx_handle_message`, `qpx_persisted`, `qpx_storage_failed`,
+`qpx_handle_timeout`, `qpx_next_deadline`, `qpx_commit_index`, `qpx_core_state` (two-call
+buffer), `qpx_compact`, `qpx_install_snapshot` (`QPX_IGNORED` when stale), `qpx_get_metrics`,
+`qpx_poll` + `qpx_action_record/then/entry` (borrowed until the next call on the handle).
+
+`int32` statuses (0 ok, positive informational, negative error); every export validates
+its arguments and wraps `catch_unwind` (panic → `QPX_ERR_PANIC`, handle poisoned); mutating
+calls require `qpx_poll` to have returned `QPX_EMPTY`; `qpx_config` and `qpx_metrics` are
+read and written only up to their `struct_size`. Handles are `Send`, not `Sync`. While the
+ABI major version is 0, any minor bump may be incompatible.
 
 ## 9. Assurance
 
-| Layer | Tool | Oracle |
+| Layer | Tool | What it checks |
 |---|---|---|
-| Unit / TDD | nextest; Go transition tables as vectors | Alg. 3/4 behaviour, A14 leader catch-up at step 4 |
-| Properties | proptest, proptest-state-machine | R1–R6, ordering totality, codec round-trip, replay equivalence |
-| DST | `quepaxa-sim` | G1–G5 every step; liveness after heal; faults: drop/dup/reorder/delay/partition, crash-restart losing unsynced writes + torn last write, `StorageFailed`, snapshot install |
-| Linearizability | stateright `LinearizabilityTester` | toy KV histories with read barriers |
-| Model check | stateright over real `Replica`, N=3, bounded | G1–G5 with crash-restart |
-| Fuzz | bolero + arbitrary | wire decode, record decode, event sequences, sim schedules |
-| Unsafe | Miri (ffi), ASan/UBSan (C smoke) | no UB |
-| Mutation | cargo-mutants | tests catch changes |
+| Unit / TDD | nextest | worked examples of Alg. 3/4, codec golden bytes, API contracts |
+| Properties | proptest | recorder invariants R1–R6, ordering, codec round-trips, adversarial member messages |
+| Single-slot simulation | `slot_sim` (core, test-only) | G1–G5 after every event under loss, duplication, reordering, partitions |
+| Replica simulation | `quepaxa-sim` | agreement, validity, at-most-once, ordered commits, KV linearizability, convergence; crash-restart losing unsynced or torn writes; snapshots |
+| Model checking | delay-bounded explorer over the real `Replica` | every schedule within k deviations (reorder, loss, duplication, early timer, crash): safety in every state; liveness (settling under the default schedule) at the depth bound |
+| Fuzzing | bolero (libFuzzer + ASan) | wire, batch, durable record and core-state decoding |
+| Unsafe code | Miri; ASan/UBSan on the C smoke test | FFI |
+| Mutation | cargo-mutants (weekly) | test strength |
 
-Gates:
-- Per PR: fmt, clippy `-D warnings`, nextest, DST 1k seeds, small stateright bound, fuzz corpus replay, mutants `--in-diff`, Miri, MSRV + `no_std` builds, cargo-deny, header/symbol diff, cargo-semver-checks.
-- Nightly: fuzz 1 h per target, DST 1M seeds, larger stateright bounds, Kani, criterion.
-- Weekly: full sharded mutants.
-- Coverage is reported, not gated.
+Per PR: fmt, clippy `-D warnings`, nextest on Tier 1, doctests, MSRV and `no_std` builds,
+cargo-deny, FFI header/symbol diff, Miri, C smoke tests, model checking at 2 deviations,
+semver checks once 0.2.0 is published. Nightly: 20 min fuzzing per target, 100k simulator
+seeds per scenario, model checking at 3 deviations, deep proptests, Criterion against the
+previous night (fails above 10%), coverage. Weekly: sharded mutants. Failures open issues.
 
-## 10. Platforms and release
+## 10. Platforms
 
-- Tier 1 (native full tests): `ubuntu-24.04`, `ubuntu-24.04-arm`, `windows-2025`, `windows-11-arm`, `macos-15`, `macos-15-intel`.
-- Tier 2: Android (cargo-ndk, NDK r28+, emulator smoke), iOS (xcframework, simulator smoke), `wasm32-unknown-unknown` and `thumbv7em-none-eabihf` (core builds only).
-- First release is `quepaxa` 0.2.0. The 0.1.0 placeholder (crate now owned by `dyxushuai`) is yanked after 0.2.0 ships. Also reserve `quepaxa-ffi` then.
-- Publishing uses crates.io trusted publishing from tag CI. GitHub Releases carry the header, Tier 1 libraries (Linux built against glibc 2.28 via cargo-zigbuild), Android `.so` files and an iOS xcframework. This requires a public GitHub repo, which the user creates.
-- Benchmarks: criterion on `record`, the codec and the replica loop. End-to-end runs use `examples/kv-tokio` on loopback and on netem WAN, with the Go repo's 17-byte KV Poisson open-loop workload. Results are hypotheses, not production claims.
+Tier 1 (native, full tests): Linux x86_64/aarch64, Windows x86_64/aarch64, macOS
+aarch64/x86_64. Tier 2: Android (cargo-ndk; C ABI tests and C smoke test on an emulator),
+iOS (C ABI tests and C smoke test on a simulator), `wasm32-unknown-unknown` and
+`thumbv7em-none-eabihf` (core builds).
 
-## 11. Backlog
+## 11. Release
 
-TDD-ordered tickets live on GitHub: tracking issue [#1](https://github.com/dyxushuai/quepaxa/issues/1) with sub-issues #2–#18 under milestone `v0.2.0`, blocking edges as native issue dependencies. Each starts from a failing test.
+First real release `0.2.0` (crate owned by `dyxushuai`; the unrelated `0.1.0` placeholder is
+yanked afterwards). Benchmarks and their method: `docs/benchmarks.md`.
+
+## 12. Amendments made during implementation
+
+| Spec before implementation | As built | Why | PR |
+|---|---|---|---|
+| `RecordReply {slot, S, Fc, Ap}` | adds `req_step` | a reply to an older request must not count toward the current quorum | #23, #24 |
+| `max_batch_delay` knob | none: cut when the window has room | the window already batches under load; no idle delay | #27 |
+| `Persist { id, records, then }` | adds `replace` (checkpoints); sends waiting only on in-flight writes are parked, no empty persists | log compaction; an empty persist per reply stormed the disk | #26, #31 |
+| `stall_timeout` | adaptive δ (`hedge_min`/`hedge_max`), `(position+1)·δ` per stalled slot | spec'd hedging, one mechanism | #29 |
+| latency-tuned leader order (explore/exploit) | deterministic rotation after 8 slots not led by the leader, 64-slot lag | needs an agreement step; paper leaves it unspecified (A3–A5); tracked in #28 | #29 |
+| `read_barrier(token)` / `ReadReady {token}` | returns a `ProposalId`; `ReadReady { id, slot }` | one id space for proposals and barriers | #30 |
+| `Committed { id, slot: Option }` | `slot` always present (snapshot ⇒ `through`) | simpler; snapshot resolution still reports where it was covered | #31 |
+| `install_snapshot -> Result<()>` | `-> Result<bool>`, `emitted_index()` | a stale snapshot must not rewind the application | #36 |
+| core state v1 (decided-prefix schedule) | v2: schedule as of the emitted prefix | v1 double-counted slots on restore | #36 |
+| `Dropped` "never commits" | fenced proposals have an unknown outcome | they may already be on a quorum | #36 |
+| (unspecified) | step/slot overflow bounds, value-size bound, config invariants | review of untrusted inputs | #35 |
+| stateright model checking | delay-bounded explorer with liveness at the depth bound | plain interleaving search reached no seeded bug; stateright would need the same Clone/Hash surface plus 56 crates | #32, #41 |
+| stateright `LinearizabilityTester` | hand-written oracle for unique-write registers | exact for this model, no dependency | #30 |
+| Kani bounded proofs (optional) | not adopted | covered by fuzzing + proptests for the targeted pure functions | #41 |
+| `cargo-mutants --in-diff` per PR | weekly sharded run | keeps per-PR CI fast and stable | #41 |
+| C ABI `qpx_metrics`, `qpx_last_error(h, …)`, `qpx_config_init(cfg)` | `qpx_get_metrics` (C name clash), thread-local `qpx_last_error`, `qpx_config_init(cfg, size)`, strict draining, `QPX_IGNORED` | C naming; errors before a handle exists; layout growth | #33, #38 |
+| Tier 2 smoke tests | C ABI tests and the C smoke test run on Android emulator / iOS simulator | as specified, plus the Rust harness | #34, #39 |
+| `examples/kv-tokio` | adds snapshot transfer, group commit, bounded queues; trusted networks only | reference runtime scope | #40 |
