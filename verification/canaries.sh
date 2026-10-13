@@ -11,11 +11,22 @@ filter=${1:-}
 work=$(mktemp -d)
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$root/target/canaries}
 failed=0
+ran=0
+# Canaries run against the working tree's tracked files, so local edits are checked too.
+rev=$(git -C "$root" stash create); rev=${rev:-HEAD}
+for patch in "$root"/verification/canaries/*.patch; do
+  name=$(basename "$patch" .patch)
+  if ! cut -f1 "$root/verification/canaries.tsv" | grep -qx "$name"; then
+    echo "UNLISTED $name: add it to verification/canaries.tsv"
+    failed=1
+  fi
+done
 while IFS=$'\t' read -r name env cmd expect; do
   [[ -z "$name" || "$name" == \#* ]] && continue
   [[ -n "$filter" && "$name" != *"$filter"* ]] && continue
+  ran=$((ran + 1))
   tree="$work/$name"
-  git -C "$root" worktree add -q --detach "$tree" HEAD
+  git -C "$root" worktree add -q --detach "$tree" "$rev"
   if ! git -C "$tree" apply "$root/verification/canaries/$name.patch"; then
     echo "STALE   $name: patch no longer applies; refresh it"
     failed=1
@@ -35,4 +46,8 @@ while IFS=$'\t' read -r name env cmd expect; do
   git -C "$root" worktree remove --force "$tree"
 done < "$root/verification/canaries.tsv"
 rm -rf "$work"
+if [[ $ran -eq 0 ]]; then
+  echo "no canary matches '$filter'"
+  failed=1
+fi
 exit $failed
