@@ -32,7 +32,8 @@ jobs:
         with:
           tool: cargo-bolero
       - name: Fuzz for 20 minutes (libFuzzer + ASan)
-        run: cargo bolero test -p quepaxa '${{ matrix.target }}' -T 20min
+        # The prebuilt cargo-bolero defaults to its own (musl) target; ASan needs the gnu one.
+        run: cargo bolero test -p quepaxa '${{ matrix.target }}' --target x86_64-unknown-linux-gnu -T 20min
       - name: Keep the corpus and any crash
         if: always()
         uses: actions/upload-artifact@v4
