@@ -94,12 +94,54 @@ jobs:
       - uses: actions/checkout@v5
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  ffi:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cbindgen@0.29.4
+      - name: Header is up to date
+        run: |
+          cbindgen --config crates/quepaxa-ffi/cbindgen.toml --crate quepaxa-ffi --output crates/quepaxa-ffi/include/quepaxa.h
+          git diff --exit-code crates/quepaxa-ffi/include/quepaxa.h
+      - run: cargo build --release -p quepaxa-ffi
+      - name: Exported symbols are unchanged
+        run: |
+          nm -D --defined-only target/release/libquepaxa_ffi.so | awk '$2=="T"{print $3}' | grep '^qpx_' | sort > /tmp/symbols.txt
+          diff -u crates/quepaxa-ffi/symbols.txt /tmp/symbols.txt
+      - name: Header compiles as C and C++
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I crates/quepaxa-ffi/include -x c crates/quepaxa-ffi/include/quepaxa.h
+          c++ -std=c++17 -Wall -Wextra -Werror -fsyntax-only -I crates/quepaxa-ffi/include -x c++ crates/quepaxa-ffi/include/quepaxa.h
+      - name: C smoke test under ASan/UBSan
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -I crates/quepaxa-ffi/include \
+            crates/quepaxa-ffi/examples/smoke.c target/release/libquepaxa_ffi.a -lpthread -ldl -lm -o smoke
+          ./smoke
+
+  miri:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo miri test -p quepaxa-ffi
+
   ci-ok:
     if: always()
-    needs: [changes, lint, test, msrv, no-std, deny]
+    needs: [changes, lint, test, msrv, no-std, deny, ffi, miri]
     runs-on: ubuntu-24.04
     steps:
       - uses: re-actors/alls-green@release/v1
         with:
-          allowed-skips: lint, test, msrv, no-std, deny
+          allowed-skips: lint, test, msrv, no-std, deny, ffi, miri
           jobs: ${{ toJSON(needs) }}
