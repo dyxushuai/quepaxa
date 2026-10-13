@@ -16,8 +16,9 @@ pub(crate) struct ChaCha20 {
 impl ChaCha20 {
     pub fn new(seed: [u8; 32]) -> Self {
         let mut key = [0u32; 8];
-        for (k, c) in key.iter_mut().zip(seed.chunks_exact(4)) {
-            *k = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+        let (words, _) = seed.as_chunks::<4>();
+        for (k, c) in key.iter_mut().zip(words) {
+            *k = u32::from_le_bytes(*c);
         }
         Self {
             key,
