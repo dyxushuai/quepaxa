@@ -72,6 +72,12 @@ impl Disk {
             File::open(&path)?.read_to_end(&mut bytes)?;
         }
         let (records, valid) = read_frames(&bytes);
+        if valid < bytes.len() {
+            // Truncate through a writable handle: append-only handles cannot (Windows).
+            let f = OpenOptions::new().write(true).open(&path)?;
+            f.set_len(valid as u64)?;
+            f.sync_all()?;
+        }
         let log = OpenOptions::new().create(true).append(true).open(&path)?;
         if !existed {
             // The new log's directory entry must survive a crash before anything is acknowledged.
@@ -80,10 +86,6 @@ impl Disk {
             if let Some(parent) = dir.parent() {
                 sync_dir(parent)?;
             }
-        }
-        if valid < bytes.len() {
-            log.set_len(valid as u64)?;
-            log.sync_all()?;
         }
         Ok((Self { dir: dir.to_path_buf(), log }, records))
     }
@@ -182,6 +184,7 @@ mod tests {
         drop(disk);
         let mut f = OpenOptions::new().append(true).open(dir.join("records.log")).unwrap();
         f.write_all(&[9, 0, 0, 0, 1]).unwrap(); // a frame cut short by a crash
+        drop(f);
         let (_, records) = Disk::open(&dir).unwrap();
         assert_eq!(records, vec![Bytes::from_static(b"a"), Bytes::from_static(b"bc")]);
         let (_, again) = Disk::open(&dir).unwrap();
