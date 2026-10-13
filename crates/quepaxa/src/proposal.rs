@@ -80,4 +80,24 @@ pub(crate) mod tests {
     fn nil_is_below_every_proposal() {
         assert!(None < Some(prop(0, 0, 0)));
     }
+
+    fn arb_prop() -> impl proptest::strategy::Strategy<Value = Proposal> {
+        use proptest::strategy::Strategy;
+        (0u64..4, 0u32..3, 0u64..3).prop_map(|(p, o, q)| prop(p, o, q))
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn distinct_keys_never_compare_equal(a in arb_prop(), b in arb_prop()) {
+            proptest::prop_assert_eq!(a == b, a.priority == b.priority && a.key == b.key);
+        }
+
+        #[test]
+        fn order_is_total_and_transitive(a in arb_prop(), b in arb_prop(), c in arb_prop()) {
+            proptest::prop_assert_eq!(a.cmp(&b), b.cmp(&a).reverse());
+            if a <= b && b <= c {
+                proptest::prop_assert!(a <= c);
+            }
+        }
+    }
 }
