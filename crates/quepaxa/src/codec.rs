@@ -16,6 +16,8 @@ pub(crate) const WIRE_VERSION: u8 = 1;
 const KIND_RECORD_REQUEST: u8 = 1;
 const KIND_RECORD_REPLY: u8 = 2;
 const KIND_DECIDED: u8 = 3;
+const KIND_CATCH_UP: u8 = 4;
+const KIND_ENTRIES: u8 = 5;
 
 const VALUE_INLINE: u8 = 0;
 
@@ -75,6 +77,13 @@ pub(crate) enum Body {
     },
     /// A slot's decided value, broadcast by the decider or sent instead of a record reply.
     Decided { slot: Slot, proposal: Proposal },
+    /// Asks a peer for decided slots starting at `from`.
+    CatchUp { from: Slot },
+    /// Contiguous decided slots starting at `first`.
+    Entries {
+        first: Slot,
+        proposals: Vec<Proposal>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,6 +133,8 @@ impl Message {
             Body::RecordRequest { .. } => KIND_RECORD_REQUEST,
             Body::RecordReply { .. } => KIND_RECORD_REPLY,
             Body::Decided { .. } => KIND_DECIDED,
+            Body::CatchUp { .. } => KIND_CATCH_UP,
+            Body::Entries { .. } => KIND_ENTRIES,
         });
         let e = &self.env;
         out.put_slice(&e.cluster_id);
@@ -159,6 +170,14 @@ impl Message {
                 out.put_u64_le(slot.0);
                 put_proposal(&mut out, proposal);
             }
+            Body::CatchUp { from } => out.put_u64_le(from.0),
+            Body::Entries { first, proposals } => {
+                out.put_u64_le(first.0);
+                out.put_u32_le(proposals.len() as u32);
+                for p in proposals {
+                    put_proposal(&mut out, p);
+                }
+            }
         }
         Bytes::from(out)
     }
@@ -176,6 +195,8 @@ impl Message {
             Body::RecordReply {
                 first, prev_agg, ..
             } => len(first) + len(prev_agg),
+            Body::CatchUp { .. } => 0,
+            Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len() + 33).sum(),
         }
     }
 
@@ -228,6 +249,19 @@ impl Message {
                 slot: Slot(r.u64()?),
                 proposal: r.proposal()?,
             },
+            KIND_CATCH_UP => Body::CatchUp {
+                from: Slot(r.u64()?),
+            },
+            KIND_ENTRIES => {
+                let first = Slot(r.u64()?);
+                let n = r.u32()? as usize;
+                // Each proposal takes at least 33 bytes, bounding the allocation by input size.
+                let mut proposals = Vec::with_capacity(n.min(buf.len() / 33));
+                for _ in 0..n {
+                    proposals.push(r.proposal()?);
+                }
+                Body::Entries { first, proposals }
+            }
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -602,6 +636,16 @@ mod tests {
         fn reply_round_trips(slot: u64, rs: u32, s: u32, f in arb_wire(), a in arb_wire()) {
             let m = Message { env: env(), body: Body::RecordReply { slot: Slot(slot), req_step: rs, step: s, first: f, prev_agg: a } };
             proptest::prop_assert_eq!(Message::decode(&m.encode(), &CTX).unwrap(), m);
+        }
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn catch_up_kinds_round_trip(from: u64, ps in proptest::collection::vec(arb_prop(), 0..4)) {
+            for body in [Body::CatchUp { from: Slot(from) }, Body::Entries { first: Slot(from), proposals: ps.clone() }] {
+                let m = Message { env: env(), body };
+                proptest::prop_assert_eq!(Message::decode(&m.encode(), &CTX).unwrap(), m);
+            }
         }
     }
 

@@ -248,7 +248,7 @@ impl Sim {
                     }
                 }
             }
-            Body::Decided { .. } => unreachable!("the single-slot sim never sends decisions"),
+            _ => unreachable!("the single-slot sim only sends record messages"),
         }
     }
 
