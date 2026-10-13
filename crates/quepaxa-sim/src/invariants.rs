@@ -8,6 +8,9 @@
 //!   proposal as the first value of step 4, the slot can only decide that value.
 //! - **G5 unique H**: at most one distinct value ever carries the leader priority per slot.
 //!
+//! [`Ledger`] checks what clients see: agreement and validity of committed entries, each
+//! payload committed at most once, and `Committed` only for the exact proposal in the log.
+//!
 //! Registers move on and are discarded after a durable decision, so the evidence behind
 //! G1, G4 and G5 is accumulated in a [`History`] rather than re-derived from the current
 //! state alone. Evidence remembers which replicas showed it: a crash discards what only the
@@ -16,7 +19,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use bytes::Bytes;
 use quepaxa::inspect::{Inspection, ProposalView};
+use quepaxa::{Entry, NodeId, ProposalId};
 
 type Value = (u32, u64, u64, u64);
 
@@ -120,6 +125,86 @@ impl History {
             }
         }
         Ok(())
+    }
+}
+
+/// The agreed log as clients observe it, built from every replica's commits.
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+pub struct Ledger {
+    proposed: BTreeSet<Bytes>,
+    log: BTreeMap<u64, Vec<Entry>>,
+    committed_at: BTreeMap<Bytes, u64>,
+}
+
+impl Ledger {
+    /// A client proposed `payload`; payloads must be unique per execution.
+    pub fn proposed(&mut self, payload: Bytes) {
+        self.proposed.insert(payload);
+    }
+
+    /// A replica committed `entries` in `slot`; returns whether the slot is new to the log.
+    pub fn commit(&mut self, slot: u64, entries: &[Entry]) -> Result<bool, String> {
+        if let Some(agreed) = self.log.get(&slot) {
+            return if agreed == entries {
+                Ok(false)
+            } else {
+                Err(format!("agreement broken at slot {slot}: {agreed:?} vs {entries:?}"))
+            };
+        }
+        for e in entries {
+            if !self.proposed.contains(&e.payload) {
+                return Err(format!("validity: {:?} was never proposed", e.payload));
+            }
+            if let Some(at) = self.committed_at.insert(e.payload.clone(), slot) {
+                return Err(format!("{:?} committed twice, in slots {at} and {slot}", e.payload));
+            }
+        }
+        self.log.insert(slot, entries.to_vec());
+        Ok(true)
+    }
+
+    /// `origin` reported its proposal `id` with `payload` as committed in `slot`, which is
+    /// exact unless an installed snapshot resolved it (then the proposal is at or before it).
+    pub fn acknowledged(
+        &self,
+        origin: NodeId,
+        id: ProposalId,
+        payload: &Bytes,
+        slot: u64,
+    ) -> Result<(), String> {
+        let exact = |e: &Entry| e.origin == origin && e.id == id && e.payload == *payload;
+        if self.log.range(..=slot).any(|(_, es)| es.iter().any(exact)) {
+            return Ok(());
+        }
+        let at: Vec<_> = self
+            .log
+            .iter()
+            .filter(|(_, es)| es.iter().any(|e| e.payload == *payload))
+            .map(|(s, _)| s)
+            .collect();
+        Err(format!(
+            "{origin:?} reported Committed {id:?} at slot {slot} but it is not logged by then (payload {payload:?} logged at {at:?})"
+        ))
+    }
+
+    /// Whether `payload` was committed in some slot.
+    pub fn is_committed(&self, payload: &Bytes) -> bool {
+        self.committed_at.contains_key(payload)
+    }
+
+    /// Slots decided so far.
+    pub fn slots(&self) -> usize {
+        self.log.len()
+    }
+
+    /// Entries committed so far.
+    pub fn entries(&self) -> usize {
+        self.committed_at.len()
+    }
+
+    /// Payloads proposed so far.
+    pub fn proposals(&self) -> usize {
+        self.proposed.len()
     }
 }
 

@@ -11,7 +11,7 @@ mod kv;
 pub mod model;
 mod rng;
 
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeSet, BinaryHeap, HashMap};
 use std::fmt::Write as _;
 
 use bytes::Bytes;
@@ -181,9 +181,7 @@ pub struct Sim {
     cut: BTreeSet<usize>,
     faults_on: bool,
     /// The agreed log, as first committed by any replica.
-    log: BTreeMap<u64, Vec<Entry>>,
-    proposed: BTreeSet<Bytes>,
-    committed_payloads: BTreeSet<Bytes>,
+    ledger: invariants::Ledger,
     report: Report,
     trace: String,
     last_new_slot_at: u64,
@@ -225,9 +223,7 @@ impl Sim {
             nodes,
             cut: BTreeSet::new(),
             faults_on: true,
-            log: BTreeMap::new(),
-            proposed: BTreeSet::new(),
-            committed_payloads: BTreeSet::new(),
+            ledger: invariants::Ledger::default(),
             report: Report::default(),
             trace: String::new(),
             last_new_slot_at: 0,
@@ -266,9 +262,9 @@ impl Sim {
             }
             self.dispatch(ev)?;
             if !self.faults_on && self.converged() {
-                self.report.slots = self.log.len() as u64;
-                self.report.entries = self.committed_payloads.len();
-                self.report.proposals = self.proposed.len();
+                self.report.slots = self.ledger.slots() as u64;
+                self.report.entries = self.ledger.entries();
+                self.report.proposals = self.ledger.proposals();
                 self.report.trace_hash = fnv(self.trace.as_bytes());
                 let lines: Vec<&str> = self.trace.lines().collect();
                 self.report.trace_tail = lines[lines.len().saturating_sub(400)..].join("\n");
@@ -306,7 +302,7 @@ impl Sim {
         format!(
             "seed {}: {what} (agreed log {} slots)\n{}\n…\n{}",
             self.cfg.seed,
-            self.log.len(),
+            self.ledger.slots(),
             nodes.join("\n"),
             tail.into_iter().rev().collect::<Vec<_>>().join("\n")
         )
@@ -333,7 +329,7 @@ impl Sim {
     }
 
     fn converged(&self) -> bool {
-        let target = self.log.len() as u64;
+        let target = self.ledger.slots() as u64;
         self.queue.iter().all(|std::cmp::Reverse((_, _, e))| !matches!(e, Event::Restart { .. }))
             && self.nodes.iter().all(|n| {
                 n.replica.as_ref().is_some_and(|r| r.commit_index() == target)
@@ -517,14 +513,14 @@ impl Sim {
     }
 
     fn propose(&mut self, i: usize) -> Result<(), String> {
-        let n = self.proposed.len();
+        let n = self.ledger.proposals();
         let payload = kv::write_payload(n as u64 % kv::KEYS, &format!("n{i}-p{n}"));
         let Some(r) = self.nodes[i].replica.as_mut() else {
             return Ok(());
         };
         match r.propose(Timestamp(self.now), payload.clone()) {
             Ok(id) => {
-                self.proposed.insert(payload.clone());
+                self.ledger.proposed(payload.clone());
                 self.kv.write_invoked(payload.clone());
                 self.nodes[i].outstanding.insert(id, payload.clone());
                 self.nodes[i].incarnation_payloads.insert(id, payload);
@@ -569,9 +565,14 @@ impl Sim {
     fn install_snapshots(&mut self) {
         while let Some((i, peer, through)) = self.pending_installs.pop() {
             let Some(snap) = self.nodes[peer].snapshot.clone() else { continue };
-            if snap.through < through
-                || self.nodes[i].next_commit > snap.through
-                || self.nodes[i].replica.is_none()
+            if snap.through < through {
+                continue;
+            }
+            let Some(r) = self.nodes[i].replica.as_mut() else { continue };
+            // The application adopts the snapshot only if the replica does (never rewinds).
+            if !r
+                .install_snapshot(Timestamp(self.now), Slot(snap.through), snap.core.clone())
+                .expect("valid snapshot")
             {
                 continue;
             }
@@ -580,8 +581,6 @@ impl Sim {
             self.nodes[i].snapshot = Some(snap.clone());
             self.report.snapshots_installed += 1;
             let _ = writeln!(self.trace, "{} n{i} install snapshot through {}", self.now, snap.through);
-            let r = self.nodes[i].replica.as_mut().expect("checked above");
-            r.install_snapshot(Timestamp(self.now), Slot(snap.through), snap.core).expect("valid snapshot");
             self.drain(i);
         }
     }
@@ -656,12 +655,11 @@ impl Sim {
                 if let Some(p) = &payload {
                     self.kv.write_completed(p);
                 }
-                let in_log = payload.is_some_and(|p| self.kv.slot_of(&p).is_some_and(|at| at <= slot.0));
-                assert!(
-                    in_log,
-                    "{}",
-                    self.fail(&format!("n{i} Committed {id:?} in {slot:?} but not in the log"))
-                );
+                let logged =
+                    self.ledger.acknowledged(NodeId(i as u32), id, &payload.unwrap_or_default(), slot.0);
+                if let Err(e) = logged {
+                    panic!("{}", self.fail(&e));
+                }
             }
             Action::Dropped { id, .. } => {
                 self.nodes[i].outstanding.remove(&id);
@@ -684,21 +682,11 @@ impl Sim {
             self.kv.apply(i, &payloads);
         }
         let _ = writeln!(self.trace, "{} n{i} commit {} ({} entries)", self.now, slot.0, entries.len());
-        match self.log.get(&slot.0) {
-            Some(agreed) => {
-                assert_eq!(agreed, &entries, "{}", self.fail(&format!("agreement broken at slot {}", slot.0)))
-            }
-            None => {
-                for e in &entries {
-                    assert!(self.proposed.contains(&e.payload), "{}", self.fail("validity: unknown payload"));
-                    assert!(
-                        self.committed_payloads.insert(e.payload.clone()),
-                        "{}",
-                        self.fail(&format!("payload {:?} committed twice", e.payload))
-                    );
-                }
+        match self.ledger.commit(slot.0, &entries) {
+            Err(e) => panic!("{}", self.fail(&e)),
+            Ok(false) => {}
+            Ok(true) => {
                 self.kv.first_commit(slot.0, &payloads);
-                self.log.insert(slot.0, entries);
                 if self.faults_on && self.cfg.kill.is_some_and(|(_, at)| self.now >= at * MS) {
                     self.report.slots_after_kill += 1;
                 }
