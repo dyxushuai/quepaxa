@@ -1,0 +1,359 @@
+
+*** baseline
+
+*** /home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo nextest run --no-run --verbose --package=quepaxa@0.2.0
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling libc v0.2.190
+   Compiling cfg-if v1.0.5
+   Compiling zerocopy v0.8.62
+   Compiling getrandom v0.3.4
+   Compiling hashbrown v0.17.1
+   Compiling serde_core v1.0.229
+   Compiling rand_core v0.10.1
+   Compiling equivalent v1.0.2
+   Compiling either v1.19.0
+   Compiling getrandom v0.4.3
+   Compiling winnow v0.5.40
+   Compiling toml_datetime v0.6.3
+   Compiling find-msvc-tools v0.1.14
+   Compiling autocfg v1.5.1
+   Compiling shlex v2.0.1
+   Compiling zmij v1.0.23
+   Compiling serde v1.0.229
+   Compiling rustix v1.1.5
+   Compiling cc v1.8.0
+   Compiling regex-syntax v0.8.11
+   Compiling serde_json v1.0.154
+   Compiling bitflags v2.13.2
+   Compiling anyhow v1.0.104
+   Compiling linux-raw-sys v0.12.1
+   Compiling itoa v1.0.18
+   Compiling anstyle v1.0.14
+   Compiling num-traits v0.2.19
+   Compiling fastrand v2.5.0
+   Compiling clap_lex v1.1.1
+   Compiling memchr v2.8.3
+   Compiling once_cell v1.21.4
+   Compiling ciborium-io v0.2.2
+   Compiling clap_builder v4.6.7
+   Compiling itertools v0.13.0
+   Compiling indexmap v2.14.2
+   Compiling cpufeatures v0.3.1
+   Compiling quick-error v1.2.3
+   Compiling same-file v1.0.6
+   Compiling bit-vec v0.10.1
+   Compiling lazy_static v1.5.1
+   Compiling pretty-hex v0.4.2
+   Compiling cast v0.3.0
+   Compiling fnv v1.0.7
+   Compiling syn v2.0.119
+   Compiling syn v3.0.9
+   Compiling bit-set v0.11.1
+   Compiling walkdir v2.5.0
+   Compiling chacha20 v0.10.2
+   Compiling rand_xorshift v0.5.0
+   Compiling core_detect v1.0.0
+   Compiling anes v0.1.6
+   Compiling wait-timeout v0.2.1
+   Compiling page_size v0.6.0
+   Compiling unarray v0.1.4
+   Compiling bytes v1.12.1
+   Compiling oorandom v11.1.5
+   Compiling rand v0.10.3
+   Compiling rand_core v0.9.5
+   Compiling toml_edit v0.20.2
+   Compiling rand_xoshiro v0.7.0
+   Compiling alloca v0.4.0
+   Compiling tempfile v3.27.0
+   Compiling criterion-plot v0.8.2
+   Compiling quepaxa v0.2.0 (/tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/crates/quepaxa)
+   Compiling regex-automata v0.4.18
+   Compiling rusty-fork v0.3.1
+   Compiling proptest v1.12.0
+   Compiling clap v4.6.7
+   Compiling serde_derive v1.0.229
+   Compiling proc-macro-crate v2.0.2
+   Compiling zerocopy-derive v0.8.62
+   Compiling regex v1.13.1
+   Compiling bolero-generator-derive v0.13.4
+   Compiling bolero-generator v0.13.5
+   Compiling tinytemplate v1.2.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling rand_chacha v0.9.0
+   Compiling ciborium v0.2.2
+   Compiling rand v0.9.5
+   Compiling criterion v0.8.2
+   Compiling bolero-engine v0.13.4
+   Compiling bolero v0.13.4
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.72s
+
+*** result: Success
+
+*** /home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo nextest run --verbose --package=quepaxa@0.2.0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+────────────
+ Nextest run ID 0313b3b6-e0fd-4260-b399-90cfc6942d93 with nextest profile: default
+    Starting 85 tests across 2 binaries
+       START [         ] ( 1/85) quepaxa batch::tests::huge_entry_count_does_not_preallocate
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact batch::tests::huge_entry_count_does_not_preallocate --nocapture
+       START [         ] ( 1/85) quepaxa batch::tests::batch_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact batch::tests::batch_round_trips --nocapture
+       START [         ] ( 1/85) quepaxa batch::tests::decode_never_panics
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact batch::tests::decode_never_panics --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::decode_never_panics_on_arbitrary_input
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::decode_never_panics_on_arbitrary_input --nocapture
+       START [         ] ( 1/85) quepaxa batch::tests::empty_batch_is_four_zero_bytes
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact batch::tests::empty_batch_is_four_zero_bytes --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::catch_up_kinds_round_trip
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::catch_up_kinds_round_trip --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::decode_shares_the_input_buffer
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::decode_shares_the_input_buffer --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::decode_never_panics_on_mutated_valid_messages
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::decode_never_panics_on_mutated_valid_messages --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::foreign_cluster_epoch_and_version_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::foreign_cluster_epoch_and_version_are_rejected --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::elided_value_resolves_only_against_the_same_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::elided_value_resolves_only_against_the_same_key --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::other_proposals_keep_their_value_in_replies
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::other_proposals_keep_their_value_in_replies --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::message_above_limit_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::message_above_limit_is_rejected --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::record_reply_matches_golden_bytes_v1
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::record_reply_matches_golden_bytes_v1 --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::oversized_length_prefix_is_rejected_without_allocating
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::oversized_length_prefix_is_rejected_without_allocating --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::reply_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::reply_round_trips --nocapture
+       START [         ] ( 1/85) quepaxa codec::tests::record_request_matches_golden_bytes_v1
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::record_request_matches_golden_bytes_v1 --nocapture
+        PASS [   0.004s] ( 1/85) quepaxa codec::tests::elided_value_resolves_only_against_the_same_key
+       START [         ] ( 2/85) quepaxa codec::tests::request_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::request_round_trips --nocapture
+        PASS [   0.004s] ( 2/85) quepaxa batch::tests::batch_round_trips
+       START [         ] ( 3/85) quepaxa codec::tests::trailing_bytes_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::trailing_bytes_are_rejected --nocapture
+        PASS [   0.004s] ( 3/85) quepaxa codec::tests::oversized_length_prefix_is_rejected_without_allocating
+       START [         ] ( 4/85) quepaxa codec::tests::value_above_the_batch_limit_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact codec::tests::value_above_the_batch_limit_is_rejected --nocapture
+        PASS [   0.004s] ( 4/85) quepaxa codec::tests::record_request_matches_golden_bytes_v1
+       START [         ] ( 5/85) quepaxa core_state::tests::decode_never_panics
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact core_state::tests::decode_never_panics --nocapture
+        PASS [   0.004s] ( 5/85) quepaxa batch::tests::huge_entry_count_does_not_preallocate
+       START [         ] ( 6/85) quepaxa core_state::tests::rejects_a_schedule_naming_strangers
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact core_state::tests::rejects_a_schedule_naming_strangers --nocapture
+        PASS [   0.004s] ( 6/85) quepaxa codec::tests::message_above_limit_is_rejected
+       START [         ] ( 7/85) quepaxa core_state::tests::round_trips_after_rotations_and_dedup_activity
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact core_state::tests::round_trips_after_rotations_and_dedup_activity --nocapture
+        PASS [   0.004s] ( 7/85) quepaxa codec::tests::trailing_bytes_are_rejected
+       START [         ] ( 8/85) quepaxa crc::tests::matches_rfc3720_zero_vector
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact crc::tests::matches_rfc3720_zero_vector --nocapture
+        PASS [   0.003s] ( 8/85) quepaxa core_state::tests::round_trips_after_rotations_and_dedup_activity
+       START [         ] ( 9/85) quepaxa crc::tests::matches_standard_check_value
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact crc::tests::matches_standard_check_value --nocapture
+        PASS [   0.004s] ( 9/85) quepaxa codec::tests::value_above_the_batch_limit_is_rejected
+       START [         ] (10/85) quepaxa dedup::tests::contiguous_ids_compact_into_the_watermark
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact dedup::tests::contiguous_ids_compact_into_the_watermark --nocapture
+        PASS [   0.004s] (10/85) quepaxa core_state::tests::rejects_a_schedule_naming_strangers
+       START [         ] (11/85) quepaxa dedup::tests::entries_from_forgotten_incarnations_count_as_seen
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact dedup::tests::entries_from_forgotten_incarnations_count_as_seen --nocapture
+        PASS [   0.004s] (11/85) quepaxa dedup::tests::entries_from_forgotten_incarnations_count_as_seen
+       START [         ] (12/85) quepaxa dedup::tests::incarnations_and_origins_are_independent
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact dedup::tests::incarnations_and_origins_are_independent --nocapture
+        PASS [   0.004s] (12/85) quepaxa crc::tests::matches_standard_check_value
+       START [         ] (13/85) quepaxa dedup::tests::second_occurrence_is_filtered_in_any_order
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact dedup::tests::second_occurrence_is_filtered_in_any_order --nocapture
+        PASS [   0.004s] (13/85) quepaxa crc::tests::matches_rfc3720_zero_vector
+       START [         ] (14/85) quepaxa durable::tests::any_flipped_bit_is_detected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact durable::tests::any_flipped_bit_is_detected --nocapture
+        PASS [   0.013s] (14/85) quepaxa codec::tests::decode_shares_the_input_buffer
+       START [         ] (15/85) quepaxa durable::tests::decode_never_panics
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact durable::tests::decode_never_panics --nocapture
+        PASS [   0.013s] (15/85) quepaxa codec::tests::record_reply_matches_golden_bytes_v1
+       START [         ] (16/85) quepaxa durable::tests::every_kind_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact durable::tests::every_kind_round_trips --nocapture
+        PASS [   0.013s] (16/85) quepaxa codec::tests::other_proposals_keep_their_value_in_replies
+       START [         ] (17/85) quepaxa durable::tests::incarnation_matches_golden_bytes_v1
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact durable::tests::incarnation_matches_golden_bytes_v1 --nocapture
+        PASS [   0.006s] (17/85) quepaxa dedup::tests::contiguous_ids_compact_into_the_watermark
+       START [         ] (18/85) quepaxa durable::tests::torn_record_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact durable::tests::torn_record_is_rejected --nocapture
+        PASS [   0.014s] (18/85) quepaxa batch::tests::empty_batch_is_four_zero_bytes
+       START [         ] (19/85) quepaxa proposal::tests::distinct_keys_never_compare_equal
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposal::tests::distinct_keys_never_compare_equal --nocapture
+        PASS [   0.006s] (19/85) quepaxa codec::tests::foreign_cluster_epoch_and_version_are_rejected
+       START [         ] (20/85) quepaxa proposal::tests::equal_priority_breaks_ties_by_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposal::tests::equal_priority_breaks_ties_by_key --nocapture
+        PASS [   0.012s] (20/85) quepaxa codec::tests::request_round_trips
+       START [         ] (21/85) quepaxa proposal::tests::higher_priority_wins_regardless_of_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposal::tests::higher_priority_wins_regardless_of_key --nocapture
+        PASS [   0.016s] (21/85) quepaxa codec::tests::reply_round_trips
+       START [         ] (22/85) quepaxa proposal::tests::leader_priority_beats_every_random_priority
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposal::tests::leader_priority_beats_every_random_priority --nocapture
+        PASS [   0.004s] (22/85) quepaxa durable::tests::torn_record_is_rejected
+       START [         ] (23/85) quepaxa proposal::tests::nil_is_below_every_proposal
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposal::tests::nil_is_below_every_proposal --nocapture
+        PASS [   0.018s] (23/85) quepaxa codec::tests::catch_up_kinds_round_trip
+       START [         ] (24/85) quepaxa proposal::tests::order_is_total_and_transitive
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposal::tests::order_is_total_and_transitive --nocapture
+        PASS [   0.005s] (24/85) quepaxa durable::tests::every_kind_round_trips
+       START [         ] (25/85) quepaxa proposer::tests::leader_alone_decides_on_fast_path_at_first_step
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposer::tests::leader_alone_decides_on_fast_path_at_first_step --nocapture
+        PASS [   0.004s] (25/85) quepaxa proposal::tests::equal_priority_breaks_ties_by_key
+       START [         ] (26/85) quepaxa proposer::tests::leader_catching_up_at_the_first_step_keeps_the_adopted_priority
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposer::tests::leader_catching_up_at_the_first_step_keeps_the_adopted_priority --nocapture
+        PASS [   0.007s] (26/85) quepaxa dedup::tests::incarnations_and_origins_are_independent
+       START [         ] (27/85) quepaxa proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two --nocapture
+        PASS [   0.004s] (27/85) quepaxa proposal::tests::higher_priority_wins_regardless_of_key
+       START [         ] (28/85) quepaxa proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder --nocapture
+        PASS [   0.009s] (28/85) quepaxa dedup::tests::second_occurrence_is_filtered_in_any_order
+       START [         ] (29/85) quepaxa proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three --nocapture
+        PASS [   0.009s] (29/85) quepaxa durable::tests::any_flipped_bit_is_detected
+       START [         ] (30/85) quepaxa proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum --nocapture
+        PASS [   0.004s] (30/85) quepaxa proposer::tests::leader_alone_decides_on_fast_path_at_first_step
+        PASS [   0.007s] (31/85) quepaxa proposal::tests::leader_priority_beats_every_random_priority
+       START [         ] (32/85) quepaxa proposer::tests::replies_to_older_requests_are_ignored
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposer::tests::replies_to_older_requests_are_ignored --nocapture
+       START [         ] (32/85) quepaxa proposer::tests::racing_proposers_agree
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposer::tests::racing_proposers_agree --nocapture
+        PASS [   0.006s] (32/85) quepaxa proposal::tests::nil_is_below_every_proposal
+       START [         ] (33/85) quepaxa proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up --nocapture
+        PASS [   0.004s] (33/85) quepaxa proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two
+       START [         ] (34/85) quepaxa recorder::tests::first_record_sets_step_and_first_value_with_nil_prior
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact recorder::tests::first_record_sets_step_and_first_value_with_nil_prior --nocapture
+        PASS [   0.009s] (34/85) quepaxa proposal::tests::distinct_keys_never_compare_equal
+       START [         ] (35/85) quepaxa recorder::tests::next_step_moves_aggregate_to_prior
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact recorder::tests::next_step_moves_aggregate_to_prior --nocapture
+        PASS [   0.004s] (35/85) quepaxa proposer::tests::leader_catching_up_at_the_first_step_keeps_the_adopted_priority
+       START [         ] (36/85) quepaxa recorder::tests::register_upholds_recorder_invariants
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact recorder::tests::register_upholds_recorder_invariants --nocapture
+        PASS [   0.011s] (36/85) quepaxa durable::tests::incarnation_matches_golden_bytes_v1
+       START [         ] (37/85) quepaxa recorder::tests::same_step_higher_value_raises_aggregate_but_keeps_first
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact recorder::tests::same_step_higher_value_raises_aggregate_but_keeps_first --nocapture
+        PASS [   0.005s] (37/85) quepaxa proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder
+       START [         ] (38/85) quepaxa recorder::tests::same_step_lower_or_equal_value_changes_nothing
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact recorder::tests::same_step_lower_or_equal_value_changes_nothing --nocapture
+        PASS [   0.004s] (38/85) quepaxa proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three
+       START [         ] (39/85) quepaxa recorder::tests::skipping_a_step_clears_prior_aggregate
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact recorder::tests::skipping_a_step_clears_prior_aggregate --nocapture
+        PASS [   0.004s] (39/85) quepaxa proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum
+       START [         ] (40/85) quepaxa recorder::tests::stale_step_is_discarded_and_reports_current_state
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact recorder::tests::stale_step_is_discarded_and_reports_current_state --nocapture
+        PASS [   0.004s] (40/85) quepaxa proposer::tests::replies_to_older_requests_are_ignored
+       START [         ] (41/85) quepaxa replica::tests::arbitrary_member_messages_are_handled
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact replica::tests::arbitrary_member_messages_are_handled --nocapture
+        PASS [   0.004s] (41/85) quepaxa recorder::tests::next_step_moves_aggregate_to_prior
+       START [         ] (42/85) quepaxa replica::tests::core_state_schedule_covers_only_emitted_slots
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact replica::tests::core_state_schedule_covers_only_emitted_slots --nocapture
+        PASS [   0.010s] (42/85) quepaxa proposal::tests::order_is_total_and_transitive
+       START [         ] (43/85) quepaxa replica::tests::lost_catch_up_request_is_retried_on_the_timer
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact replica::tests::lost_catch_up_request_is_retried_on_the_timer --nocapture
+        PASS [   0.004s] (43/85) quepaxa recorder::tests::same_step_lower_or_equal_value_changes_nothing
+       START [         ] (44/85) quepaxa rng::tests::block_matches_rfc8439_test_vector
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact rng::tests::block_matches_rfc8439_test_vector --nocapture
+        PASS [   0.006s] (44/85) quepaxa recorder::tests::first_record_sets_step_and_first_value_with_nil_prior
+       START [         ] (45/85) quepaxa rng::tests::different_seeds_give_different_priorities
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact rng::tests::different_seeds_give_different_priorities --nocapture
+        PASS [   0.004s] (45/85) quepaxa recorder::tests::stale_step_is_discarded_and_reports_current_state
+       START [         ] (46/85) quepaxa rng::tests::priorities_cross_block_boundaries_without_repeating
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact rng::tests::priorities_cross_block_boundaries_without_repeating --nocapture
+        PASS [   0.006s] (46/85) quepaxa recorder::tests::same_step_higher_value_raises_aggregate_but_keeps_first
+       START [         ] (47/85) quepaxa rng::tests::priority_is_never_nil_or_leader
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact rng::tests::priority_is_never_nil_or_leader --nocapture
+        PASS [   0.004s] (47/85) quepaxa replica::tests::lost_catch_up_request_is_retried_on_the_timer
+        PASS [   0.006s] (48/85) quepaxa replica::tests::core_state_schedule_covers_only_emitted_slots
+       START [         ] (49/85) quepaxa rng::tests::same_seed_gives_same_priorities
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact rng::tests::same_seed_gives_same_priorities --nocapture
+       START [         ] (49/85) quepaxa rng::tests::stream_starts_at_counter_zero
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact rng::tests::stream_starts_at_counter_zero --nocapture
+        PASS [   0.004s] (49/85) quepaxa rng::tests::different_seeds_give_different_priorities
+       START [         ] (50/85) quepaxa schedule::tests::a_slot_led_by_its_leader_resets_the_streak
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact schedule::tests::a_slot_led_by_its_leader_resets_the_streak --nocapture
+        PASS [   0.004s] (50/85) quepaxa rng::tests::block_matches_rfc8439_test_vector
+       START [         ] (51/85) quepaxa schedule::tests::eight_missed_slots_rotate_the_leader_after_the_lag
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact schedule::tests::eight_missed_slots_rotate_the_leader_after_the_lag --nocapture
+        PASS [   0.011s] (51/85) quepaxa proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up
+       START [         ] (52/85) quepaxa schedule::tests::initial_leader_is_the_smallest_member
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact schedule::tests::initial_leader_is_the_smallest_member --nocapture
+        PASS [   0.006s] (52/85) quepaxa rng::tests::priorities_cross_block_boundaries_without_repeating
+       START [         ] (53/85) quepaxa schedule::tests::misses_before_a_rotation_takes_effect_do_not_rotate_again
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact schedule::tests::misses_before_a_rotation_takes_effect_do_not_rotate_again --nocapture
+        PASS [   0.011s] (53/85) quepaxa recorder::tests::skipping_a_step_clears_prior_aggregate
+       START [         ] (54/85) quepaxa schedule::tests::same_log_same_leaders
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact schedule::tests::same_log_same_leaders --nocapture
+        PASS [   0.004s] (54/85) quepaxa schedule::tests::eight_missed_slots_rotate_the_leader_after_the_lag
+       START [         ] (55/85) quepaxa slot_sim::tests::fault_free_leader_decides_its_value_on_the_fast_path
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact slot_sim::tests::fault_free_leader_decides_its_value_on_the_fast_path --nocapture
+        PASS [   0.004s] (55/85) quepaxa schedule::tests::a_slot_led_by_its_leader_resets_the_streak
+       START [         ] (56/85) quepaxa slot_sim::tests::same_seed_reproduces_the_same_trace
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact slot_sim::tests::same_seed_reproduces_the_same_trace --nocapture
+        PASS [   0.005s] (56/85) quepaxa rng::tests::stream_starts_at_counter_zero
+       START [         ] (57/85) quepaxa slot_sim::tests::single_slot_is_safe_and_live_across_1000_seeds
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/3508db7b0fc3c338/out/quepaxa-3508db7b0fc3c338 --exact slot_sim::tests::single_slot_is_safe_and_live_across_1000_seeds --nocapture
+        PASS [   0.006s] (57/85) quepaxa rng::tests::same_seed_gives_same_priorities
+       START [         ] (58/85) quepaxa::replica_api backpressure_and_size_limits_are_enforced
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact backpressure_and_size_limits_are_enforced --nocapture
+        PASS [   0.004s] (58/85) quepaxa slot_sim::tests::fault_free_leader_decides_its_value_on_the_fast_path
+       START [         ] (59/85) quepaxa::replica_api calling_again_before_draining_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact calling_again_before_draining_is_rejected --nocapture
+        PASS [   0.012s] (59/85) quepaxa rng::tests::priority_is_never_nil_or_leader
+       START [         ] (60/85) quepaxa::replica_api configs_that_would_misbehave_at_runtime_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact configs_that_would_misbehave_at_runtime_are_rejected --nocapture
+        PASS [   0.019s] (60/85) quepaxa recorder::tests::register_upholds_recorder_invariants
+       START [         ] (61/85) quepaxa::replica_api corrupt_durable_record_is_an_error_not_skipped
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact corrupt_durable_record_is_an_error_not_skipped --nocapture
+        PASS [   0.005s] (61/85) quepaxa::replica_api backpressure_and_size_limits_are_enforced
+       START [         ] (62/85) quepaxa::replica_api fresh_replica_first_persists_its_incarnation
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact fresh_replica_first_persists_its_incarnation --nocapture
+        PASS [   0.003s] (62/85) quepaxa::replica_api calling_again_before_draining_is_rejected
+       START [         ] (63/85) quepaxa::replica_api garbage_network_input_is_counted_and_ignored
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact garbage_network_input_is_counted_and_ignored --nocapture
+        PASS [   0.011s] (63/85) quepaxa schedule::tests::initial_leader_is_the_smallest_member
+       START [         ] (64/85) quepaxa::replica_api installing_a_stale_snapshot_reports_it_was_ignored
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact installing_a_stale_snapshot_reports_it_was_ignored --nocapture
+        PASS [   0.004s] (64/85) quepaxa::replica_api corrupt_durable_record_is_an_error_not_skipped
+       START [         ] (65/85) quepaxa::replica_api invalid_configs_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact invalid_configs_are_rejected --nocapture
+        PASS [   0.004s] (65/85) quepaxa::replica_api configs_that_would_misbehave_at_runtime_are_rejected
+       START [         ] (66/85) quepaxa::replica_api read_barrier_reports_a_slot_after_earlier_commits
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact read_barrier_reports_a_slot_after_earlier_commits --nocapture
+        PASS [   0.011s] (66/85) quepaxa schedule::tests::misses_before_a_rotation_takes_effect_do_not_rotate_again
+       START [         ] (67/85) quepaxa::replica_api restart_replays_committed_slots_from_durable_records
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact restart_replays_committed_slots_from_durable_records --nocapture
+        PASS [   0.004s] (67/85) quepaxa::replica_api fresh_replica_first_persists_its_incarnation
+       START [         ] (68/85) quepaxa::replica_api single_member_commits_a_proposal_only_after_it_is_durable
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact single_member_commits_a_proposal_only_after_it_is_durable --nocapture
+        PASS [   0.004s] (68/85) quepaxa::replica_api installing_a_stale_snapshot_reports_it_was_ignored
+       START [         ] (69/85) quepaxa::replica_api storage_failure_fences_and_drops_outstanding_proposals
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact storage_failure_fences_and_drops_outstanding_proposals --nocapture
+        PASS [   0.005s] (69/85) quepaxa::replica_api garbage_network_input_is_counted_and_ignored
+       START [         ] (70/85) quepaxa::replica_api unknown_persist_id_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/94d7f0aa98f71369/out/replica_api-94d7f0aa98f71369 --exact unknown_persist_id_is_rejected --nocapture
+        PASS [   0.004s] (70/85) quepaxa::replica_api invalid_configs_are_rejected
+        PASS [   0.004s] (71/85) quepaxa::replica_api restart_replays_committed_slots_from_durable_records
+        PASS [   0.004s] (72/85) quepaxa::replica_api single_member_commits_a_proposal_only_after_it_is_durable
+        PASS [   0.004s] (73/85) quepaxa::replica_api unknown_persist_id_is_rejected
+        PASS [   0.004s] (74/85) quepaxa::replica_api storage_failure_fences_and_drops_outstanding_proposals
+        PASS [   0.008s] (75/85) quepaxa::replica_api read_barrier_reports_a_slot_after_earlier_commits
+        PASS [   0.025s] (76/85) quepaxa slot_sim::tests::same_seed_reproduces_the_same_trace
+        PASS [   0.032s] (77/85) quepaxa schedule::tests::same_log_same_leaders
+        PASS [   0.082s] (78/85) quepaxa proposer::tests::racing_proposers_agree
+        PASS [   0.260s] (79/85) quepaxa replica::tests::arbitrary_member_messages_are_handled
+        PASS [   0.516s] (80/85) quepaxa slot_sim::tests::single_slot_is_safe_and_live_across_1000_seeds
+        PASS [   1.005s] (81/85) quepaxa codec::tests::decode_never_panics_on_arbitrary_input
+        PASS [   1.005s] (82/85) quepaxa codec::tests::decode_never_panics_on_mutated_valid_messages
+        PASS [   1.006s] (83/85) quepaxa batch::tests::decode_never_panics
+        PASS [   1.004s] (84/85) quepaxa core_state::tests::decode_never_panics
+        PASS [   1.004s] (85/85) quepaxa durable::tests::decode_never_panics
+────────────
+     Summary [   1.018s] 85 tests run: 85 passed, 0 skipped
+
+*** result: Success

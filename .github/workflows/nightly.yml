@@ -125,9 +125,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     runs-on: ubuntu-24.04
-    timeout-minutes: 240
+    timeout-minutes: 340
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -135,12 +135,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants,cargo-nextest
-      - name: Mutation testing of the core (shard ${{ matrix.shard }}/4)
+      - name: Mutation testing of the core (shard ${{ matrix.shard }}/8)
         run: |
           # Exit 0: all caught, 2: some missed, 3: some timed out — findings, reported below.
           # Anything else (baseline failure, usage error, crash) means no valid run.
           status=0
-          cargo mutants -p quepaxa --test-tool nextest --shard ${{ matrix.shard }}/4 --no-shuffle || status=$?
+          cargo mutants -p quepaxa --test-tool nextest --shard ${{ matrix.shard }}/8 --no-shuffle || status=$?
           case $status in 0|2|3) ;; *) echo "::error::cargo-mutants failed (exit $status)"; exit 1 ;; esac
           test -f mutants.out/outcomes.json
           { echo "### Mutants shard ${{ matrix.shard }}"; for f in caught missed timeout unviable; do

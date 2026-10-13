@@ -1,0 +1,176 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 7.844391827,
+          "process_status": "Success",
+          "argv": [
+            "/home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--verbose",
+            "--package=quepaxa@0.2.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 1.155535452,
+          "process_status": "Success",
+          "argv": [
+            "/home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--verbose",
+            "--package=quepaxa@0.2.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/quepaxa/src/proposer.rs:98:32: delete field priority from struct Proposal expression in SlotProposer::prepare",
+          "package": "quepaxa",
+          "file": "crates/quepaxa/src/proposer.rs",
+          "function": {
+            "function_name": "SlotProposer::prepare",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 90,
+                "column": 5
+              },
+              "end": {
+                "line": 111,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 98,
+              "column": 32
+            },
+            "end": {
+              "line": 98,
+              "column": 41
+            }
+          },
+          "replacement": "",
+          "genre": "StructField"
+        }
+      },
+      "summary": "Timeout",
+      "log_path": "log/crates__quepaxa__src__proposer.rs_line_98_col_32.log",
+      "diff_path": "diff/crates__quepaxa__src__proposer.rs_line_98_col_32.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 5.266040726,
+          "process_status": "Success",
+          "argv": [
+            "/home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 20.051430827,
+          "process_status": "Timeout",
+          "argv": [
+            "/home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/quepaxa/src/replica/mod.rs:466:9: replace Replica::send_gated with ()",
+          "package": "quepaxa",
+          "file": "crates/quepaxa/src/replica/mod.rs",
+          "function": {
+            "function_name": "Replica::send_gated",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 464,
+                "column": 5
+              },
+              "end": {
+                "line": 472,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 466,
+              "column": 9
+            },
+            "end": {
+              "line": 471,
+              "column": 10
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "Timeout",
+      "log_path": "log/crates__quepaxa__src__replica__mod.rs_line_466_col_9.log",
+      "diff_path": "diff/crates__quepaxa__src__replica__mod.rs_line_466_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 1.859814461,
+          "process_status": "Success",
+          "argv": [
+            "/home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--no-run",
+            "--verbose",
+            "--workspace"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 20.018508772,
+          "process_status": "Timeout",
+          "argv": [
+            "/home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo",
+            "nextest",
+            "run",
+            "--verbose",
+            "--workspace"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 2,
+  "missed": 0,
+  "caught": 0,
+  "timeout": 2,
+  "unviable": 0,
+  "success": 0,
+  "start_time": "2026-10-13T11:29:55.917667253Z",
+  "end_time": "2026-10-13T11:30:52.174074426Z",
+  "cargo_mutants_version": "27.1.0"
+}

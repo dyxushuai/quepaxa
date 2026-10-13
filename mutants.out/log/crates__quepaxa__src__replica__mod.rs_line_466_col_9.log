@@ -1,0 +1,601 @@
+
+*** crates/quepaxa/src/replica/mod.rs:466:9: replace Replica::send_gated with ()
+
+*** mutation diff:
+--- crates/quepaxa/src/replica/mod.rs
++++ replace Replica::send_gated with ()
+@@ -458,22 +458,17 @@
+             self.actions.push(Action::Send(out));
+         } else {
+             self.gated.push(out);
+         }
+     }
+ 
+     /// A send that reports state possibly not yet durable.
+     fn send_gated(&mut self, to: NodeId, body: Body) {
+-        let out = self.encode(to, body);
+-        if self.idle_storage() {
+-            self.actions.push(Action::Send(out));
+-        } else {
+-            self.gated.push(out);
+-        }
++        () /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     fn on_message(&mut self, bytes: &Bytes) {
+         let Ok(msg) = Message::decode(bytes, &self.wire) else {
+             self.metrics.messages_rejected += 1;
+             return;
+         };
+         let from = msg.env.from;
+
+
+*** /home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo nextest run --no-run --verbose --workspace
+   Compiling quepaxa v0.2.0 (/tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/crates/quepaxa)
+warning: unused variable: `to`
+   --> crates/quepaxa/src/replica/mod.rs:465:30
+    |
+465 |     fn send_gated(&mut self, to: NodeId, body: Body) {
+    |                              ^^ help: if this is intentional, prefix it with an underscore: `_to`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `body`
+   --> crates/quepaxa/src/replica/mod.rs:465:42
+    |
+465 |     fn send_gated(&mut self, to: NodeId, body: Body) {
+    |                                          ^^^^ help: if this is intentional, prefix it with an underscore: `_body`
+
+   Compiling quepaxa-sim v0.2.0 (/tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/crates/quepaxa-sim)
+warning: `quepaxa` (lib) generated 2 warnings (run `cargo fix --lib -p quepaxa` to apply 2 suggestions)
+   Compiling quepaxa-ffi v0.2.0 (/tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/crates/quepaxa-ffi)
+   Compiling kv-tokio v0.2.0 (/tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/examples/kv-tokio)
+warning: `quepaxa` (lib test) generated 2 warnings (2 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.73s
+
+*** result: Success
+
+*** /home/xus/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/bin/cargo nextest run --verbose --workspace
+warning: unused variable: `to`
+   --> crates/quepaxa/src/replica/mod.rs:465:30
+    |
+465 |     fn send_gated(&mut self, to: NodeId, body: Body) {
+    |                              ^^ help: if this is intentional, prefix it with an underscore: `_to`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `body`
+   --> crates/quepaxa/src/replica/mod.rs:465:42
+    |
+465 |     fn send_gated(&mut self, to: NodeId, body: Body) {
+    |                                          ^^^^ help: if this is intentional, prefix it with an underscore: `_body`
+
+warning: `quepaxa` (lib) generated 2 warnings (run `cargo fix --lib -p quepaxa` to apply 2 suggestions)
+warning: `quepaxa` (lib test) generated 2 warnings (2 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.03s
+────────────
+ Nextest run ID f71c8e5e-dda0-4621-9a4c-24b706d4afc9 with nextest profile: default
+    Starting 110 tests across 10 binaries
+       START [         ] (  1/110) kv-tokio::bin/kv-tokio storage::tests::replace_swaps_the_whole_log
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/d01b0bef3c98b15d/out/kv_tokio-d01b0bef3c98b15d --exact storage::tests::replace_swaps_the_whole_log --nocapture
+       START [         ] (  1/110) kv-tokio::bin/kv-tokio storage::tests::records_survive_reopen_and_a_torn_tail_is_dropped
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/d01b0bef3c98b15d/out/kv_tokio-d01b0bef3c98b15d --exact storage::tests::records_survive_reopen_and_a_torn_tail_is_dropped --nocapture
+       START [         ] (  1/110) kv-tokio::cluster survives_kill_9_of_a_minority_and_recovers_the_victim
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/81aef708a27053a8/out/cluster-81aef708a27053a8 --exact survives_kill_9_of_a_minority_and_recovers_the_victim --nocapture
+       START [         ] (  1/110) kv-tokio::bin/kv-tokio node::tests::put_encoding_keeps_any_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/d01b0bef3c98b15d/out/kv_tokio-d01b0bef3c98b15d --exact node::tests::put_encoding_keeps_any_key --nocapture
+       START [         ] (  1/110) quepaxa batch::tests::batch_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact batch::tests::batch_round_trips --nocapture
+       START [         ] (  1/110) kv-tokio::bin/kv-tokio storage::tests::snapshot_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/kv-tokio/d01b0bef3c98b15d/out/kv_tokio-d01b0bef3c98b15d --exact storage::tests::snapshot_round_trips --nocapture
+       START [         ] (  1/110) quepaxa batch::tests::empty_batch_is_four_zero_bytes
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact batch::tests::empty_batch_is_four_zero_bytes --nocapture
+       START [         ] (  1/110) quepaxa batch::tests::decode_never_panics
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact batch::tests::decode_never_panics --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::catch_up_kinds_round_trip
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::catch_up_kinds_round_trip --nocapture
+       START [         ] (  1/110) quepaxa batch::tests::huge_entry_count_does_not_preallocate
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact batch::tests::huge_entry_count_does_not_preallocate --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::decode_never_panics_on_mutated_valid_messages
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::decode_never_panics_on_mutated_valid_messages --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::decode_never_panics_on_arbitrary_input
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::decode_never_panics_on_arbitrary_input --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::elided_value_resolves_only_against_the_same_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::elided_value_resolves_only_against_the_same_key --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::decode_shares_the_input_buffer
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::decode_shares_the_input_buffer --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::message_above_limit_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::message_above_limit_is_rejected --nocapture
+       START [         ] (  1/110) quepaxa codec::tests::foreign_cluster_epoch_and_version_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::foreign_cluster_epoch_and_version_are_rejected --nocapture
+        PASS [   0.005s] (  1/110) kv-tokio::bin/kv-tokio storage::tests::records_survive_reopen_and_a_torn_tail_is_dropped
+        PASS [   0.005s] (  2/110) kv-tokio::bin/kv-tokio storage::tests::replace_swaps_the_whole_log
+       START [         ] (  3/110) quepaxa codec::tests::oversized_length_prefix_is_rejected_without_allocating
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::oversized_length_prefix_is_rejected_without_allocating --nocapture
+        PASS [   0.005s] (  3/110) kv-tokio::bin/kv-tokio node::tests::put_encoding_keeps_any_key
+       START [         ] (  4/110) quepaxa codec::tests::other_proposals_keep_their_value_in_replies
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::other_proposals_keep_their_value_in_replies --nocapture
+       START [         ] (  4/110) quepaxa codec::tests::record_reply_matches_golden_bytes_v1
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::record_reply_matches_golden_bytes_v1 --nocapture
+        PASS [   0.005s] (  4/110) quepaxa codec::tests::message_above_limit_is_rejected
+       START [         ] (  5/110) quepaxa codec::tests::record_request_matches_golden_bytes_v1
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::record_request_matches_golden_bytes_v1 --nocapture
+        PASS [   0.005s] (  5/110) quepaxa codec::tests::decode_shares_the_input_buffer
+       START [         ] (  6/110) quepaxa codec::tests::reply_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::reply_round_trips --nocapture
+        PASS [   0.006s] (  6/110) quepaxa batch::tests::batch_round_trips
+       START [         ] (  7/110) quepaxa codec::tests::request_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::request_round_trips --nocapture
+        PASS [   0.006s] (  7/110) quepaxa codec::tests::foreign_cluster_epoch_and_version_are_rejected
+       START [         ] (  8/110) quepaxa codec::tests::trailing_bytes_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::trailing_bytes_are_rejected --nocapture
+        PASS [   0.007s] (  8/110) quepaxa codec::tests::elided_value_resolves_only_against_the_same_key
+       START [         ] (  9/110) quepaxa codec::tests::value_above_the_batch_limit_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact codec::tests::value_above_the_batch_limit_is_rejected --nocapture
+        PASS [   0.007s] (  9/110) kv-tokio::bin/kv-tokio storage::tests::snapshot_round_trips
+       START [         ] ( 10/110) quepaxa core_state::tests::decode_never_panics
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact core_state::tests::decode_never_panics --nocapture
+        PASS [   0.007s] ( 10/110) quepaxa batch::tests::huge_entry_count_does_not_preallocate
+        PASS [   0.007s] ( 11/110) quepaxa batch::tests::empty_batch_is_four_zero_bytes
+       START [         ] ( 12/110) quepaxa core_state::tests::rejects_a_schedule_naming_strangers
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact core_state::tests::rejects_a_schedule_naming_strangers --nocapture
+       START [         ] ( 12/110) quepaxa core_state::tests::round_trips_after_rotations_and_dedup_activity
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact core_state::tests::round_trips_after_rotations_and_dedup_activity --nocapture
+        PASS [   0.004s] ( 12/110) quepaxa codec::tests::other_proposals_keep_their_value_in_replies
+       START [         ] ( 13/110) quepaxa crc::tests::matches_rfc3720_zero_vector
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact crc::tests::matches_rfc3720_zero_vector --nocapture
+        PASS [   0.006s] ( 13/110) quepaxa codec::tests::oversized_length_prefix_is_rejected_without_allocating
+       START [         ] ( 14/110) quepaxa crc::tests::matches_standard_check_value
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact crc::tests::matches_standard_check_value --nocapture
+        PASS [   0.006s] ( 14/110) quepaxa codec::tests::record_reply_matches_golden_bytes_v1
+       START [         ] ( 15/110) quepaxa dedup::tests::contiguous_ids_compact_into_the_watermark
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact dedup::tests::contiguous_ids_compact_into_the_watermark --nocapture
+        PASS [   0.007s] ( 15/110) quepaxa codec::tests::record_request_matches_golden_bytes_v1
+       START [         ] ( 16/110) quepaxa dedup::tests::entries_from_forgotten_incarnations_count_as_seen
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact dedup::tests::entries_from_forgotten_incarnations_count_as_seen --nocapture
+        PASS [   0.007s] ( 16/110) quepaxa codec::tests::trailing_bytes_are_rejected
+       START [         ] ( 17/110) quepaxa dedup::tests::incarnations_and_origins_are_independent
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact dedup::tests::incarnations_and_origins_are_independent --nocapture
+        PASS [   0.004s] ( 17/110) quepaxa crc::tests::matches_rfc3720_zero_vector
+       START [         ] ( 18/110) quepaxa dedup::tests::second_occurrence_is_filtered_in_any_order
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact dedup::tests::second_occurrence_is_filtered_in_any_order --nocapture
+        PASS [   0.007s] ( 18/110) quepaxa core_state::tests::rejects_a_schedule_naming_strangers
+       START [         ] ( 19/110) quepaxa durable::tests::any_flipped_bit_is_detected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::any_flipped_bit_is_detected --nocapture
+        PASS [   0.004s] ( 19/110) quepaxa crc::tests::matches_standard_check_value
+       START [         ] ( 20/110) quepaxa durable::tests::decode_never_panics
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::decode_never_panics --nocapture
+        PASS [   0.008s] ( 20/110) quepaxa codec::tests::value_above_the_batch_limit_is_rejected
+       START [         ] ( 21/110) quepaxa durable::tests::every_kind_round_trips
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::every_kind_round_trips --nocapture
+        PASS [   0.016s] ( 21/110) quepaxa codec::tests::catch_up_kinds_round_trip
+       START [         ] ( 22/110) quepaxa durable::tests::incarnation_matches_golden_bytes_v1
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::incarnation_matches_golden_bytes_v1 --nocapture
+        PASS [   0.009s] ( 22/110) quepaxa core_state::tests::round_trips_after_rotations_and_dedup_activity
+       START [         ] ( 23/110) quepaxa durable::tests::torn_record_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact durable::tests::torn_record_is_rejected --nocapture
+        PASS [   0.004s] ( 23/110) quepaxa dedup::tests::entries_from_forgotten_incarnations_count_as_seen
+       START [         ] ( 24/110) quepaxa proposal::tests::distinct_keys_never_compare_equal
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::distinct_keys_never_compare_equal --nocapture
+        PASS [   0.003s] ( 24/110) quepaxa dedup::tests::second_occurrence_is_filtered_in_any_order
+       START [         ] ( 25/110) quepaxa proposal::tests::equal_priority_breaks_ties_by_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::equal_priority_breaks_ties_by_key --nocapture
+        PASS [   0.012s] ( 25/110) quepaxa codec::tests::request_round_trips
+       START [         ] ( 26/110) quepaxa proposal::tests::higher_priority_wins_regardless_of_key
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::higher_priority_wins_regardless_of_key --nocapture
+        PASS [   0.004s] ( 26/110) quepaxa dedup::tests::incarnations_and_origins_are_independent
+       START [         ] ( 27/110) quepaxa proposal::tests::leader_priority_beats_every_random_priority
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::leader_priority_beats_every_random_priority --nocapture
+        PASS [   0.007s] ( 27/110) quepaxa dedup::tests::contiguous_ids_compact_into_the_watermark
+       START [         ] ( 28/110) quepaxa proposal::tests::nil_is_below_every_proposal
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::nil_is_below_every_proposal --nocapture
+        PASS [   0.003s] ( 28/110) quepaxa proposal::tests::equal_priority_breaks_ties_by_key
+       START [         ] ( 29/110) quepaxa proposal::tests::order_is_total_and_transitive
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposal::tests::order_is_total_and_transitive --nocapture
+        PASS [   0.005s] ( 29/110) quepaxa durable::tests::every_kind_round_trips
+       START [         ] ( 30/110) quepaxa proposer::tests::leader_alone_decides_on_fast_path_at_first_step
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::leader_alone_decides_on_fast_path_at_first_step --nocapture
+        PASS [   0.005s] ( 30/110) quepaxa durable::tests::incarnation_matches_golden_bytes_v1
+       START [         ] ( 31/110) quepaxa proposer::tests::leader_catching_up_at_the_first_step_keeps_the_adopted_priority
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::leader_catching_up_at_the_first_step_keeps_the_adopted_priority --nocapture
+        PASS [   0.004s] ( 31/110) quepaxa durable::tests::torn_record_is_rejected
+       START [         ] ( 32/110) quepaxa proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two --nocapture
+        PASS [   0.004s] ( 32/110) quepaxa proposal::tests::leader_priority_beats_every_random_priority
+       START [         ] ( 33/110) quepaxa proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder --nocapture
+        PASS [   0.005s] ( 33/110) quepaxa proposal::tests::higher_priority_wins_regardless_of_key
+       START [         ] ( 34/110) quepaxa proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three --nocapture
+        PASS [   0.008s] ( 34/110) quepaxa durable::tests::any_flipped_bit_is_detected
+       START [         ] ( 35/110) quepaxa proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum --nocapture
+        PASS [   0.004s] ( 35/110) quepaxa proposer::tests::leader_catching_up_at_the_first_step_keeps_the_adopted_priority
+       START [         ] ( 36/110) quepaxa proposer::tests::racing_proposers_agree
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::racing_proposers_agree --nocapture
+        PASS [   0.004s] ( 36/110) quepaxa proposer::tests::leader_alone_decides_on_fast_path_at_first_step
+       START [         ] ( 37/110) quepaxa proposer::tests::replies_to_older_requests_are_ignored
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::replies_to_older_requests_are_ignored --nocapture
+        PASS [   0.004s] ( 37/110) quepaxa proposer::tests::phase_two_without_matching_aggregate_continues_to_phase_three
+        PASS [   0.006s] ( 38/110) quepaxa proposer::tests::non_leader_alone_decides_its_value_at_round_one_phase_two
+        PASS [   0.005s] ( 39/110) quepaxa proposer::tests::non_leader_sends_a_distinct_random_priority_to_each_recorder
+       START [         ] ( 40/110) quepaxa proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up --nocapture
+       START [         ] ( 40/110) quepaxa recorder::tests::next_step_moves_aggregate_to_prior
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact recorder::tests::next_step_moves_aggregate_to_prior --nocapture
+       START [         ] ( 40/110) quepaxa recorder::tests::first_record_sets_step_and_first_value_with_nil_prior
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact recorder::tests::first_record_sets_step_and_first_value_with_nil_prior --nocapture
+        PASS [   0.005s] ( 40/110) quepaxa proposer::tests::phase_zero_adopts_the_best_first_value_of_the_quorum
+       START [         ] ( 41/110) quepaxa recorder::tests::register_upholds_recorder_invariants
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact recorder::tests::register_upholds_recorder_invariants --nocapture
+        PASS [   0.008s] ( 41/110) quepaxa proposal::tests::order_is_total_and_transitive
+       START [         ] ( 42/110) quepaxa recorder::tests::same_step_higher_value_raises_aggregate_but_keeps_first
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact recorder::tests::same_step_higher_value_raises_aggregate_but_keeps_first --nocapture
+        PASS [   0.004s] ( 42/110) quepaxa proposer::tests::replies_to_older_requests_are_ignored
+        PASS [   0.011s] ( 43/110) quepaxa proposal::tests::nil_is_below_every_proposal
+       START [         ] ( 44/110) quepaxa recorder::tests::skipping_a_step_clears_prior_aggregate
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact recorder::tests::skipping_a_step_clears_prior_aggregate --nocapture
+       START [         ] ( 44/110) quepaxa recorder::tests::same_step_lower_or_equal_value_changes_nothing
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact recorder::tests::same_step_lower_or_equal_value_changes_nothing --nocapture
+        PASS [   0.004s] ( 44/110) quepaxa proposer::tests::reply_from_a_recorder_ahead_makes_the_proposer_catch_up
+       START [         ] ( 45/110) quepaxa recorder::tests::stale_step_is_discarded_and_reports_current_state
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact recorder::tests::stale_step_is_discarded_and_reports_current_state --nocapture
+        PASS [   0.015s] ( 45/110) quepaxa proposal::tests::distinct_keys_never_compare_equal
+       START [         ] ( 46/110) quepaxa replica::tests::arbitrary_member_messages_are_handled
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact replica::tests::arbitrary_member_messages_are_handled --nocapture
+        PASS [   0.004s] ( 46/110) quepaxa recorder::tests::same_step_higher_value_raises_aggregate_but_keeps_first
+       START [         ] ( 47/110) quepaxa replica::tests::core_state_schedule_covers_only_emitted_slots
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact replica::tests::core_state_schedule_covers_only_emitted_slots --nocapture
+        PASS [   0.006s] ( 47/110) quepaxa recorder::tests::next_step_moves_aggregate_to_prior
+       START [         ] ( 48/110) quepaxa replica::tests::lost_catch_up_request_is_retried_on_the_timer
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact replica::tests::lost_catch_up_request_is_retried_on_the_timer --nocapture
+        PASS [   0.004s] ( 48/110) quepaxa recorder::tests::skipping_a_step_clears_prior_aggregate
+       START [         ] ( 49/110) quepaxa rng::tests::block_matches_rfc8439_test_vector
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact rng::tests::block_matches_rfc8439_test_vector --nocapture
+        PASS [   0.028s] ( 49/110) quepaxa codec::tests::reply_round_trips
+       START [         ] ( 50/110) quepaxa rng::tests::different_seeds_give_different_priorities
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact rng::tests::different_seeds_give_different_priorities --nocapture
+        PASS [   0.007s] ( 50/110) quepaxa recorder::tests::first_record_sets_step_and_first_value_with_nil_prior
+       START [         ] ( 51/110) quepaxa rng::tests::priorities_cross_block_boundaries_without_repeating
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact rng::tests::priorities_cross_block_boundaries_without_repeating --nocapture
+        PASS [   0.008s] ( 51/110) quepaxa recorder::tests::same_step_lower_or_equal_value_changes_nothing
+       START [         ] ( 52/110) quepaxa rng::tests::priority_is_never_nil_or_leader
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact rng::tests::priority_is_never_nil_or_leader --nocapture
+        PASS [   0.005s] ( 52/110) quepaxa rng::tests::block_matches_rfc8439_test_vector
+       START [         ] ( 53/110) quepaxa rng::tests::same_seed_gives_same_priorities
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact rng::tests::same_seed_gives_same_priorities --nocapture
+        PASS [   0.006s] ( 53/110) quepaxa rng::tests::different_seeds_give_different_priorities
+       START [         ] ( 54/110) quepaxa rng::tests::stream_starts_at_counter_zero
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact rng::tests::stream_starts_at_counter_zero --nocapture
+        PASS [   0.007s] ( 54/110) quepaxa replica::tests::core_state_schedule_covers_only_emitted_slots
+       START [         ] ( 55/110) quepaxa schedule::tests::a_slot_led_by_its_leader_resets_the_streak
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact schedule::tests::a_slot_led_by_its_leader_resets_the_streak --nocapture
+        PASS [   0.007s] ( 55/110) quepaxa replica::tests::lost_catch_up_request_is_retried_on_the_timer
+       START [         ] ( 56/110) quepaxa schedule::tests::eight_missed_slots_rotate_the_leader_after_the_lag
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact schedule::tests::eight_missed_slots_rotate_the_leader_after_the_lag --nocapture
+        PASS [   0.006s] ( 56/110) quepaxa rng::tests::priorities_cross_block_boundaries_without_repeating
+       START [         ] ( 57/110) quepaxa schedule::tests::initial_leader_is_the_smallest_member
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact schedule::tests::initial_leader_is_the_smallest_member --nocapture
+        PASS [   0.006s] ( 57/110) quepaxa rng::tests::same_seed_gives_same_priorities
+       START [         ] ( 58/110) quepaxa schedule::tests::misses_before_a_rotation_takes_effect_do_not_rotate_again
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact schedule::tests::misses_before_a_rotation_takes_effect_do_not_rotate_again --nocapture
+        PASS [   0.004s] ( 58/110) quepaxa schedule::tests::eight_missed_slots_rotate_the_leader_after_the_lag
+       START [         ] ( 59/110) quepaxa schedule::tests::same_log_same_leaders
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact schedule::tests::same_log_same_leaders --nocapture
+        PASS [   0.004s] ( 59/110) quepaxa schedule::tests::a_slot_led_by_its_leader_resets_the_streak
+       START [         ] ( 60/110) quepaxa slot_sim::tests::fault_free_leader_decides_its_value_on_the_fast_path
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact slot_sim::tests::fault_free_leader_decides_its_value_on_the_fast_path --nocapture
+        PASS [   0.005s] ( 60/110) quepaxa rng::tests::stream_starts_at_counter_zero
+       START [         ] ( 61/110) quepaxa slot_sim::tests::same_seed_reproduces_the_same_trace
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact slot_sim::tests::same_seed_reproduces_the_same_trace --nocapture
+        PASS [   0.018s] ( 61/110) quepaxa recorder::tests::register_upholds_recorder_invariants
+       START [         ] ( 62/110) quepaxa slot_sim::tests::single_slot_is_safe_and_live_across_1000_seeds
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/e1494c7ab8f1f4fc/out/quepaxa-e1494c7ab8f1f4fc --exact slot_sim::tests::single_slot_is_safe_and_live_across_1000_seeds --nocapture
+        PASS [   0.015s] ( 62/110) quepaxa recorder::tests::stale_step_is_discarded_and_reports_current_state
+       START [         ] ( 63/110) quepaxa::replica_api backpressure_and_size_limits_are_enforced
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact backpressure_and_size_limits_are_enforced --nocapture
+        PASS [   0.004s] ( 63/110) quepaxa schedule::tests::misses_before_a_rotation_takes_effect_do_not_rotate_again
+       START [         ] ( 64/110) quepaxa::replica_api calling_again_before_draining_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact calling_again_before_draining_is_rejected --nocapture
+        PASS [   0.004s] ( 64/110) quepaxa slot_sim::tests::fault_free_leader_decides_its_value_on_the_fast_path
+       START [         ] ( 65/110) quepaxa::replica_api configs_that_would_misbehave_at_runtime_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact configs_that_would_misbehave_at_runtime_are_rejected --nocapture
+        PASS [   0.004s] ( 65/110) quepaxa::replica_api backpressure_and_size_limits_are_enforced
+       START [         ] ( 66/110) quepaxa::replica_api corrupt_durable_record_is_an_error_not_skipped
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact corrupt_durable_record_is_an_error_not_skipped --nocapture
+        PASS [   0.004s] ( 66/110) quepaxa::replica_api calling_again_before_draining_is_rejected
+       START [         ] ( 67/110) quepaxa::replica_api fresh_replica_first_persists_its_incarnation
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact fresh_replica_first_persists_its_incarnation --nocapture
+        PASS [   0.004s] ( 67/110) quepaxa::replica_api configs_that_would_misbehave_at_runtime_are_rejected
+       START [         ] ( 68/110) quepaxa::replica_api garbage_network_input_is_counted_and_ignored
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact garbage_network_input_is_counted_and_ignored --nocapture
+        PASS [   0.005s] ( 68/110) quepaxa::replica_api corrupt_durable_record_is_an_error_not_skipped
+       START [         ] ( 69/110) quepaxa::replica_api installing_a_stale_snapshot_reports_it_was_ignored
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact installing_a_stale_snapshot_reports_it_was_ignored --nocapture
+        PASS [   0.004s] ( 69/110) quepaxa::replica_api garbage_network_input_is_counted_and_ignored
+       START [         ] ( 70/110) quepaxa::replica_api invalid_configs_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact invalid_configs_are_rejected --nocapture
+        PASS [   0.017s] ( 70/110) quepaxa schedule::tests::initial_leader_is_the_smallest_member
+       START [         ] ( 71/110) quepaxa::replica_api read_barrier_reports_a_slot_after_earlier_commits
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact read_barrier_reports_a_slot_after_earlier_commits --nocapture
+        PASS [   0.013s] ( 71/110) quepaxa slot_sim::tests::same_seed_reproduces_the_same_trace
+       START [         ] ( 72/110) quepaxa::replica_api restart_replays_committed_slots_from_durable_records
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact restart_replays_committed_slots_from_durable_records --nocapture
+        PASS [   0.022s] ( 72/110) quepaxa rng::tests::priority_is_never_nil_or_leader
+       START [         ] ( 73/110) quepaxa::replica_api single_member_commits_a_proposal_only_after_it_is_durable
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact single_member_commits_a_proposal_only_after_it_is_durable --nocapture
+        PASS [   0.008s] ( 73/110) quepaxa::replica_api fresh_replica_first_persists_its_incarnation
+       START [         ] ( 74/110) quepaxa::replica_api storage_failure_fences_and_drops_outstanding_proposals
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact storage_failure_fences_and_drops_outstanding_proposals --nocapture
+        PASS [   0.004s] ( 74/110) quepaxa::replica_api installing_a_stale_snapshot_reports_it_was_ignored
+       START [         ] ( 75/110) quepaxa::replica_api unknown_persist_id_is_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa/49f79fdd10e04729/out/replica_api-49f79fdd10e04729 --exact unknown_persist_id_is_rejected --nocapture
+        PASS [   0.004s] ( 75/110) quepaxa::replica_api read_barrier_reports_a_slot_after_earlier_commits
+       START [         ] ( 76/110) quepaxa-ffi tests::a_panic_poisons_the_handle
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-ffi/c6483a1171164c7e/out/quepaxa_ffi-c6483a1171164c7e --exact tests::a_panic_poisons_the_handle --nocapture
+        PASS [   0.007s] ( 76/110) quepaxa::replica_api invalid_configs_are_rejected
+       START [         ] ( 77/110) quepaxa-ffi tests::v1_layout_is_the_current_layout_today
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-ffi/c6483a1171164c7e/out/quepaxa_ffi-c6483a1171164c7e --exact tests::v1_layout_is_the_current_layout_today --nocapture
+        PASS [   0.005s] ( 77/110) quepaxa::replica_api single_member_commits_a_proposal_only_after_it_is_durable
+        PASS [   0.004s] ( 78/110) quepaxa::replica_api storage_failure_fences_and_drops_outstanding_proposals
+       START [         ] ( 79/110) quepaxa-ffi::c_abi config_layouts_are_size_aware
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-ffi/15a68eb5ecb53e5d/out/c_abi-15a68eb5ecb53e5d --exact config_layouts_are_size_aware --nocapture
+       START [         ] ( 79/110) quepaxa-ffi::c_abi bad_config_and_corrupt_records_are_rejected
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-ffi/15a68eb5ecb53e5d/out/c_abi-15a68eb5ecb53e5d --exact bad_config_and_corrupt_records_are_rejected --nocapture
+        PASS [   0.005s] ( 79/110) quepaxa::replica_api unknown_persist_id_is_rejected
+       START [         ] ( 80/110) quepaxa-ffi::c_abi contract_violations_are_reported_not_undefined
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-ffi/15a68eb5ecb53e5d/out/c_abi-15a68eb5ecb53e5d --exact contract_violations_are_reported_not_undefined --nocapture
+        PASS [   0.005s] ( 80/110) quepaxa-ffi tests::a_panic_poisons_the_handle
+       START [         ] ( 81/110) quepaxa-ffi::c_abi last_error_explains_an_invalid_config
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-ffi/15a68eb5ecb53e5d/out/c_abi-15a68eb5ecb53e5d --exact last_error_explains_an_invalid_config --nocapture
+        PASS [   0.005s] ( 81/110) quepaxa-ffi::c_abi bad_config_and_corrupt_records_are_rejected
+       START [         ] ( 82/110) quepaxa-ffi::c_abi metrics_are_readable_over_the_abi
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-ffi/15a68eb5ecb53e5d/out/c_abi-15a68eb5ecb53e5d --exact metrics_are_readable_over_the_abi --nocapture
+        PASS [   0.004s] ( 82/110) quepaxa-ffi::c_abi contract_violations_are_reported_not_undefined
+       START [         ] ( 83/110) quepaxa-ffi::c_abi status_strings_are_static_and_nul_terminated
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-ffi/15a68eb5ecb53e5d/out/c_abi-15a68eb5ecb53e5d --exact status_strings_are_static_and_nul_terminated --nocapture
+        PASS [   0.005s] ( 83/110) quepaxa-ffi::c_abi config_layouts_are_size_aware
+       START [         ] ( 84/110) quepaxa-ffi::c_abi three_replicas_commit_through_the_c_abi
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-ffi/15a68eb5ecb53e5d/out/c_abi-15a68eb5ecb53e5d --exact three_replicas_commit_through_the_c_abi --nocapture
+        PASS [   0.014s] ( 84/110) quepaxa::replica_api restart_replays_committed_slots_from_durable_records
+       START [         ] ( 85/110) quepaxa-sim::model_check contending_followers_are_safe
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-sim/2c24770675bc2e96/out/model_check-2c24770675bc2e96 --exact contending_followers_are_safe --nocapture
+        PASS [   0.006s] ( 85/110) quepaxa-ffi::c_abi last_error_explains_an_invalid_config
+       START [         ] ( 86/110) quepaxa-sim::model_check leader_and_follower_writes_with_a_crash_are_safe
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-sim/2c24770675bc2e96/out/model_check-2c24770675bc2e96 --exact leader_and_follower_writes_with_a_crash_are_safe --nocapture
+        PASS [   0.029s] ( 86/110) quepaxa schedule::tests::same_log_same_leaders
+       START [         ] ( 87/110) quepaxa-sim::replica_sim absent_replica_recovers_through_a_peer_snapshot
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-sim/2825d5c7646edc73/out/replica_sim-2825d5c7646edc73 --exact absent_replica_recovers_through_a_peer_snapshot --nocapture
+        PASS [   0.005s] ( 87/110) quepaxa-ffi::c_abi status_strings_are_static_and_nul_terminated
+       START [         ] ( 88/110) quepaxa-sim::replica_sim compaction_keeps_memory_bounded_on_long_runs
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-sim/2825d5c7646edc73/out/replica_sim-2825d5c7646edc73 --exact compaction_keeps_memory_bounded_on_long_runs --nocapture
+        PASS [   0.011s] ( 88/110) quepaxa-ffi tests::v1_layout_is_the_current_layout_today
+       START [         ] ( 89/110) quepaxa-sim::replica_sim crash_heavy_runs_never_lose_acknowledged_state
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-sim/2825d5c7646edc73/out/replica_sim-2825d5c7646edc73 --exact crash_heavy_runs_never_lose_acknowledged_state --nocapture
+        PASS [   0.006s] ( 89/110) quepaxa-ffi::c_abi metrics_are_readable_over_the_abi
+       START [         ] ( 90/110) quepaxa-sim::replica_sim fault_free_cluster_commits_every_proposal
+             command: /tmp/cargo-mutants-quepaxa-3A9IJ0.tmp/target/debug/build/quepaxa-sim/2825d5c7646edc73/out/replica_sim-2825d5c7646edc73 --exact fault_free_cluster_commits_every_proposal --nocapture
+        FAIL [   0.010s] ( 90/110) quepaxa-ffi::c_abi three_replicas_commit_through_the_c_abi
+  stdout ───
+
+    running 1 test
+    test three_replicas_commit_through_the_c_abi ... FAILED
+
+    failures:
+
+    failures:
+        three_replicas_commit_through_the_c_abi
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+  stderr ───
+
+    thread 'three_replicas_commit_through_the_c_abi' (3612520) panicked at crates/quepaxa-ffi/tests/c_abi.rs:93:9:
+    assertion `left == right` failed: replica 0
+      left: []
+     right: [[104, 105]]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to test failure: 15 tests still running
+        PASS [   0.098s] ( 91/110) quepaxa proposer::tests::racing_proposers_agree
+        FAIL [   0.069s] ( 92/110) quepaxa-sim::model_check contending_followers_are_safe
+  stdout ───
+
+    running 1 test
+    test contending_followers_are_safe ... FAILED
+
+    failures:
+
+    failures:
+        contending_followers_are_safe
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.06s
+
+  stderr ───
+
+    thread 'contending_followers_are_safe' (3612526) panicked at crates/quepaxa-sim/tests/model_check.rs:45:49:
+    liveness: still busy after 5000 default steps (log 0 slots)
+    schedule (200 steps): [Timeout(2), Timeout(2), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0)]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.123s] ( 93/110) quepaxa-sim::model_check leader_and_follower_writes_with_a_crash_are_safe
+  stdout ───
+
+    running 1 test
+    test leader_and_follower_writes_with_a_crash_are_safe ... FAILED
+
+    failures:
+
+    failures:
+        leader_and_follower_writes_with_a_crash_are_safe
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.12s
+
+  stderr ───
+
+    thread 'leader_and_follower_writes_with_a_crash_are_safe' (3612527) panicked at crates/quepaxa-sim/tests/model_check.rs:27:49:
+    liveness: still busy after 5000 default steps (log 0 slots)
+    schedule (200 steps): [Crash { node: 2, keep: 1 }, Timeout(1), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0), Run(0), Timeout(2), Run(0), Run(0), Run(0), Run(0), Timeout(0), Run(0), Run(0), Run(0), Run(0), Timeout(1), Run(0), Run(0), Run(0)]
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.321s] ( 94/110) quepaxa replica::tests::arbitrary_member_messages_are_handled
+        FAIL [   0.295s] ( 95/110) quepaxa-sim::replica_sim crash_heavy_runs_never_lose_acknowledged_state
+  stdout ───
+
+    running 1 test
+    test crash_heavy_runs_never_lose_acknowledged_state ... FAILED
+
+    failures:
+
+    failures:
+        crash_heavy_runs_never_lose_acknowledged_state
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.28s
+
+  stderr ───
+
+    thread 'crash_heavy_runs_never_lose_acknowledged_state' (3612531) panicked at crates/quepaxa-sim/tests/replica_sim.rs:36:13:
+    seed 0: did not converge after faults stopped (agreed log 0 slots)
+    n0: commit_index=Some(0) next_commit=0 outstanding=4 pending_persists=0
+    n1: commit_index=Some(0) next_commit=0 outstanding=50 pending_persists=0
+    n2: commit_index=Some(0) next_commit=0 outstanding=0 pending_persists=0
+    …
+    0 start n0 g1
+    0 start n1 g1
+    0 start n2 g1
+    1000000 crash n1
+    176000000 partition {0}
+    209000000 heal-partition
+    215148859 start n1 g3
+    269000000 partition {2}
+    288000000 heal-partition
+    316000000 crash n0
+    649052982 start n0 g3
+    698000000 partition {0}
+    728000000 crash n0
+    862109557 start n0 g5
+    893000000 crash n2
+    1094000000 heal-partition
+    1199573700 start n2 g3
+    1217000000 crash n0
+    1497584840 start n0 g7
+    1540000000 crash n0
+    1667000000 partition {0}
+    1783000000 heal-partition
+    2036067999 start n0 g9
+    2054000000 crash n1
+    2145897316 start n1 g5
+    2182000000 crash n1
+    2408219855 start n1 g7
+    2427000000 crash n0
+    2945881292 start n0 g11
+    2952000000 crash n2
+    3000000000 heal
+    3000000000 start n2 g5
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.634s] ( 96/110) quepaxa-sim::replica_sim fault_free_cluster_commits_every_proposal
+  stdout ───
+
+    running 1 test
+    test fault_free_cluster_commits_every_proposal ... FAILED
+
+    failures:
+
+    failures:
+        fault_free_cluster_commits_every_proposal
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.63s
+
+  stderr ───
+
+    thread 'fault_free_cluster_commits_every_proposal' (3612530) panicked at crates/quepaxa-sim/tests/replica_sim.rs:12:49:
+    called `Result::unwrap()` on an `Err` value: "seed 1: did not converge after faults stopped (agreed log 0 slots)\nn0: commit_index=Some(0) next_commit=0 outstanding=298 pending_persists=0\nn1: commit_index=Some(0) next_commit=0 outstanding=283 pending_persists=0\nn2: commit_index=Some(0) next_commit=0 outstanding=312 pending_persists=0\n…\n0 start n0 g1\n0 start n1 g1\n0 start n2 g1\n3000000000 heal"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.744s] ( 97/110) quepaxa slot_sim::tests::single_slot_is_safe_and_live_across_1000_seeds
+        FAIL [   0.719s] ( 98/110) quepaxa-sim::replica_sim absent_replica_recovers_through_a_peer_snapshot
+  stdout ───
+
+    running 1 test
+    test absent_replica_recovers_through_a_peer_snapshot ... FAILED
+
+    failures:
+
+    failures:
+        absent_replica_recovers_through_a_peer_snapshot
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.71s
+
+  stderr ───
+
+    thread 'absent_replica_recovers_through_a_peer_snapshot' (3612528) panicked at crates/quepaxa-sim/tests/replica_sim.rs:74:95:
+    seed 0: did not converge after faults stopped (agreed log 0 slots)
+    n0: commit_index=Some(0) next_commit=0 outstanding=346 pending_persists=0
+    n1: commit_index=Some(0) next_commit=0 outstanding=316 pending_persists=0
+    n2: commit_index=Some(0) next_commit=0 outstanding=0 pending_persists=0
+    …
+    0 start n0 g1
+    0 start n1 g1
+    3000000000 heal
+    3000000000 start n2 g1
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   1.005s] ( 99/110) quepaxa codec::tests::decode_never_panics_on_mutated_valid_messages
+        PASS [   1.005s] (100/110) quepaxa batch::tests::decode_never_panics
+        PASS [   1.008s] (101/110) quepaxa codec::tests::decode_never_panics_on_arbitrary_input
+        PASS [   1.006s] (102/110) quepaxa core_state::tests::decode_never_panics
+        PASS [   1.003s] (103/110) quepaxa durable::tests::decode_never_panics
+        FAIL [   0.984s] (104/110) quepaxa-sim::replica_sim compaction_keeps_memory_bounded_on_long_runs
+  stdout ───
+
+    running 1 test
+    test compaction_keeps_memory_bounded_on_long_runs ... FAILED
+
+    failures:
+
+    failures:
+        compaction_keeps_memory_bounded_on_long_runs
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.98s
+
+  stderr ───
+
+    thread 'compaction_keeps_memory_bounded_on_long_runs' (3612529) panicked at crates/quepaxa-sim/tests/replica_sim.rs:65:57:
+    seed 11: did not converge after faults stopped (agreed log 0 slots)
+    n0: commit_index=Some(0) next_commit=0 outstanding=3322 pending_persists=0
+    n1: commit_index=Some(0) next_commit=0 outstanding=3305 pending_persists=0
+    n2: commit_index=Some(0) next_commit=0 outstanding=3255 pending_persists=0
+    …
+    0 start n0 g1
+    0 start n1 g1
+    0 start n2 g1
+    20000000000 heal
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+  Cancelling due to signal: 1 test still running
+     SIGTERM [  19.887s] (105/110) kv-tokio::cluster survives_kill_9_of_a_minority_and_recovers_the_victim
+  stdout ───
+
+    running 1 test
+  stderr ───
+    kv-tokio 1: peers on 127.0.0.1:34123, clients on 127.0.0.1:35157
+    kv-tokio 0: peers on 127.0.0.1:44249, clients on 127.0.0.1:44485
+    kv-tokio 2: peers on 127.0.0.1:41521, clients on 127.0.0.1:42949
+
+    (test aborted with signal 15: SIGTERM)
+
+────────────
+     Summary [  19.887s] 105/110 tests run: 97 passed, 8 failed, 0 skipped
+        FAIL [   0.010s] ( 90/110) quepaxa-ffi::c_abi three_replicas_commit_through_the_c_abi
+        FAIL [   0.069s] ( 92/110) quepaxa-sim::model_check contending_followers_are_safe
+        FAIL [   0.123s] ( 93/110) quepaxa-sim::model_check leader_and_follower_writes_with_a_crash_are_safe
+        FAIL [   0.295s] ( 95/110) quepaxa-sim::replica_sim crash_heavy_runs_never_lose_acknowledged_state
+        FAIL [   0.634s] ( 96/110) quepaxa-sim::replica_sim fault_free_cluster_commits_every_proposal
+        FAIL [   0.719s] ( 98/110) quepaxa-sim::replica_sim absent_replica_recovers_through_a_peer_snapshot
+        FAIL [   0.984s] (104/110) quepaxa-sim::replica_sim compaction_keeps_memory_bounded_on_long_runs
+     SIGTERM [  19.887s] (105/110) kv-tokio::cluster survives_kill_9_of_a_minority_and_recovers_the_victim
+warning: 5/110 tests were not run due to signal
+error: test run failed
+
+*** result: Timeout
