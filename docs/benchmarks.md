@@ -83,18 +83,19 @@ leader fast path (100 ms) + decision broadcast to the client's replica (50 ms), 
 ## Simulated WAN placement (`cargo run --release -p quepaxa-sim --example wan_leaders`)
 
 Five replicas in five regions (rough public-cloud round trips: us-east, us-west, eu-west,
-ap-northeast, sa-east), fault-free, 20 s of writes spread over all replicas, client
-latency from `propose` to `Committed`, 3 seeds. Each row places the initial leader in
-another region. Timers suit the WAN: `retransmit_interval` 400 ms (above the longest round
+ap-northeast, sa-east), fault-free, 20 s of about 100 writes/s spread over all replicas,
+client latency from `propose` to `Committed`, 3 seeds, no snapshots (the simulator ships
+them instantly). Each row swaps the initial leader (replica 0) with another region and
+keeps the rest of the placement. Timers suit the WAN: `retransmit_interval` 400 ms (above the longest round
 trip), `hedge_max` 3 s.
 
 | Leader region | p50 | p90 | p99 |
 |---|---|---|---|
-| us-east | 182 ms | 279 ms | 296 ms |
-| us-west | 242 ms | 302 ms | 321 ms |
-| eu-west | 305 ms | 394 ms | 419 ms |
-| ap-northeast | 390 ms | 509 ms | 539 ms |
-| sa-east | 366 ms | 497 ms | 524 ms |
+| us-east | 181 ms | 279 ms | 299 ms |
+| us-west | 241 ms | 302 ms | 324 ms |
+| eu-west | 305 ms | 395 ms | 420 ms |
+| ap-northeast | 389 ms | 508 ms | 535 ms |
+| sa-east | 365 ms | 497 ms | 526 ms |
 
 No hedges, no retransmits, every slot on the fast path: the leader's placement alone moves
 client latency by about 2x (#28).

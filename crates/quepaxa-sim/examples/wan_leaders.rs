@@ -3,6 +3,7 @@
 //!
 //! `cargo run --release -p quepaxa-sim --example wan_leaders [seeds]`
 //!
+//! `propose` is per mille per 1 ms tick, so `WAN_PROPOSE=100` offers about 100 writes/s.
 //! Round-trip times between regions are rough public-cloud figures (us-east, us-west,
 //! eu-west, ap-northeast, sa-east); the initial leader is replica 0, so each run maps a
 //! different region to replica 0.
@@ -25,8 +26,10 @@ fn main() {
     let seeds: u64 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(3);
     println!("leader site   p50 ms   p90 ms   p99 ms   samples");
     for (leader, site) in REGIONS.iter().enumerate() {
-        // Replica i sits in region order[i]; replica 0 (the first leader) in `leader`.
-        let order: Vec<usize> = std::iter::once(leader).chain((0..5).filter(|&r| r != leader)).collect();
+        // Replica i sits in region order[i]: the baseline placement with replica 0 (the first
+        // leader) swapped with the chosen site, so later leaders stay put.
+        let mut order: Vec<usize> = (0..5).collect();
+        order.swap(0, leader);
         let links: Vec<Vec<u64>> =
             order.iter().map(|&a| order.iter().map(|&b| RTT_MS[a][b] / 2).collect()).collect();
         let mut lat = Vec::new();
@@ -42,6 +45,8 @@ fn main() {
                 // slowest commit path.
                 retransmit_ms: 400,
                 hedge_max_ms: 3_000,
+                // Snapshots move instantly in the simulator; keep them out of WAN latencies.
+                compact_every: None,
                 fault_phase_ms: 20_000,
                 heal_budget_ms: 120_000,
                 propose: std::env::var("WAN_PROPOSE").ok().and_then(|s| s.parse().ok()).unwrap_or(100),
