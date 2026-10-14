@@ -289,8 +289,11 @@ fn membership_changes_through_the_c_abi() {
         run(&mut net, &mut seen);
     }
     for (i, s) in seen.iter().enumerate() {
-        let changes: Vec<String> =
-            s.iter().filter(|e| e.starts_with(b"epoch")).map(|e| String::from_utf8_lossy(e).into_owned()).collect();
+        let changes: Vec<String> = s
+            .iter()
+            .filter(|e| e.starts_with(b"epoch"))
+            .map(|e| String::from_utf8_lossy(e).into_owned())
+            .collect();
         assert_eq!(changes, ["epoch 1 from 64 [2, 0, 1]"], "replica {i}");
     }
     for h in r {
