@@ -63,6 +63,17 @@ unsafe fn drain(r: &[*mut qpx_replica], i: usize, net: &mut Vec<(u32, Vec<u8>)>,
                     out.push(copy(e.payload));
                 }
             }
+            QPX_ACTION_RECONFIGURED => {
+                let mut members = Vec::new();
+                for k in 0..a.count {
+                    let mut m = 0;
+                    assert_eq!(unsafe { qpx_action_member(r[i], k, &mut m) }, QPX_OK);
+                    members.push(m);
+                }
+                let mut m = 0;
+                assert_eq!(unsafe { qpx_action_member(r[i], a.count, &mut m) }, QPX_ERR_INVALID_ARGUMENT);
+                out.push(format!("epoch {} from {} {members:?}", a.id, a.slot).into_bytes());
+            }
             _ => {}
         }
     }
@@ -242,4 +253,50 @@ fn leader_order_is_read_from_abi_0_4_layouts_only() {
     cfg.struct_size = std::mem::offset_of!(qpx_config, leader_order);
     assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
     unsafe { qpx_replica_free(h) };
+}
+
+#[test]
+fn membership_changes_through_the_c_abi() {
+    let members = [0, 1, 2];
+    let r: Vec<_> = (0..N as u32).map(|i| unsafe { new_replica(i, &members) }).collect();
+    let mut net = Vec::new();
+    let mut seen = vec![Vec::new(); N];
+    let run = |net: &mut Vec<(u32, Vec<u8>)>, seen: &mut Vec<Vec<Vec<u8>>>| {
+        while !net.is_empty() {
+            let (to, m) = net.remove(0);
+            assert_eq!(unsafe { qpx_handle_message(r[to as usize], 0, m.as_ptr(), m.len()) }, QPX_OK);
+            unsafe { drain(&r, to as usize, net, &mut seen[to as usize]) };
+        }
+    };
+    for (i, c) in seen.iter_mut().enumerate() {
+        unsafe { drain(&r, i, &mut net, c) };
+    }
+    // Same members, replica 2 preferred as leader.
+    let order = [2u32, 0, 1];
+    let mut id = 0;
+    let rc = unsafe { qpx_propose_reconfiguration(r[0], 0, members.as_ptr(), 3, order.as_ptr(), 3, &mut id) };
+    assert_eq!(rc, QPX_OK);
+    unsafe { drain(&r, 0, &mut net, &mut seen[0]) };
+    let again = unsafe { qpx_propose_reconfiguration(r[0], 0, members.as_ptr(), 3, ptr::null(), 0, &mut id) };
+    assert_eq!(again, QPX_ERR_RECONFIGURATION_PENDING);
+    let bad = unsafe { qpx_propose_reconfiguration(r[0], 0, ptr::null(), 3, ptr::null(), 0, &mut id) };
+    assert_eq!(bad, QPX_ERR_INVALID_ARGUMENT);
+    run(&mut net, &mut seen);
+    for k in 0..70u32 {
+        let p = k.to_le_bytes();
+        assert_eq!(unsafe { qpx_propose(r[1], 0, p.as_ptr(), p.len(), &mut id) }, QPX_OK);
+        unsafe { drain(&r, 1, &mut net, &mut seen[1]) };
+        run(&mut net, &mut seen);
+    }
+    for (i, s) in seen.iter().enumerate() {
+        let changes: Vec<String> = s
+            .iter()
+            .filter(|e| e.starts_with(b"epoch"))
+            .map(|e| String::from_utf8_lossy(e).into_owned())
+            .collect();
+        assert_eq!(changes, ["epoch 1 from 64 [2, 0, 1]"], "replica {i}");
+    }
+    for h in r {
+        unsafe { qpx_replica_free(h) };
+    }
 }

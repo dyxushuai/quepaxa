@@ -33,7 +33,9 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// 0.2: `qpx_install_snapshot` may return `QPX_IGNORED`.
 /// 0.3: size-aware `qpx_config_init`, `qpx_get_metrics`, `qpx_last_error`, strict draining.
 /// 0.4: `qpx_config.leader_order` (appended; older layouts keep the default order).
-pub const QPX_ABI_VERSION_MINOR: u32 = 4;
+/// 0.5: membership changes: `qpx_propose_reconfiguration`, `QPX_ACTION_RECONFIGURED`,
+/// `qpx_action_member`, `QPX_ERR_RECONFIGURATION_PENDING`.
+pub const QPX_ABI_VERSION_MINOR: u32 = 5;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -61,6 +63,8 @@ pub const QPX_ERR_NOT_DRAINED: i32 = -7;
 pub const QPX_ERR_UNKNOWN_PERSIST_ID: i32 = -8;
 /// Malformed core state for `qpx_compact` / `qpx_install_snapshot`.
 pub const QPX_ERR_INVALID_CORE_STATE: i32 = -9;
+/// A membership change has not taken effect yet (ABI 0.5).
+pub const QPX_ERR_RECONFIGURATION_PENDING: i32 = -10;
 /// The library panicked; the handle is now poisoned.
 pub const QPX_ERR_PANIC: i32 = -100;
 /// The handle panicked earlier and is unusable.
@@ -83,6 +87,9 @@ pub const QPX_ACTION_SNAPSHOT_NEEDED: u32 = 6;
 /// Local proposal `id` will not be reported again (`flags` = `QPX_DROP_*`). With
 /// `QPX_DROP_FENCED` the outcome is unknown: it may still commit, as after a crash.
 pub const QPX_ACTION_DROPPED: u32 = 7;
+/// A membership change was applied: from slot `slot`, the `count` members (read them with
+/// `qpx_action_member`, preferred leaders first) form epoch `id` (ABI 0.5).
+pub const QPX_ACTION_RECONFIGURED: u32 = 8;
 
 /// `flags` bit of `QPX_ACTION_PERSIST`: replace all earlier records.
 pub const QPX_PERSIST_REPLACE: u32 = 1;
@@ -261,6 +268,7 @@ fn code(e: Error) -> i32 {
         Error::NotDrained => QPX_ERR_NOT_DRAINED,
         Error::UnknownPersistId => QPX_ERR_UNKNOWN_PERSIST_ID,
         Error::InvalidCoreState => QPX_ERR_INVALID_CORE_STATE,
+        Error::ReconfigurationPending => QPX_ERR_RECONFIGURATION_PENDING,
         _ => QPX_ERR_INVALID_ARGUMENT,
     }
 }
@@ -340,6 +348,7 @@ pub extern "C" fn qpx_status_str(status: i32) -> *const std::ffi::c_char {
         QPX_ERR_NOT_DRAINED => b"actions not drained\0",
         QPX_ERR_UNKNOWN_PERSIST_ID => b"unknown persist id\0",
         QPX_ERR_INVALID_CORE_STATE => b"invalid core state\0",
+        QPX_ERR_RECONFIGURATION_PENDING => b"a membership change has not taken effect yet\0",
         QPX_ERR_PANIC => b"internal panic; handle poisoned\0",
         QPX_ERR_POISONED => b"handle poisoned by an earlier panic\0",
         _ => b"unknown status\0",
@@ -522,6 +531,55 @@ pub unsafe extern "C" fn qpx_propose(
         unsafe { out_id.write(id.0) };
         Ok(())
     })
+}
+
+/// Proposes new membership: `members_len` ids at `members`, with `order_len` ids at
+/// `leader_order` as the preferred leaders (0 and null: by id). Its id is written to
+/// `out_id` and reported like a proposal's; the change takes effect 64 slots after it is
+/// decided (`QPX_ACTION_RECONFIGURED`). `QPX_ERR_RECONFIGURATION_PENDING` while another
+/// change has not taken effect. A joining replica runs with the original configuration.
+///
+/// # Safety
+/// `h` must be a live handle; `members` must point to `members_len` ids and `leader_order`
+/// to `order_len` ids (either may be null when its length is 0); `out_id` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qpx_propose_reconfiguration(
+    h: *mut qpx_replica,
+    now_ns: u64,
+    members: *const u32,
+    members_len: usize,
+    leader_order: *const u32,
+    order_len: usize,
+    out_id: *mut u64,
+) -> i32 {
+    // SAFETY: guaranteed by the caller.
+    let (Some(members), Some(order)) =
+        (unsafe { ids_from(members, members_len) }, unsafe { ids_from(leader_order, order_len) })
+    else {
+        return invalid();
+    };
+    if out_id.is_null() {
+        return invalid();
+    }
+    mutate(h, |r| {
+        let id = r.propose_reconfiguration(Timestamp(now_ns), members, order)?;
+        // SAFETY: checked non-null; the caller guarantees it is writable.
+        unsafe { out_id.write(id.0) };
+        Ok(())
+    })
+}
+
+/// # Safety
+/// `ptr` must point to `len` readable ids (or `len` must be 0).
+unsafe fn ids_from(ptr: *const u32, len: usize) -> Option<Vec<NodeId>> {
+    if len == 0 {
+        return Some(Vec::new());
+    }
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: guaranteed by the caller.
+    Some(unsafe { slice::from_raw_parts(ptr, len) }.iter().copied().map(NodeId).collect())
 }
 
 /// Requests a linearizable read point; its id is written to `out_id`.
@@ -764,13 +822,7 @@ pub unsafe extern "C" fn qpx_poll(h: *mut qpx_replica, out: *mut qpx_action) -> 
         return invalid();
     }
     with(h, |h| {
-        // Membership changes are not in the C ABI yet (they are Rust-only for now).
-        h.current = loop {
-            match h.queue.pop_front() {
-                Some(Action::Reconfigured { .. }) => continue,
-                next => break next,
-            }
-        };
+        h.current = h.queue.pop_front();
         let Some(a) = &h.current else {
             h.drained = true;
             return QPX_EMPTY;
@@ -817,6 +869,12 @@ pub unsafe extern "C" fn qpx_poll(h: *mut qpx_replica, out: *mut qpx_action) -> 
                 v.kind = QPX_ACTION_SNAPSHOT_NEEDED;
                 v.peer = peer.0;
                 v.slot = through.0;
+            }
+            Action::Reconfigured { epoch, from, members } => {
+                v.kind = QPX_ACTION_RECONFIGURED;
+                v.id = *epoch;
+                v.slot = from.0;
+                v.count = members.len();
             }
             Action::Dropped { id, reason } => {
                 v.kind = QPX_ACTION_DROPPED;
@@ -874,6 +932,25 @@ pub unsafe extern "C" fn qpx_action_then(
                 to.write(then[i].to.0);
                 out.write(qpx_bytes::of(&then[i].bytes));
             }
+            QPX_OK
+        }
+        _ => QPX_ERR_INVALID_ARGUMENT,
+    })
+}
+
+/// Member `i` of the current `QPX_ACTION_RECONFIGURED` action (preferred leaders first).
+///
+/// # Safety
+/// `h` must be a live handle; `out` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn qpx_action_member(h: *mut qpx_replica, i: usize, out: *mut u32) -> i32 {
+    if out.is_null() {
+        return invalid();
+    }
+    with(h, |h| match &h.current {
+        Some(Action::Reconfigured { members, .. }) if i < members.len() => {
+            // SAFETY: checked non-null; the caller guarantees it is writable.
+            unsafe { out.write(members[i].0) };
             QPX_OK
         }
         _ => QPX_ERR_INVALID_ARGUMENT,

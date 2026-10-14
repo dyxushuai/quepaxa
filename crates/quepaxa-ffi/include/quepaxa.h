@@ -26,7 +26,9 @@
 // 0.2: `qpx_install_snapshot` may return `QPX_IGNORED`.
 // 0.3: size-aware `qpx_config_init`, `qpx_get_metrics`, `qpx_last_error`, strict draining.
 // 0.4: `qpx_config.leader_order` (appended; older layouts keep the default order).
-#define QPX_ABI_VERSION_MINOR 4
+// 0.5: membership changes: `qpx_propose_reconfiguration`, `QPX_ACTION_RECONFIGURED`,
+// `qpx_action_member`, `QPX_ERR_RECONFIGURATION_PENDING`.
+#define QPX_ABI_VERSION_MINOR 5
 
 // Success.
 #define QPX_OK 0
@@ -67,6 +69,9 @@
 // Malformed core state for `qpx_compact` / `qpx_install_snapshot`.
 #define QPX_ERR_INVALID_CORE_STATE -9
 
+// A membership change has not taken effect yet (ABI 0.5).
+#define QPX_ERR_RECONFIGURATION_PENDING -10
+
 // The library panicked; the handle is now poisoned.
 #define QPX_ERR_PANIC -100
 
@@ -96,6 +101,10 @@
 // Local proposal `id` will not be reported again (`flags` = `QPX_DROP_*`). With
 // `QPX_DROP_FENCED` the outcome is unknown: it may still commit, as after a crash.
 #define QPX_ACTION_DROPPED 7
+
+// A membership change was applied: from slot `slot`, the `count` members (read them with
+// `qpx_action_member`, preferred leaders first) form epoch `id` (ABI 0.5).
+#define QPX_ACTION_RECONFIGURED 8
 
 // `flags` bit of `QPX_ACTION_PERSIST`: replace all earlier records.
 #define QPX_PERSIST_REPLACE 1
@@ -252,6 +261,23 @@ int32_t qpx_propose(qpx_replica *h,
                     size_t len,
                     uint64_t *out_id);
 
+// Proposes new membership: `members_len` ids at `members`, with `order_len` ids at
+// `leader_order` as the preferred leaders (0 and null: by id). Its id is written to
+// `out_id` and reported like a proposal's; the change takes effect 64 slots after it is
+// decided (`QPX_ACTION_RECONFIGURED`). `QPX_ERR_RECONFIGURATION_PENDING` while another
+// change has not taken effect. A joining replica runs with the original configuration.
+//
+// # Safety
+// `h` must be a live handle; `members` must point to `members_len` ids and `leader_order`
+// to `order_len` ids (either may be null when its length is 0); `out_id` writable.
+int32_t qpx_propose_reconfiguration(qpx_replica *h,
+                                    uint64_t now_ns,
+                                    const uint32_t *members,
+                                    size_t members_len,
+                                    const uint32_t *leader_order,
+                                    size_t order_len,
+                                    uint64_t *out_id);
+
 // Requests a linearizable read point; its id is written to `out_id`.
 //
 // # Safety
@@ -357,6 +383,12 @@ int32_t qpx_action_record(qpx_replica *h, size_t i, qpx_bytes *out);
 // # Safety
 // `h` must be a live handle; `to` and `out` writable.
 int32_t qpx_action_then(qpx_replica *h, size_t i, uint32_t *to, qpx_bytes *out);
+
+// Member `i` of the current `QPX_ACTION_RECONFIGURED` action (preferred leaders first).
+//
+// # Safety
+// `h` must be a live handle; `out` writable.
+int32_t qpx_action_member(qpx_replica *h, size_t i, uint32_t *out);
 
 // Entry `i` of the current commit action.
 //

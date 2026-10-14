@@ -1,5 +1,6 @@
 qpx_abi_version
 qpx_action_entry
+qpx_action_member
 qpx_action_record
 qpx_action_then
 qpx_commit_index
@@ -15,6 +16,7 @@ qpx_next_deadline
 qpx_persisted
 qpx_poll
 qpx_propose
+qpx_propose_reconfiguration
 qpx_read_barrier
 qpx_replica_free
 qpx_replica_new
