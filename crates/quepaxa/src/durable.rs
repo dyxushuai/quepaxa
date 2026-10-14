@@ -19,6 +19,14 @@ const KIND_RECORDER: u8 = 2;
 const KIND_RESERVATION: u8 = 3;
 const KIND_DECIDED: u8 = 4;
 const KIND_COMPACTED: u8 = 5;
+/// A recorder register whose `agg` and `prev_agg` may refer to an earlier field instead of
+/// repeating its value (on the fast path `agg` is `first`). Replaces `KIND_RECORDER`, which
+/// is still read.
+const KIND_RECORDER_SHARED: u8 = 6;
+
+// Field tags of `KIND_RECORDER_SHARED` beyond the codec's nil/present.
+const SAME_AS_FIRST: u8 = 3;
+const SAME_AS_AGG: u8 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Record {
@@ -45,12 +53,13 @@ impl Record {
                 out.put_u64_le(*n);
             }
             Record::Recorder { slot, reg } => {
-                out.put_u8(KIND_RECORDER);
+                out.put_u8(KIND_RECORDER_SHARED);
                 out.put_u64_le(slot.0);
                 out.put_u32_le(reg.step);
-                put_opt_proposal(&mut out, reg.first.as_ref());
-                put_opt_proposal(&mut out, reg.agg.as_ref());
-                put_opt_proposal(&mut out, reg.prev_agg.as_ref());
+                let (first, agg) = (reg.first.as_ref(), reg.agg.as_ref());
+                put_opt_proposal(&mut out, first);
+                put_shared(&mut out, agg, &[(SAME_AS_FIRST, first)]);
+                put_shared(&mut out, reg.prev_agg.as_ref(), &[(SAME_AS_FIRST, first), (SAME_AS_AGG, agg)]);
             }
             Record::Reservation { through } => {
                 out.put_u8(KIND_RESERVATION);
@@ -100,6 +109,14 @@ impl Record {
                 };
                 Record::Recorder { slot, reg }
             }
+            KIND_RECORDER_SHARED => {
+                let slot = Slot(r.u64()?);
+                let step = r.u32()?;
+                let first = r.opt_proposal()?;
+                let agg = shared(&mut r, &[(SAME_AS_FIRST, &first)])?;
+                let prev_agg = shared(&mut r, &[(SAME_AS_FIRST, &first), (SAME_AS_AGG, &agg)])?;
+                Record::Recorder { slot, reg: Register { step, first, agg, prev_agg } }
+            }
             KIND_RESERVATION => Record::Reservation { through: Slot(r.u64()?) },
             KIND_DECIDED => Record::Decided { slot: Slot(r.u64()?), proposal: r.proposal()? },
             KIND_COMPACTED => Record::Compacted { through: Slot(r.u64()?), core_state: r.value()? },
@@ -110,14 +127,45 @@ impl Record {
     }
 }
 
+/// Writes `p` as a tag naming an identical earlier field, or in full.
+fn put_shared(out: &mut Vec<u8>, p: Option<&Proposal>, earlier: &[(u8, Option<&Proposal>)]) {
+    let same = |e: &Proposal, p: &Proposal| e.priority == p.priority && e.key == p.key && e.value == p.value;
+    match p.and_then(|p| earlier.iter().find(|(_, e)| e.is_some_and(|e| same(e, p)))) {
+        Some((tag, _)) => out.put_u8(*tag),
+        None => put_opt_proposal(out, p),
+    }
+}
+
+fn shared(r: &mut Reader<'_>, earlier: &[(u8, &Option<Proposal>)]) -> Result<Option<Proposal>, DecodeError> {
+    let tag = r.peek_u8()?;
+    match earlier.iter().find(|(t, _)| *t == tag) {
+        Some((_, Some(p))) => {
+            r.u8()?;
+            Ok(Some(p.clone()))
+        }
+        Some((_, None)) => Err(DecodeError::BadTag),
+        None => r.opt_proposal(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::proposal::tests::prop;
 
-    fn samples() -> [Record; 5] {
+    fn samples() -> [Record; 6] {
+        let v = prop(9, 1, 0);
         [
             Record::Incarnation(3),
+            Record::Recorder {
+                slot: Slot(3),
+                reg: Register {
+                    step: 5,
+                    first: Some(v.clone()),
+                    agg: Some(prop(10, 2, 0)),
+                    prev_agg: Some(v),
+                },
+            },
             Record::Recorder {
                 slot: Slot(9),
                 reg: Register {
@@ -138,6 +186,43 @@ mod tests {
         for rec in samples() {
             assert_eq!(Record::decode(&rec.encode()), Ok(rec));
         }
+    }
+
+    #[test]
+    fn fast_path_registers_store_their_value_once() {
+        let v = prop(9, 1, 0);
+        let reg =
+            Register { step: 4, first: Some(v.clone()), agg: Some(v.clone()), prev_agg: Some(v.clone()) };
+        let rec = Record::Recorder { slot: Slot(3), reg };
+        let bytes = rec.encode();
+        assert_eq!(Record::decode(&bytes), Ok(rec));
+        let single = Record::Decided { slot: Slot(3), proposal: v }.encode();
+        assert_eq!(bytes.len(), single.len() + 4 + 1 + 1 + 1, "step, one present tag, two references");
+    }
+
+    #[test]
+    fn registers_written_before_value_sharing_still_decode() {
+        let reg = Register { step: 6, first: Some(prop(4, 1, 0)), agg: Some(prop(8, 2, 1)), prev_agg: None };
+        let mut old = b"QR\x01\x02".to_vec();
+        old.extend_from_slice(&9u64.to_le_bytes());
+        old.extend_from_slice(&6u32.to_le_bytes());
+        put_opt_proposal(&mut old, reg.first.as_ref());
+        put_opt_proposal(&mut old, reg.agg.as_ref());
+        put_opt_proposal(&mut old, None);
+        let crc = crc32c(&old);
+        old.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(Record::decode(&Bytes::from(old)), Ok(Record::Recorder { slot: Slot(9), reg }));
+    }
+
+    #[test]
+    fn a_reference_to_an_absent_field_is_rejected() {
+        let mut bad = b"QR\x01\x06".to_vec();
+        bad.extend_from_slice(&9u64.to_le_bytes());
+        bad.extend_from_slice(&6u32.to_le_bytes());
+        bad.extend_from_slice(&[0, SAME_AS_FIRST, 0]);
+        let crc = crc32c(&bad);
+        bad.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(Record::decode(&Bytes::from(bad)), Err(DecodeError::BadTag));
     }
 
     #[test]
