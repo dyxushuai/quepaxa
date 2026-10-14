@@ -1,8 +1,8 @@
 diff --git a/crates/quepaxa/src/schedule.rs b/crates/quepaxa/src/schedule.rs
 --- a/crates/quepaxa/src/schedule.rs
 +++ b/crates/quepaxa/src/schedule.rs
-@@ -127,7 +127,7 @@
-         if slot.0 < self.epoch_from || self.applied.contains(&key) {
+@@ -139,7 +139,7 @@
+         if slot.0 < self.epoch_from {
              return None;
          }
 -        let from = slot.0 + LAG;

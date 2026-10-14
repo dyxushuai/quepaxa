@@ -286,7 +286,8 @@ impl Replica {
         if sorted != by_id {
             return Err(Error::InvalidConfig("leader_order must list every member exactly once"));
         }
-        if self.schedule.epoch().1 > self.committed {
+        let proposed_here = self.outstanding.values().any(|(_, kind)| *kind == Kind::Reconfigure);
+        if self.schedule.epoch().1 > self.committed || proposed_here {
             return Err(Error::ReconfigurationPending);
         }
         self.enqueue(now, crate::schedule::encode_order(&order), Kind::Reconfigure)

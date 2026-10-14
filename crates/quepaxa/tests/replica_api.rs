@@ -144,6 +144,9 @@ fn invalid_configs_are_rejected() {
     dup.id = NodeId(0);
     assert!(matches!(Replica::new(dup, [], T0), Err(Error::InvalidConfig(_))));
     // A replica outside the configured members is a joining replica, not an error.
+    let mut crowd = config(&[0]);
+    crowd.members = (0..1025).map(NodeId).collect();
+    assert!(matches!(Replica::new(crowd, [], T0), Err(Error::InvalidConfig(_))));
     let mut nobody = config(&[0]);
     nobody.members.clear();
     assert!(matches!(Replica::new(nobody, [], T0), Err(Error::InvalidConfig(_))));

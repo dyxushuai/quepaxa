@@ -113,7 +113,8 @@ pub(crate) fn encode(items: &[Item]) -> Bytes {
 }
 
 /// The membership changes in an encoded batch, in order: `(key, payload)`. Allocates only
-/// when there is one, so it is cheap on every decided slot; a malformed batch has none.
+/// when there is one, so it is cheap on every decided slot. A batch [`decode`] rejects has
+/// none: the same checks apply here.
 pub(crate) fn changes(buf: &Bytes) -> Vec<((NodeId, u64, ProposalId), Bytes)> {
     let mut found = Vec::new();
     let mut r = Reader::new(buf);
@@ -126,6 +127,9 @@ pub(crate) fn changes(buf: &Bytes) -> Vec<((NodeId, u64, ProposalId), Bytes)> {
         };
         let start = r.pos();
         if r.take(len as usize).is_err() {
+            return Vec::new();
+        }
+        if !matches!(kind, ENTRY_APP | ENTRY_BARRIER | ENTRY_RECONFIGURE) {
             return Vec::new();
         }
         if kind == ENTRY_RECONFIGURE {
@@ -203,6 +207,20 @@ mod tests {
     #[test]
     fn builder_takes_one_oversized_item() {
         assert!(Builder::new(1).fits(&entry(1, 7, b"put a")));
+    }
+
+    #[test]
+    fn changes_come_only_from_batches_that_decode() {
+        let es = vec![entry(1, 2, b"\x01\0\0\0\x05\0\0\0"), entry(1, 3, b"")];
+        let good = encode(&es);
+        assert_eq!(changes(&good).len(), 1);
+        // The same batch with an unknown kind in its last entry is corrupt as a whole.
+        let mut bad = good.to_vec();
+        let at = bad.len() - 4 - 1;
+        bad[at] = 9;
+        let bad = Bytes::from(bad);
+        assert!(decode(&bad).is_err());
+        assert!(changes(&bad).is_empty());
     }
 
     #[test]

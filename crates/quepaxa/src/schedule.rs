@@ -69,9 +69,9 @@ pub(crate) struct Schedule {
     /// Membership epoch in force from `epoch_from` (0: the configured members).
     epoch: u64,
     epoch_from: u64,
-    /// Changes already applied, so a duplicate decided later (hedging may include one
-    /// twice) never reverts a newer membership.
-    applied: Vec<ChangeKey>,
+    /// Changes already applied or ignored, so another copy decided later (hedging may
+    /// include one twice) is ignored too and never reverts a newer membership.
+    settled: Vec<ChangeKey>,
 }
 
 impl Schedule {
@@ -90,7 +90,7 @@ impl Schedule {
             quiet_until: 0,
             epoch: 0,
             epoch_from: 0,
-            applied: Vec::new(),
+            settled: Vec::new(),
         }
     }
 
@@ -129,9 +129,14 @@ impl Schedule {
     /// Applies membership change `key`, decided in `slot`: from `slot + LAG` on, `order`
     /// (the new members, preferred leaders first) leads. Returns the new epoch and its first
     /// slot, or `None` if ignored because another change has not taken effect yet or this
-    /// one was already applied. Feed it in slot order, after `observe` for the same slot.
+    /// one was already applied or ignored. Feed it in slot order, after `observe` for the
+    /// same slot.
     pub fn reconfigure(&mut self, slot: Slot, key: ChangeKey, order: Vec<NodeId>) -> Option<(u64, u64)> {
-        if slot.0 < self.epoch_from || self.applied.contains(&key) {
+        if self.settled.contains(&key) {
+            return None;
+        }
+        self.settled.push(key);
+        if slot.0 < self.epoch_from {
             return None;
         }
         let from = slot.0 + LAG;
@@ -142,7 +147,6 @@ impl Schedule {
         self.history.push((from, order));
         self.epoch += 1;
         self.epoch_from = from;
-        self.applied.push(key);
         self.streak = 0;
         self.quiet_until = from;
         self.prune(slot);
@@ -164,8 +168,8 @@ impl Schedule {
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.put_u64_le(self.epoch);
         out.put_u64_le(self.epoch_from);
-        out.put_u32_le(self.applied.len() as u32);
-        for (origin, incarnation, id) in &self.applied {
+        out.put_u32_le(self.settled.len() as u32);
+        for (origin, incarnation, id) in &self.settled {
             out.put_u32_le(origin.0);
             out.put_u64_le(*incarnation);
             out.put_u64_le(id.0);
@@ -185,15 +189,15 @@ impl Schedule {
     /// Restores a schedule. Before epochs (`with_epochs` false) every order is a permutation
     /// of the configured `members`.
     pub fn decode(r: &mut Reader<'_>, members: &[NodeId], with_epochs: bool) -> Result<Self, DecodeError> {
-        let (mut epoch, mut epoch_from, mut applied) = (0, 0, Vec::new());
+        let (mut epoch, mut epoch_from, mut settled) = (0, 0, Vec::new());
         if with_epochs {
             epoch = r.u64()?;
             epoch_from = r.u64()?;
             let n = r.u32()? as usize;
             for _ in 0..n {
-                applied.push((NodeId(r.u32()?), r.u64()?, ProposalId(r.u64()?)));
+                settled.push((NodeId(r.u32()?), r.u64()?, ProposalId(r.u64()?)));
             }
-            if applied.len() as u64 != epoch {
+            if (settled.len() as u64) < epoch {
                 return Err(DecodeError::BadTag);
             }
         }
@@ -206,14 +210,16 @@ impl Schedule {
         let mut history = Vec::new();
         for _ in 0..n {
             let from = r.u64()?;
+            // Until the first change, every order is a permutation of the configured members.
+            let configured = epoch == 0;
             let len = r.u32()? as usize;
-            if len == 0 || len > MAX_MEMBERS || (!with_epochs && len != members.len()) {
+            if len == 0 || len > MAX_MEMBERS || (configured && len != members.len()) {
                 return Err(DecodeError::BadTag);
             }
             let mut order = Vec::with_capacity(len);
             for _ in 0..len {
                 let node = NodeId(r.u32()?);
-                if (!with_epochs && !members.contains(&node)) || order.contains(&node) {
+                if (configured && !members.contains(&node)) || order.contains(&node) {
                     return Err(DecodeError::BadTag);
                 }
                 order.push(node);
@@ -223,7 +229,7 @@ impl Schedule {
         if history.is_empty() || !history.is_sorted_by_key(|(f, _)| *f) {
             return Err(DecodeError::BadTag);
         }
-        Ok(Self { history, streak, quiet_until, epoch, epoch_from, applied })
+        Ok(Self { history, streak, quiet_until, epoch, epoch_from, settled })
     }
 
     /// Feeds each decided slot exactly once, in slot order, with its value's origin.
@@ -338,7 +344,12 @@ mod tests {
         s.reconfigure(Slot(10), key(1), ids(&[1, 2, 3])).unwrap();
         assert_eq!(s.reconfigure(Slot(11), key(2), ids(&[0, 1])), None, "the first is still pending");
         assert_eq!(s.reconfigure(Slot(10 + LAG), key(1), ids(&[1, 2, 3])), None, "a late duplicate");
-        assert_eq!(s.reconfigure(Slot(10 + LAG), key(2), ids(&[0, 1])), Some((2, 10 + 2 * LAG)));
+        assert_eq!(
+            s.reconfigure(Slot(10 + LAG), key(2), ids(&[0, 1])),
+            None,
+            "a late copy of an ignored one"
+        );
+        assert_eq!(s.reconfigure(Slot(10 + LAG), key(3), ids(&[0, 1])), Some((2, 10 + 2 * LAG)));
         assert_eq!(s.epoch(), (2, 10 + 2 * LAG));
     }
 
@@ -392,13 +403,18 @@ mod tests {
         assert!(s.history.len() <= 2, "{} orders kept", s.history.len());
     }
 
-    /// One schedule encoding with a single order, with or without the epoch prefix.
-    fn encoded(with_epochs: bool, order: &[u32]) -> bytes::Bytes {
+    /// One schedule encoding with a single order: before epochs (`None`) or in `epoch`.
+    fn encoded(epoch: Option<u64>, order: &[u32]) -> bytes::Bytes {
         let mut out = Vec::new();
-        if with_epochs {
+        if let Some(e) = epoch {
+            out.put_u64_le(e);
             out.put_u64_le(0);
-            out.put_u64_le(0);
-            out.put_u32_le(0);
+            out.put_u32_le(e as u32);
+            for k in 0..e {
+                out.put_u32_le(0);
+                out.put_u64_le(1);
+                out.put_u64_le(k);
+            }
         }
         out.put_u32_le(0);
         out.put_u64_le(0);
@@ -412,18 +428,26 @@ mod tests {
     #[test]
     fn decoding_checks_every_order() {
         let members = ids(&[0, 1, 2]);
-        let decode = |with_epochs, order: &[u32]| {
-            Schedule::decode(&mut Reader::new(&encoded(with_epochs, order)), &members, with_epochs).is_ok()
+        let decode = |epoch: Option<u64>, order: &[u32]| {
+            Schedule::decode(&mut Reader::new(&encoded(epoch, order)), &members, epoch.is_some()).is_ok()
         };
-        // Before epochs, orders are permutations of the configured members.
-        assert!(decode(false, &[2, 0, 1]));
-        assert!(!decode(false, &[0, 1]) && !decode(false, &[0, 1, 7]) && !decode(false, &[0, 1, 1]));
-        // With epochs, any non-empty order of distinct replicas, up to the bound.
-        assert!(decode(true, &[7, 8]) && decode(true, &[5]));
-        assert!(!decode(true, &[]) && !decode(true, &[7, 7]));
+        // Before any change, orders are permutations of the configured members.
+        for epoch in [None, Some(0)] {
+            assert!(decode(epoch, &[2, 0, 1]));
+            assert!(!decode(epoch, &[0, 1]) && !decode(epoch, &[0, 1, 7]) && !decode(epoch, &[0, 1, 1]));
+        }
+        // After one, any non-empty order of distinct replicas, up to the bound.
+        assert!(decode(Some(1), &[7, 8]) && decode(Some(1), &[5]));
+        assert!(!decode(Some(1), &[]) && !decode(Some(1), &[7, 7]));
         let max: Vec<u32> = (0..MAX_MEMBERS as u32).collect();
         let over: Vec<u32> = (0..=MAX_MEMBERS as u32).collect();
-        assert!(decode(true, &max) && !decode(true, &over));
+        assert!(decode(Some(1), &max) && !decode(Some(1), &over));
+        // An epoch needs at least as many settled changes.
+        let mut short = encoded(Some(2), &[5]).to_vec();
+        short[16..20].copy_from_slice(&1u32.to_le_bytes());
+        short.drain(20..40);
+        let short = bytes::Bytes::from(short);
+        assert!(Schedule::decode(&mut Reader::new(&short), &members, true).is_err());
     }
 
     proptest::proptest! {

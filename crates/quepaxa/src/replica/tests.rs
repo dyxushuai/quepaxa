@@ -278,6 +278,19 @@ proptest! {
 }
 
 #[test]
+fn one_local_change_at_a_time_even_before_it_is_decided() {
+    let mut r = replica();
+    let members = || alloc::vec![NodeId(0), NodeId(1), NodeId(2)];
+    assert!(r.propose_reconfiguration(Timestamp(1), members(), Vec::new()).is_ok());
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    assert_eq!(
+        r.propose_reconfiguration(Timestamp(1), members(), Vec::new()),
+        Err(Error::ReconfigurationPending)
+    );
+}
+
+#[test]
 fn membership_changes_are_bounded_in_size() {
     let many = |n: usize| (0..n as u32).map(NodeId).collect::<Vec<_>>();
     let mut r = replica();

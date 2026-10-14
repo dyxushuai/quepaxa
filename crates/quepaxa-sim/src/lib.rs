@@ -11,7 +11,7 @@ mod kv;
 pub mod model;
 mod rng;
 
-use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::fmt::Write as _;
 
 use bytes::Bytes;
@@ -222,9 +222,11 @@ pub struct Sim {
     kv: kv::Kv,
     pending_installs: Vec<(usize, usize, u64)>,
     history: invariants::History,
-    /// The latest membership any replica applied, and its epoch.
+    /// The membership in force (clients, faults and convergence use it) and its epoch.
     members: Vec<usize>,
     epoch: u64,
+    /// Every announced epoch: first slot and members. All replicas must agree on them.
+    epochs: BTreeMap<u64, (u64, Vec<usize>)>,
 }
 
 fn cluster_id() -> [u8; 16] {
@@ -275,6 +277,7 @@ impl Sim {
             history: invariants::History::default(),
             members: initial,
             epoch: 0,
+            epochs: BTreeMap::new(),
         };
         if let Some((node, at)) = sim.cfg.kill {
             sim.push(at * MS, Event::Kill { node });
@@ -594,7 +597,7 @@ impl Sim {
             let _ = writeln!(self.trace, "{} heal-partition", self.now);
         }
         // Keep a majority up so the fault phase still makes progress.
-        let down = self.nodes.iter().filter(|x| x.replica.is_none()).count();
+        let down = self.members.iter().filter(|&&m| self.nodes[m].replica.is_none()).count();
         if down < (n - 1) / 2 && self.chance(self.cfg.crash) {
             let i = self.member();
             self.crash(i);
@@ -780,25 +783,29 @@ impl Sim {
             }
             Action::Reconfigured { epoch, members, from } => {
                 let _ = writeln!(self.trace, "{} n{i} epoch {epoch} from {}: {members:?}", self.now, from.0);
-                if epoch > self.epoch {
-                    self.epoch = epoch;
-                    self.report.reconfigurations += 1;
-                    let next: Vec<usize> = members.iter().map(|m| m.0 as usize).collect();
-                    // Clients of a removed replica get no answers; that is not a failure.
-                    for gone in self.members.clone().into_iter().filter(|m| !next.contains(m)) {
-                        self.nodes[gone].outstanding.clear();
-                        self.kv.abandon_reads(gone);
-                        self.nodes[gone].retire_from = Some(from.0);
+                let next: Vec<usize> = members.iter().map(|m| m.0 as usize).collect();
+                if let Some(seen) = self.epochs.get(&epoch) {
+                    assert!(
+                        *seen == (from.0, next.clone()),
+                        "{}",
+                        self.fail(&format!("epoch {epoch} disagrees: {seen:?} vs from {} {next:?}", from.0))
+                    );
+                    return;
+                }
+                self.report.reconfigurations += 1;
+                self.epochs.insert(epoch, (from.0, next.clone()));
+                // Removed replicas serve until the epoch starts; returning ones start now
+                // so they catch up during the window.
+                for gone in self.members.clone().into_iter().filter(|m| !next.contains(m)) {
+                    self.nodes[gone].retire_from = Some(from.0);
+                }
+                for &back in &next {
+                    let n = &mut self.nodes[back];
+                    n.retire_from = None;
+                    if std::mem::take(&mut n.retired) {
+                        let _ = writeln!(self.trace, "{} n{back} rejoins", self.now);
+                        self.push(self.now, Event::Restart { node: back });
                     }
-                    for &back in &next {
-                        let n = &mut self.nodes[back];
-                        n.retire_from = None;
-                        if std::mem::take(&mut n.retired) {
-                            let _ = writeln!(self.trace, "{} n{back} rejoins", self.now);
-                            self.push(self.now, Event::Restart { node: back });
-                        }
-                    }
-                    self.members = next;
                 }
             }
             Action::ReadReady { id, .. } => self.kv.read_ready(i, id),
@@ -806,6 +813,24 @@ impl Sim {
                 self.pending_installs.push((i, peer.0 as usize, through.0))
             }
             _ => {}
+        }
+    }
+
+    /// Switches clients, faults and convergence to an announced epoch once the agreed log
+    /// reaches its first slot.
+    fn activate_epochs(&mut self) {
+        while let Some((from, next)) = self.epochs.get(&(self.epoch + 1)).cloned() {
+            if (self.ledger.slots() as u64) < from {
+                return;
+            }
+            self.epoch += 1;
+            // Clients of a removed replica get no answers; that is not a failure.
+            for gone in self.members.clone().into_iter().filter(|m| !next.contains(m)) {
+                self.nodes[gone].outstanding.clear();
+                self.kv.abandon_reads(gone);
+            }
+            let _ = writeln!(self.trace, "{} epoch {} in force: {next:?}", self.now, self.epoch);
+            self.members = next;
         }
     }
 
@@ -831,6 +856,7 @@ impl Sim {
                     self.report.max_commit_gap_ms = self.report.max_commit_gap_ms.max(gap);
                 }
                 self.last_new_slot_at = self.now;
+                self.activate_epochs();
             }
         }
     }

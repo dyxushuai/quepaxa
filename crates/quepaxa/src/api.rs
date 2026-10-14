@@ -116,6 +116,7 @@ impl Config {
         sorted.dedup();
         let checks = [
             (!self.members.is_empty(), "members must not be empty"),
+            (self.members.len() <= crate::schedule::MAX_MEMBERS, "at most 1024 members"),
             (sorted.len() == self.members.len(), "members must be unique"),
             (self.max_batch_bytes > 0, "max_batch_bytes must be positive"),
             (
