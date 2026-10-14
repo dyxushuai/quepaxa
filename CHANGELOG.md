@@ -7,9 +7,16 @@ All notable changes to this project are documented here. The project follows
 
 ### Upgrading from 0.2
 
-- Data directories written by 0.2 are read as they are. Records and `core_state` written by
-  0.3 (a new recorder record kind, `core_state` version 4) cannot be read by 0.2:
-  downgrading needs a fresh data directory.
+- Upgrade replicas one at a time; data directories written by 0.2 are read as they are.
+  While any replica still runs 0.2: do **not** propose membership changes (0.2 cannot
+  decode them and would keep the old majorities), and expect a lagging 0.2 replica to be
+  unable to install a snapshot from a 0.3 peer (`core_state` version 4).
+- There is no downgrade: 0.2 cannot read the records and `core_state` 0.3 writes. Never
+  restart a replica identity with an empty data directory (it would reuse its incarnation
+  and leader reservation); restore a pre-upgrade backup instead, or add a new replica.
+- An existing cluster keeps its by-id leader order: a custom `leader_order` applies only
+  to a new cluster (or arrives with a membership change), because a replica refuses state
+  built under another order.
 - C ABI 0.5: `qpx_config` grew at the end (`leader_order`); callers built against 0.3 or
   0.4 keep working with the defaults. A new action kind (`QPX_ACTION_RECONFIGURED`)
   appears only if the cluster changes membership.
