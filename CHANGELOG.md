@@ -8,7 +8,9 @@ All notable changes to this project are documented here. The project follows
 - `quepaxa`: `Config::leader_order` sets the preferred leaders (first to last); on a WAN the
   leader's placement alone changes client latency about 2x. A custom order is mixed into
   the cluster identity on the wire, so members configured differently ignore each other
-  instead of disagreeing on the leader.
+  instead of disagreeing on the leader. The order is fixed for the life of the cluster's
+  state: `core_state` (now version 3; version 2 is still read) records it, and a replica
+  refuses to start from, or install, a snapshot built under another order.
 - `quepaxa-ffi`: C ABI 0.4 — `qpx_config.leader_order` / `leader_order_len` (appended;
   callers built against 0.3 keep the default order).
 - `examples/kv-tokio`: `--leader-order`.

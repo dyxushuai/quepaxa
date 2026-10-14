@@ -24,8 +24,13 @@ impl Replica {
     /// Replica state that must be stored with an application snapshot. It covers exactly
     /// the commits already returned by [`Replica::poll_actions`]; take it after applying them.
     pub fn core_state(&self) -> Bytes {
-        CoreState { next: self.emitted, schedule: self.applied_schedule.clone(), dedup: self.dedup.clone() }
-            .encode()
+        CoreState {
+            next: self.emitted,
+            leaders: self.cfg.leaders(),
+            schedule: self.applied_schedule.clone(),
+            dedup: self.dedup.clone(),
+        }
+        .encode()
     }
 
     /// Discards log state up to and including `through`, which the application has
@@ -120,7 +125,9 @@ impl Replica {
     }
 
     fn check_state(&self, through: Slot, core_state: &Bytes) -> Result<CoreState, Error> {
-        decode_state(through, core_state, &self.cfg.members).ok_or(Error::InvalidCoreState)
+        decode_state(through, core_state, &self.cfg.members)
+            .filter(|s| s.leaders == self.cfg.leaders())
+            .ok_or(Error::InvalidCoreState)
     }
 
     fn raise_floor(&mut self, next: u64, core_state: Bytes) {

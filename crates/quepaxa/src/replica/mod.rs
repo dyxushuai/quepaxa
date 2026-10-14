@@ -157,6 +157,12 @@ impl Replica {
                 }
             }
         }
+        // A checkpoint built under another leader order would disagree on who leads.
+        if snapshot.as_ref().is_some_and(|(s, _)| s.leaders != cfg.leaders()) {
+            return Err(Error::InvalidConfig(
+                "leader_order differs from the one this replica's durable state was built with",
+            ));
+        }
         let floor = snapshot.as_ref().map_or(0, |(s, _)| s.next);
         log = log.split_off(&Slot(floor));
         registers = registers.split_off(&Slot(floor));

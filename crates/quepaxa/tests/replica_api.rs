@@ -268,13 +268,22 @@ fn read_barrier_reports_a_slot_after_earlier_commits() {
 
 /// Delivers every message and acknowledges every persist at once until all replicas are quiet.
 fn run_cluster(rs: &mut [Replica]) {
+    run_cluster_on_disk(rs, &mut vec![Vec::new(); rs.len()]);
+}
+
+/// Like [`run_cluster`], keeping each replica's durable records.
+fn run_cluster_on_disk(rs: &mut [Replica], disks: &mut [Vec<Bytes>]) {
     let mut queue = std::collections::VecDeque::new();
     loop {
         for (i, r) in rs.iter_mut().enumerate() {
             for a in drain(r) {
                 match a {
                     Action::Send(o) => queue.push_back((o.to.0 as usize, Input::Message(o.bytes))),
-                    Action::Persist { id, then, .. } => {
+                    Action::Persist { id, then, records, replace } => {
+                        if replace {
+                            disks[i].clear();
+                        }
+                        disks[i].extend(records);
                         queue.extend(then.into_iter().map(|o| (o.to.0 as usize, Input::Message(o.bytes))));
                         queue.push_back((i, Input::Persisted(id)));
                     }
@@ -320,6 +329,27 @@ fn members_with_different_leader_orders_ignore_each_other() {
     assert!(split[2].metrics().messages_rejected > 0);
     assert_eq!(split[2].commit_index(), 0, "the misconfigured member takes no part");
     assert_eq!(split[0].commit_index(), 1, "the others still form a majority");
+}
+
+#[test]
+fn state_built_under_another_leader_order_is_refused() {
+    let mut rs = [ordered(0, &[]), ordered(1, &[]), ordered(2, &[])];
+    let mut disks = vec![Vec::new(); 3];
+    run_cluster_on_disk(&mut rs, &mut disks);
+    rs[0].propose(T0, Bytes::from_static(b"x")).unwrap();
+    run_cluster_on_disk(&mut rs, &mut disks);
+    let state = rs[0].core_state();
+    rs[0].compact(T0, Slot(0), state.clone()).unwrap();
+    run_cluster_on_disk(&mut rs, &mut disks);
+    let mut cfg = config(&[0, 1, 2]);
+    cfg.leader_order = vec![NodeId(2), NodeId(0), NodeId(1)];
+    assert!(matches!(Replica::new(cfg.clone(), disks[0].clone(), T0), Err(Error::InvalidConfig(_))));
+    // The same order restarts fine, and a fresh replica under the new order refuses the
+    // snapshot as well.
+    assert!(Replica::new(config(&[0, 1, 2]), disks[0].clone(), T0).is_ok());
+    let mut fresh = Replica::new(cfg, [], T0).unwrap();
+    drain(&mut fresh);
+    assert_eq!(fresh.install_snapshot(T0, Slot(0), state), Err(Error::InvalidCoreState));
 }
 
 #[test]

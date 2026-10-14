@@ -55,7 +55,9 @@ pub struct Config {
     /// order only when it stops getting its values decided.
     ///
     /// Members with different orders would disagree on who leads, so the order is folded
-    /// into the cluster identity on the wire: such members ignore each other.
+    /// into the cluster identity on the wire: such members ignore each other. It is fixed
+    /// for the life of the cluster's state: a replica refuses to start from, or install, a
+    /// snapshot built under another order.
     pub leader_order: Vec<NodeId>,
 }
 
