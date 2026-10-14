@@ -80,6 +80,30 @@ including the client connections (so every client request also pays a 100 ms rou
 The median matches the path: client round trip (100 ms) + forward to the leader (50 ms) +
 leader fast path (100 ms) + decision broadcast to the client's replica (50 ms), plus fsync.
 
+## Simulated WAN placement (`cargo run --release -p quepaxa-sim --example wan_leaders`)
+
+Five replicas in five regions (rough public-cloud round trips: us-east, us-west, eu-west,
+ap-northeast, sa-east), fault-free, 20 s of writes spread over all replicas, client
+latency from `propose` to `Committed`. Each row places the initial leader in another
+region. The simulator retransmits after 20 ms, below every inter-region round trip, so
+retransmit counts are inflated.
+
+| Leader region | p50 (100 writes/tick) | p90 | p99 | p50 (20 writes/tick) | p90 | p99 |
+|---|---|---|---|---|---|---|
+| us-east | 181 ms | 280 ms | 314 ms | 175 ms | 278 ms | 431 ms |
+| us-west | 485 ms | 610 ms | 712 ms | 238 ms | 421 ms | 694 ms |
+| eu-west | 749 ms | 1,213 ms | 1,634 ms | 297 ms | 471 ms | 634 ms |
+| ap-northeast | 484 ms | 2,054 ms | 6,354 ms | 752 ms | 1,498 ms | 2,149 ms |
+| sa-east | 463 ms | 3,231 ms | 17,477 ms | 720 ms | 1,817 ms | 5,478 ms |
+
+Placement matters several-fold (#28). Replica metrics show why the far placements are so
+much worse than the round trips alone explain: followers hedge almost every forwarded
+entry (`hedged` ≈ `forwarded`). The hedge delay follows each follower's own commit latency,
+which its hedged proposals (decided through its nearer majority) pull below the path
+through a distant leader, so hedging becomes the norm and slots fall back to contended
+randomized rounds; under load the same happens with nearer leaders. Hedged slots also
+rotate the leader by member order, not by latency.
+
 ## Not measured
 
 - No comparison against the Go reference implementation or Raft libraries yet: running
