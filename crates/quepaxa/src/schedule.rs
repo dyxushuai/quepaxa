@@ -375,6 +375,57 @@ mod tests {
         assert_eq!(decode_order(&bytes::Bytes::from_static(&[1, 0, 0, 0])), None);
     }
 
+    #[test]
+    fn orders_are_bounded_in_size() {
+        let at_most = (0..MAX_MEMBERS as u32).map(NodeId).collect::<Vec<_>>();
+        assert!(decode_order(&encode_order(&at_most)).is_some());
+        let too_many = (0..=MAX_MEMBERS as u32).map(NodeId).collect::<Vec<_>>();
+        assert_eq!(decode_order(&encode_order(&too_many)), None);
+    }
+
+    #[test]
+    fn old_schedules_are_pruned() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2]));
+        for slot in 0..10_000 {
+            s.observe(Slot(slot), NodeId(9));
+        }
+        assert!(s.history.len() <= 2, "{} orders kept", s.history.len());
+    }
+
+    /// One schedule encoding with a single order, with or without the epoch prefix.
+    fn encoded(with_epochs: bool, order: &[u32]) -> bytes::Bytes {
+        let mut out = Vec::new();
+        if with_epochs {
+            out.put_u64_le(0);
+            out.put_u64_le(0);
+            out.put_u32_le(0);
+        }
+        out.put_u32_le(0);
+        out.put_u64_le(0);
+        out.put_u32_le(1);
+        out.put_u64_le(0);
+        out.put_u32_le(order.len() as u32);
+        order.iter().for_each(|n| out.put_u32_le(*n));
+        bytes::Bytes::from(out)
+    }
+
+    #[test]
+    fn decoding_checks_every_order() {
+        let members = ids(&[0, 1, 2]);
+        let decode = |with_epochs, order: &[u32]| {
+            Schedule::decode(&mut Reader::new(&encoded(with_epochs, order)), &members, with_epochs).is_ok()
+        };
+        // Before epochs, orders are permutations of the configured members.
+        assert!(decode(false, &[2, 0, 1]));
+        assert!(!decode(false, &[0, 1]) && !decode(false, &[0, 1, 7]) && !decode(false, &[0, 1, 1]));
+        // With epochs, any non-empty order of distinct replicas, up to the bound.
+        assert!(decode(true, &[7, 8]) && decode(true, &[5]));
+        assert!(!decode(true, &[]) && !decode(true, &[7, 7]));
+        let max: Vec<u32> = (0..MAX_MEMBERS as u32).collect();
+        let over: Vec<u32> = (0..=MAX_MEMBERS as u32).collect();
+        assert!(decode(true, &max) && !decode(true, &over));
+    }
+
     proptest::proptest! {
         // Replicas that observe the same decided prefix agree on every slot's leader.
         #[test]

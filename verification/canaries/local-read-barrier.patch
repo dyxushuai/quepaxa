@@ -1,15 +1,14 @@
 diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
-index e91314d..22c3b26 100644
 --- a/crates/quepaxa/src/replica/mod.rs
 +++ b/crates/quepaxa/src/replica/mod.rs
-@@ -295,6 +295,10 @@ impl Replica {
+@@ -307,6 +307,10 @@
              return Err(Error::PayloadTooLarge);
          }
          self.next_proposal += 1;
-+        if barrier {
++        if kind == Kind::Barrier {
 +            self.actions.push(Action::ReadReady { id, slot: Slot(self.emitted.saturating_sub(1)) });
 +            return Ok(id);
 +        }
-         self.outstanding.insert(id, (self.now, barrier));
+         self.outstanding.insert(id, (self.now, kind));
          self.pending.push_back(item);
          self.pump();
