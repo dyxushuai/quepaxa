@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use super::{Decision, Effect, Replica};
 use crate::api::Action;
-use crate::batch;
+use crate::batch::{self, Kind};
 use crate::codec::{Body, reply_proposal};
 use crate::durable::Record;
 use crate::proposal::Proposal;
@@ -94,7 +94,8 @@ impl Replica {
             b.slot = None;
         }
         if broadcast {
-            let peers: Vec<NodeId> = self.cfg.members.iter().copied().filter(|&m| m != self.me).collect();
+            // Everyone in the current or a pending epoch: joining replicas catch up early.
+            let peers: Vec<NodeId> = self.schedule.everyone().into_iter().filter(|&m| m != self.me).collect();
             for peer in peers {
                 self.send(peer, Body::Decided { slot, proposal: proposal.clone() });
             }
@@ -108,7 +109,13 @@ impl Replica {
     /// schedule in order.
     pub(super) fn advance_committed(&mut self) {
         while let Some(d) = self.log.get(&Slot(self.committed)) {
-            self.schedule.observe(Slot(self.committed), d.proposal.key.origin);
+            let slot = Slot(self.committed);
+            self.schedule.observe(slot, d.proposal.key.origin);
+            for (key, payload) in batch::changes(&d.proposal.value) {
+                if let Some(order) = crate::schedule::decode_order(&payload) {
+                    self.schedule.reconfigure(slot, key, order);
+                }
+            }
             self.committed += 1;
         }
         self.seen = self.seen.split_off(&Slot(self.committed));
@@ -129,23 +136,31 @@ impl Replica {
             let slot = Slot(self.emitted);
             let key = d.proposal.key;
             self.applied_schedule.observe(slot, key.origin);
+            for (change, payload) in batch::changes(&d.proposal.value) {
+                if let Some(order) = crate::schedule::decode_order(&payload)
+                    && let Some((epoch, from)) =
+                        self.applied_schedule.reconfigure(slot, change, order.clone())
+                {
+                    self.actions.push(Action::Reconfigured { epoch, from: Slot(from), members: order });
+                }
+            }
             let mut items = batch::decode(&d.proposal.value).unwrap_or_else(|_| {
                 self.metrics.corrupt_batches += 1;
                 Vec::new()
             });
             items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
-            let mine: Vec<(ProposalId, bool)> = items
+            let mine: Vec<(ProposalId, Kind)> = items
                 .iter()
                 .filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)
-                .map(|i| (i.entry.id, i.barrier))
+                .map(|i| (i.entry.id, i.kind))
                 .collect();
-            let entries = items.into_iter().filter(|i| !i.barrier).map(|i| i.entry).collect();
+            let entries = items.into_iter().filter(|i| i.kind == Kind::App).map(|i| i.entry).collect();
             self.actions.push(Action::Commit { slot, entries });
-            for (id, barrier) in mine {
+            for (id, kind) in mine {
                 self.forwarded.remove(&id);
                 if let Some((at, _)) = self.outstanding.remove(&id) {
                     self.observe_latency(self.now.0.saturating_sub(at.0));
-                    self.actions.push(if barrier {
+                    self.actions.push(if kind == Kind::Barrier {
                         Action::ReadReady { id, slot }
                     } else {
                         Action::Committed { id, slot }

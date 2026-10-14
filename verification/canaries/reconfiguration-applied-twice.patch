@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/schedule.rs b/crates/quepaxa/src/schedule.rs
+--- a/crates/quepaxa/src/schedule.rs
++++ b/crates/quepaxa/src/schedule.rs
+@@ -132,7 +132,7 @@
+     /// one was already applied or ignored. Feed it in slot order, after `observe` for the
+     /// same slot.
+     pub fn reconfigure(&mut self, slot: Slot, key: ChangeKey, order: Vec<NodeId>) -> Option<(u64, u64)> {
+-        if self.settled.contains(&key) {
++        if false {
+             return None;
+         }
+         self.settled.push(key);

@@ -8,6 +8,7 @@ use crate::types::{NodeId, ProposalId};
 
 const ENTRY_APP: u8 = 0;
 const ENTRY_BARRIER: u8 = 1;
+const ENTRY_RECONFIGURE: u8 = 2;
 
 /// One application payload committed in the log, tagged with where it was proposed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,13 +24,24 @@ pub struct Entry {
     pub payload: Bytes,
 }
 
-/// An entry as carried in a batch: application data, or a read barrier (empty payload)
-/// that only marks a log position.
+/// What an entry in a batch is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
+pub(crate) enum Kind {
+    /// Application data, handed to the application in `Commit`.
+    App,
+    /// A read barrier (empty payload) that only marks a log position.
+    Barrier,
+    /// A membership change (payload: `crate::schedule::encode_members`).
+    Reconfigure,
+}
+
+/// An entry as carried in a batch.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "model", derive(Hash))]
 pub(crate) struct Item {
     pub entry: Entry,
-    pub barrier: bool,
+    pub kind: Kind,
 }
 
 impl Item {
@@ -85,15 +97,49 @@ impl Builder {
 pub(crate) fn encode(items: &[Item]) -> Bytes {
     let mut out = Vec::with_capacity(HEADER + items.iter().map(encoded_len).sum::<usize>());
     out.put_u32_le(items.len() as u32);
-    for Item { entry: e, barrier } in items {
+    for Item { entry: e, kind } in items {
         out.put_u32_le(e.origin.0);
         out.put_u64_le(e.incarnation);
         out.put_u64_le(e.id.0);
-        out.put_u8(if *barrier { ENTRY_BARRIER } else { ENTRY_APP });
+        out.put_u8(match kind {
+            Kind::App => ENTRY_APP,
+            Kind::Barrier => ENTRY_BARRIER,
+            Kind::Reconfigure => ENTRY_RECONFIGURE,
+        });
         out.put_u32_le(e.payload.len() as u32);
         out.put_slice(&e.payload);
     }
     Bytes::from(out)
+}
+
+/// The membership changes in an encoded batch, in order: `(key, payload)`. Allocates only
+/// when there is one, so it is cheap on every decided slot. A batch [`decode`] rejects has
+/// none: the same checks apply here.
+pub(crate) fn changes(buf: &Bytes) -> Vec<((NodeId, u64, ProposalId), Bytes)> {
+    let mut found = Vec::new();
+    let mut r = Reader::new(buf);
+    let Ok(n) = r.u32() else { return found };
+    for _ in 0..n {
+        let (Ok(origin), Ok(incarnation), Ok(id), Ok(kind), Ok(len)) =
+            (r.u32(), r.u64(), r.u64(), r.u8(), r.u32())
+        else {
+            return Vec::new();
+        };
+        let start = r.pos();
+        if r.take(len as usize).is_err() {
+            return Vec::new();
+        }
+        if !matches!(kind, ENTRY_APP | ENTRY_BARRIER | ENTRY_RECONFIGURE) {
+            return Vec::new();
+        }
+        if kind == ENTRY_RECONFIGURE {
+            found.push((
+                (NodeId(origin), incarnation, ProposalId(id)),
+                buf.slice(start..start + len as usize),
+            ));
+        }
+    }
+    if r.finish().is_err() { Vec::new() } else { found }
 }
 
 pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
@@ -105,16 +151,17 @@ pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
         let origin = NodeId(r.u32()?);
         let incarnation = r.u64()?;
         let id = ProposalId(r.u64()?);
-        let barrier = match r.u8()? {
-            ENTRY_APP => false,
-            ENTRY_BARRIER => true,
+        let kind = match r.u8()? {
+            ENTRY_APP => Kind::App,
+            ENTRY_BARRIER => Kind::Barrier,
+            ENTRY_RECONFIGURE => Kind::Reconfigure,
             _ => return Err(DecodeError::BadTag),
         };
         let len = r.u32()? as usize;
         let start = r.pos();
         r.take(len)?;
         let entry = Entry { origin, incarnation, id, payload: buf.slice(start..start + len) };
-        entries.push(Item { entry, barrier });
+        entries.push(Item { entry, kind });
     }
     r.finish()?;
     Ok(entries)
@@ -128,7 +175,7 @@ mod tests {
     fn entry(o: u32, id: u64, p: &'static [u8]) -> Item {
         let entry =
             Entry { origin: NodeId(o), incarnation: 2, id: ProposalId(id), payload: Bytes::from_static(p) };
-        Item { entry, barrier: id % 2 == 1 }
+        Item { entry, kind: [Kind::App, Kind::Barrier, Kind::Reconfigure][id as usize % 3] }
     }
 
     #[test]
@@ -160,6 +207,20 @@ mod tests {
     #[test]
     fn builder_takes_one_oversized_item() {
         assert!(Builder::new(1).fits(&entry(1, 7, b"put a")));
+    }
+
+    #[test]
+    fn changes_come_only_from_batches_that_decode() {
+        let es = vec![entry(1, 2, b"\x01\0\0\0\x05\0\0\0"), entry(1, 3, b"")];
+        let good = encode(&es);
+        assert_eq!(changes(&good).len(), 1);
+        // The same batch with an unknown kind in its last entry is corrupt as a whole.
+        let mut bad = good.to_vec();
+        let at = bad.len() - 4 - 1;
+        bad[at] = 9;
+        let bad = Bytes::from(bad);
+        assert!(decode(&bad).is_err());
+        assert!(changes(&bad).is_empty());
     }
 
     #[test]

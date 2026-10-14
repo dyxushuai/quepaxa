@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/proposing.rs b/crates/quepaxa/src/replica/proposing.rs
+--- a/crates/quepaxa/src/replica/proposing.rs
++++ b/crates/quepaxa/src/replica/proposing.rs
+@@ -218,7 +218,7 @@
+             self.after_durable(super::Effect::ReservationDurable(through));
+         }
+         // The slot's epoch is fixed: it was decided at least `LAG` slots before any slot we drive.
+-        let recorders = self.schedule.members(slot).to_vec();
++        let recorders = self.cfg.members.clone();
+         let prop = SlotProposer::new(recorders, leader, proposal, &mut self.rng);
+         self.proposers.insert(slot, Active { prop, batch: seq, resend_at: self.now });
+         self.send_requests(slot, false);

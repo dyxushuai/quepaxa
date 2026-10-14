@@ -116,3 +116,16 @@ fn metrics_count_what_happened() {
     let total = |f: fn(&quepaxa::Metrics) -> u64| hostile.iter().flat_map(|r| &r.metrics).map(f).sum::<u64>();
     assert!(total(|m| m.retransmits) > 0 && total(|m| m.hedged) > 0);
 }
+
+#[test]
+fn membership_changes_under_faults_stay_safe_and_converge() {
+    let seeds: u64 = std::env::var("QPX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
+    let mut applied = 0;
+    for seed in 0..seeds {
+        let n = [3, 5][(seed % 2) as usize];
+        let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(n, seed) };
+        let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
+        applied += report.reconfigurations;
+    }
+    assert!(applied >= seeds, "reconfigurations actually happened: {applied}");
+}

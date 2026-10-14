@@ -764,7 +764,13 @@ pub unsafe extern "C" fn qpx_poll(h: *mut qpx_replica, out: *mut qpx_action) -> 
         return invalid();
     }
     with(h, |h| {
-        h.current = h.queue.pop_front();
+        // Membership changes are not in the C ABI yet (they are Rust-only for now).
+        h.current = loop {
+            match h.queue.pop_front() {
+                Some(Action::Reconfigured { .. }) => continue,
+                next => break next,
+            }
+        };
         let Some(a) = &h.current else {
             h.drained = true;
             return QPX_EMPTY;

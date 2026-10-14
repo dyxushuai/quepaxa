@@ -105,6 +105,11 @@ impl Kv {
         self.pending_reads[node].remove(&id);
     }
 
+    /// The node left the cluster: reads pending there will not be answered.
+    pub fn abandon_reads(&mut self, node: usize) {
+        self.pending_reads[node].clear();
+    }
+
     /// The node restarted: its pending reads are gone and it replays its state.
     pub fn restarted(&mut self, node: usize) {
         self.pending_reads[node].clear();

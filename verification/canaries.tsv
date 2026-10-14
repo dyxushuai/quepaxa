@@ -8,3 +8,6 @@ no-commit-dedup	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --t
 checkpoint-drops-registers	QPX_SIM_SEEDS=2000	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	agreement|G[1345] |not in the log
 local-read-barrier	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	linearizability
 leader-reuses-h-after-restart	-	cargo nextest run --release -p quepaxa-sim --test model_check	G5 unique H|G4 fast-path lock|G1
+reconfiguration-takes-effect-early	QPX_SIM_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	G[1345] |agreement|InvalidCoreState|linearizability|did not converge
+reconfiguration-applied-twice	-	cargo nextest run -p quepaxa schedule	late duplicate
+proposer-uses-configured-members	QPX_SIM_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	did not converge|G[1345] |agreement

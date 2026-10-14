@@ -97,7 +97,8 @@ impl Replica {
             self.metrics.messages_rejected += 1;
             return;
         };
-        let cap = self.cfg.max_outstanding_proposals as usize * self.cfg.members.len();
+        let cap =
+            self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
         if !self.leads_now() || self.pending.len() + entries.len() > cap {
             return; // the origin hedges
         }
@@ -217,7 +218,9 @@ impl Replica {
             self.gate.write(Record::Reservation { through: Slot(through) }.encode());
             self.after_durable(super::Effect::ReservationDurable(through));
         }
-        let prop = SlotProposer::new(self.cfg.members.clone(), leader, proposal, &mut self.rng);
+        // The slot's epoch is fixed: it was decided at least `LAG` slots before any slot we drive.
+        let recorders = self.schedule.members(slot).to_vec();
+        let prop = SlotProposer::new(recorders, leader, proposal, &mut self.rng);
         self.proposers.insert(slot, Active { prop, batch: seq, resend_at: self.now });
         self.send_requests(slot, false);
     }
