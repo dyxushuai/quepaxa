@@ -83,6 +83,9 @@ restriction buys nothing.
   in the schedule.
 - **State**: `core_state` version 4 carries the epoch, its first slot, and the applied
   change ids with the schedule; versions 2 and 3 are still read.
+- **Mixed versions**: a replica that predates membership changes cannot decode the change
+  entry and would keep the old majorities, so changes must only be proposed once every
+  replica runs a version that has them (0.3+). The library cannot check this itself.
 - **Recorders** need no epoch check: a proposer counts only replies from its slot's
   members, and registers are per slot.
 
