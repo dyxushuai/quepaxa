@@ -3,38 +3,64 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
-## Unreleased
+## 0.3.0 — 2026-10-14
 
-- `quepaxa`: **membership reconfiguration** — `Replica::propose_reconfiguration` changes
-  the members (and preferred leaders) of a running cluster; a change decided in slot `s`
-  takes effect at `s + 64` (`Action::Reconfigured`), one at a time. Joining replicas run
-  with the original `Config` and catch up during the window. `core_state` is version 4.
-  Design: `docs/design/reconfiguration.md`.
-- `quepaxa-ffi`: C ABI 0.5 — `qpx_propose_reconfiguration`, `QPX_ACTION_RECONFIGURED` with
-  `qpx_action_member`, `QPX_ERR_RECONFIGURATION_PENDING`.
+### Upgrading from 0.2
 
-- `quepaxa`: `Config::leader_order` sets the preferred leaders (first to last); on a WAN the
-  leader's placement alone changes client latency about 2x. A custom order is mixed into
-  the cluster identity on the wire, so members configured differently ignore each other
-  instead of disagreeing on the leader. The order is fixed for the life of the cluster's
-  state: `core_state` (now version 3; version 2 is still read) records it, and a replica
-  refuses to start from, or install, a snapshot built under another order.
-- `quepaxa-ffi`: C ABI 0.4 — `qpx_config.leader_order` / `leader_order_len` (appended;
-  callers built against 0.3 keep the default order).
-- `examples/kv-tokio`: `--leader-order`.
+- Upgrade replicas one at a time; data directories written by 0.2 are read as they are.
+  While any replica still runs 0.2: do **not** propose membership changes (0.2 cannot
+  decode them and would keep the old majorities), and expect a lagging 0.2 replica to be
+  unable to install a snapshot from a 0.3 peer (`core_state` version 4).
+- There is no downgrade: 0.2 cannot read the records and `core_state` 0.3 writes. Never
+  restart a replica identity with an empty data directory (it would reuse its incarnation
+  and leader reservation); restore a pre-upgrade backup instead, or add a new replica.
+- An existing cluster keeps its by-id leader order: a custom `leader_order` applies only
+  to a new cluster (or arrives with a membership change), because a replica refuses state
+  built under another order.
+- C ABI 0.5: `qpx_config` grew at the end (`leader_order`); callers built against 0.3 or
+  0.4 keep working with the defaults. A new action kind (`QPX_ACTION_RECONFIGURED`)
+  appears only if the cluster changes membership.
+- `Config` no longer requires `id` to be a member (a joining replica), but rejects empty
+  `members` and more than 1024.
 
-- `quepaxa` **durable format**: recorder registers are written as a new record kind that
-  stores a value repeated across `first`/`agg`/`prev_agg` once (about 30% fewer bytes
-  persisted on the fast path). Records written by 0.2 are still read; 0.2 cannot read
-  records written by this version, so downgrading needs a fresh data directory.
+### Added
 
-- `quepaxa`: CRC-32C for durable records uses slicing-by-8 (about 3-4x faster record
-  encoding); `Committed` documents that a snapshot install reports the snapshot's slot;
-  `install_snapshot` documents that the application snapshot must be durable before the
-  checkpoint persist runs.
-- `examples/kv-tokio`: batched peer and client I/O and background snapshot writes
-  (saturation near 200k ops/s instead of 100k on the reference VM); a `STATS` command, which
-  `kv-bench` prints after each run.
+- **Membership reconfiguration** — `Replica::propose_reconfiguration` changes the members
+  (and preferred leaders) of a running cluster; a change decided in slot `s` takes effect
+  at `s + 64` (`Action::Reconfigured`), one at a time. Joining replicas run with the
+  original `Config` and catch up during the window. C ABI 0.5:
+  `qpx_propose_reconfiguration`, `QPX_ACTION_RECONFIGURED` with `qpx_action_member`,
+  `QPX_ERR_RECONFIGURATION_PENDING`. Design: `docs/design/reconfiguration.md`.
+- `Config::leader_order` (C ABI 0.4: `qpx_config.leader_order`): the preferred leaders,
+  first to last; on a simulated WAN the leader's placement alone changes client latency
+  about 2x. A custom order is mixed into the wire cluster identity and recorded in
+  `core_state`, so differently configured members ignore each other and a replica refuses
+  state built under another order.
+- `examples/kv-tokio`: `--leader-order`; a `STATS` command, printed by `kv-bench`.
+
+### Performance
+
+- Recorder records store a value repeated across `first`/`agg`/`prev_agg` once (about 30%
+  fewer bytes persisted on the fast path); CRC-32C uses slicing-by-8.
+- `examples/kv-tokio`: batched peer and client I/O, snapshots shared by shard and written
+  off the event loop, mimalloc. Saturation near 200k ops/s instead of 100k on the
+  reference VM; 100k/s p90 0.9 ms instead of 31 ms (`docs/benchmarks.md`).
+
+### Fixed
+
+- A replica far behind asks for a newer snapshot at once if peers compacted past the one
+  it just installed (it waited `hedge_max`).
+- kv-tokio writes nothing more after a failed checkpoint, and never serves or keeps an
+  older snapshot than one it already saved.
+- Docs: `Committed` after a snapshot install reports the snapshot's slot;
+  `install_snapshot` requires the application snapshot to be durable before the checkpoint
+  persist runs; `retransmit_interval` and `hedge_max` guidance for WANs.
+
+### Verification
+
+- Seeded-bug canaries on every PR (12), the durability gate tested on its own, one
+  client-history oracle for the simulator and the model checker, a mutation-testing
+  ratchet, WAN placement and membership-change simulations (`VERIFICATION.md`).
 
 ## 0.2.0 — 2026-10-13
 
