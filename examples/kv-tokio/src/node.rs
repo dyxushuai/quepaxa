@@ -406,6 +406,8 @@ impl Node {
         let (writer, events) = (self.disk.snapshots(), self.events.clone());
         std::thread::spawn(move || {
             let bytes = Bytes::from(encode_snapshot(through, &core, &kv));
+            // Unshare the shards now: until then every write copies the shard it touches.
+            drop(kv);
             let saved = if bytes.len() + 1 > MAX_FRAME {
                 Err(format!("{} bytes exceed the peer frame limit", bytes.len()))
             } else {
