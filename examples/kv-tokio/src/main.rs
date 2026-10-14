@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! kv-tokio --id 0 --members 0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102 \
-//!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000]
+//!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1]
 //! ```
 //!
 //! Clients speak lines: `PUT <key> <value>` → `OK`, `GET <key>` (linearizable, through a
@@ -44,11 +44,13 @@ struct Args {
     client: SocketAddr,
     data: PathBuf,
     snapshot_every: u64,
+    leader_order: Vec<NodeId>,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
+    let mut leader_order = Vec::new();
     while let Some(flag) = it.next() {
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
@@ -65,6 +67,11 @@ fn parse_args() -> Result<Args, String> {
             "--client" => client = Some(value.parse().map_err(|e| format!("--client: {e}"))?),
             "--data" => data = Some(PathBuf::from(value)),
             "--snapshot-every" => every = value.parse().map_err(|e| format!("--snapshot-every: {e}"))?,
+            "--leader-order" => {
+                for i in value.split(',') {
+                    leader_order.push(NodeId(i.parse().map_err(|e| format!("--leader-order: {e}"))?));
+                }
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -74,6 +81,7 @@ fn parse_args() -> Result<Args, String> {
         data: data.ok_or("--data is required")?,
         members,
         snapshot_every: every,
+        leader_order,
     })
 }
 
@@ -232,7 +240,8 @@ async fn main() {
     let members: Vec<NodeId> = args.members.iter().map(|(i, _)| NodeId(*i)).collect();
     let mut cluster_id = [0u8; 16];
     cluster_id[..8].copy_from_slice(b"kv-tokio");
-    let cfg = Config::new(cluster_id, NodeId(args.id), members, seed());
+    let mut cfg = Config::new(cluster_id, NodeId(args.id), members, seed());
+    cfg.leader_order = args.leader_order;
     let (disk, records) = Disk::open(&args.data).expect("open data directory");
     let replica = Replica::new(cfg, records, Timestamp(0)).expect("recover replica");
 

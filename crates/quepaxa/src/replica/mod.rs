@@ -162,7 +162,7 @@ impl Replica {
         registers = registers.split_off(&Slot(floor));
         registers.retain(|slot, _| !log.contains_key(slot));
         let wire = WireCtx {
-            cluster_id: cfg.cluster_id,
+            cluster_id: cfg.wire_cluster_id(),
             config_epoch: 0,
             max_message_bytes: cfg.max_message_bytes,
             max_value_bytes: cfg.max_batch_bytes,
@@ -173,10 +173,10 @@ impl Replica {
             rng: ChaCha20::new(cfg.seed),
             schedule: snapshot
                 .as_ref()
-                .map_or_else(|| Schedule::new(&cfg.members), |(s, _)| s.schedule.clone()),
+                .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone()),
             applied_schedule: snapshot
                 .as_ref()
-                .map_or_else(|| Schedule::new(&cfg.members), |(s, _)| s.schedule.clone()),
+                .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone()),
             cfg,
             incarnation: last_incarnation + 1,
             now,
@@ -380,7 +380,7 @@ impl Replica {
 
     fn encode(&self, to: NodeId, body: Body) -> Outbound {
         let env = Envelope {
-            cluster_id: self.cfg.cluster_id,
+            cluster_id: self.wire.cluster_id,
             config_epoch: 0,
             from: self.me,
             to,

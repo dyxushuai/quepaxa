@@ -13,7 +13,8 @@ const MILLI: u64 = 1_000_000;
 const MESSAGE_OVERHEAD: u64 = 1024;
 
 /// Static configuration of one replica. Every member must use the same `cluster_id`,
-/// `members` and `max_batch_bytes` (receivers reject values larger than their own limit);
+/// `members`, `leader_order` and `max_batch_bytes` (receivers reject values larger than
+/// their own limit);
 /// `seed` must be fresh CSPRNG output on every start, including restarts.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "model", derive(Hash))]
@@ -48,6 +49,14 @@ pub struct Config {
     /// until a commit latency has been observed. Keep it above the slowest client commit
     /// path (through the leader) or followers hedge routinely, which costs throughput.
     pub hedge_max: u64,
+    /// Preferred leaders, first to last: every member once. Empty (the default) means by
+    /// id. Put the member with the fastest path to a majority first: on a WAN the
+    /// placement alone can change client latency about 2x. The leader moves down this
+    /// order only when it stops getting its values decided.
+    ///
+    /// Members with different orders would disagree on who leads, so the order is folded
+    /// into the cluster identity on the wire: such members ignore each other.
+    pub leader_order: Vec<NodeId>,
 }
 
 impl Config {
@@ -65,7 +74,38 @@ impl Config {
             retransmit_interval: 50 * MILLI,
             hedge_min: MILLI,
             hedge_max: 1000 * MILLI,
+            leader_order: Vec::new(),
         }
+    }
+
+    /// The leader order in effect: `leader_order`, or the members by id.
+    pub(crate) fn leaders(&self) -> Vec<NodeId> {
+        if self.leader_order.is_empty() {
+            let mut order = self.members.clone();
+            order.sort_unstable();
+            order
+        } else {
+            self.leader_order.clone()
+        }
+    }
+
+    /// `cluster_id` as sent on the wire: a custom leader order is mixed in, so members
+    /// configured with different orders never exchange messages.
+    pub(crate) fn wire_cluster_id(&self) -> [u8; 16] {
+        let mut id = self.cluster_id;
+        let mut by_id = self.members.clone();
+        by_id.sort_unstable();
+        if self.leaders() != by_id {
+            let fnv = self
+                .leader_order
+                .iter()
+                .flat_map(|n| n.0.to_le_bytes())
+                .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3));
+            for (b, f) in id[8..].iter_mut().zip(fnv.to_le_bytes()) {
+                *b ^= f;
+            }
+        }
+        id
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
@@ -91,6 +131,14 @@ impl Config {
             ),
             (self.max_outstanding_proposals > 0, "max_outstanding_proposals must be positive"),
             (self.retransmit_interval > 0, "retransmit_interval must be positive"),
+            (
+                self.leader_order.is_empty() || {
+                    let mut order = self.leader_order.clone();
+                    order.sort_unstable();
+                    order == sorted
+                },
+                "leader_order must list every member exactly once",
+            ),
         ];
         match checks.iter().find(|(ok, _)| !ok) {
             Some((_, why)) => Err(Error::InvalidConfig(why)),

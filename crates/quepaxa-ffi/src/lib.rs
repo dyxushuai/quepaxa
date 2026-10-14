@@ -32,7 +32,8 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// ABI minor version: additive changes bump it (any change while the major is 0).
 /// 0.2: `qpx_install_snapshot` may return `QPX_IGNORED`.
 /// 0.3: size-aware `qpx_config_init`, `qpx_get_metrics`, `qpx_last_error`, strict draining.
-pub const QPX_ABI_VERSION_MINOR: u32 = 3;
+/// 0.4: `qpx_config.leader_order` (appended; older layouts keep the default order).
+pub const QPX_ABI_VERSION_MINOR: u32 = 4;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -135,6 +136,11 @@ pub struct qpx_config {
     pub hedge_min_ns: u64,
     /// Upper bound of the hedge delay, nanoseconds.
     pub hedge_max_ns: u64,
+    /// Preferred leaders, first to last (every member once), or null for "by id".
+    /// Every member must use the same order. ABI 0.4.
+    pub leader_order: *const u32,
+    /// Number of `leader_order` ids (0 with a null `leader_order`).
+    pub leader_order_len: usize,
 }
 
 /// One action. Borrowed fields stay valid until the next call on the handle.
@@ -357,6 +363,8 @@ fn default_config() -> qpx_config {
         retransmit_interval_ns: d.retransmit_interval,
         hedge_min_ns: d.hedge_min,
         hedge_max_ns: d.hedge_max,
+        leader_order: ptr::null(),
+        leader_order_len: 0,
     }
 }
 
@@ -388,7 +396,7 @@ pub unsafe extern "C" fn qpx_config_init(cfg: *mut qpx_config, size: usize) -> i
 ///
 /// # Safety
 /// `cfg` must point to an initialized `qpx_config` whose `members` points to
-/// `members_len` ids; `records` must point to `n_records` valid `qpx_bytes`; `out` must
+/// `members_len` ids (and `leader_order`, if not null, to `leader_order_len` ids); `records` must point to `n_records` valid `qpx_bytes`; `out` must
 /// be writable. On success `*out` owns a handle to release with `qpx_replica_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_replica_new(
@@ -437,6 +445,14 @@ pub unsafe extern "C" fn qpx_replica_new(
         config.retransmit_interval = c.retransmit_interval_ns;
         config.hedge_min = c.hedge_min_ns;
         config.hedge_max = c.hedge_max_ns;
+        if c.leader_order_len > 0 {
+            if c.leader_order.is_null() {
+                return invalid();
+            }
+            // SAFETY: guaranteed by the caller.
+            let order = unsafe { slice::from_raw_parts(c.leader_order, c.leader_order_len) };
+            config.leader_order = order.iter().copied().map(NodeId).collect();
+        }
         let raw: &[qpx_bytes] = if n_records == 0 {
             &[]
         } else if records.is_null() {
@@ -889,9 +905,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn v1_layout_is_the_current_layout_today() {
+    fn layouts_only_ever_grow_at_the_end() {
         // Appending a field must leave CONFIG_V1_SIZE unchanged and make this fail on purpose.
-        assert_eq!(CONFIG_V1_SIZE, size_of::<qpx_config>());
+        assert_eq!(CONFIG_V1_SIZE, std::mem::offset_of!(qpx_config, leader_order));
+        // The last field ends the layout (up to tail padding on 32-bit targets).
+        assert!(
+            std::mem::offset_of!(qpx_config, leader_order_len) + size_of::<usize>()
+                <= size_of::<qpx_config>()
+        );
+        assert!(
+            size_of::<qpx_config>() - std::mem::offset_of!(qpx_config, leader_order_len)
+                < 2 * size_of::<u64>()
+        );
     }
 
     #[test]

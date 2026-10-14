@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: `Config::leader_order` sets the preferred leaders (first to last); on a WAN the
+  leader's placement alone changes client latency about 2x. A custom order is mixed into
+  the cluster identity on the wire, so members configured differently ignore each other
+  instead of disagreeing on the leader.
+- `quepaxa-ffi`: C ABI 0.4 — `qpx_config.leader_order` / `leader_order_len` (appended;
+  callers built against 0.3 keep the default order).
+- `examples/kv-tokio`: `--leader-order`.
+
 - `quepaxa` **durable format**: recorder registers are written as a new record kind that
   stores a value repeated across `first`/`agg`/`prev_agg` once (about 30% fewer bytes
   persisted on the fast path). Records written by 0.2 are still read; 0.2 cannot read
