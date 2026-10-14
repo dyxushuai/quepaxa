@@ -9,8 +9,9 @@ All notable changes to this project are documented here. The project follows
   the members (and preferred leaders) of a running cluster; a change decided in slot `s`
   takes effect at `s + 64` (`Action::Reconfigured`), one at a time. Joining replicas run
   with the original `Config` and catch up during the window. `core_state` is version 4.
-  Rust only for now: the C ABI skips `Reconfigured` actions. Design:
-  `docs/design/reconfiguration.md`.
+  Design: `docs/design/reconfiguration.md`.
+- `quepaxa-ffi`: C ABI 0.5 — `qpx_propose_reconfiguration`, `QPX_ACTION_RECONFIGURED` with
+  `qpx_action_member`, `QPX_ERR_RECONFIGURATION_PENDING`.
 
 - `quepaxa`: `Config::leader_order` sets the preferred leaders (first to last); on a WAN the
   leader's placement alone changes client latency about 2x. A custom order is mixed into

@@ -1,7 +1,6 @@
 # Membership reconfiguration
 
-Status: **implemented in the Rust API** (option A below); the C ABI skips
-`Reconfigured` actions and cannot propose changes yet.
+Status: **implemented** (option A below), in the Rust API and the C ABI (0.5).
 Tracking: #51. Scope: changing the set of replicas (and the leader order) of a running
 cluster without stopping it; dynamic join of a new replica; removal. Witnesses (vote-only
 members) are discussed but deferred.
@@ -108,4 +107,4 @@ restriction buys nothing.
 2. Witnesses later: they change recovery (a witness cannot serve catch-up).
 3. A change carries the new leader order, so the order can change with membership (the
    configured `leader_order` still cannot change for existing state).
-4. Rust first; the C ABI follows.
+4. Rust first; the C ABI followed (0.5).
