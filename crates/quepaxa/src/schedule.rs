@@ -30,9 +30,15 @@ pub(crate) struct Schedule {
 }
 
 impl Schedule {
+    #[cfg(test)]
     pub fn new(members: &[NodeId]) -> Self {
         let mut order = members.to_vec();
         order.sort_unstable();
+        Self::with_order(order)
+    }
+
+    /// A schedule whose first leaders are `order`, first to last.
+    pub fn with_order(order: Vec<NodeId>) -> Self {
         Self { history: alloc::vec![(0, order)], streak: 0, quiet_until: 0 }
     }
 

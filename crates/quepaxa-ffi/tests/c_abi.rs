@@ -217,3 +217,29 @@ fn metrics_are_readable_over_the_abi() {
     assert_eq!(m.messages_rejected, 1);
     unsafe { qpx_replica_free(h) };
 }
+
+#[test]
+fn leader_order_is_read_from_abi_0_4_layouts_only() {
+    let mut cfg = std::mem::MaybeUninit::<qpx_config>::uninit();
+    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr(), size_of::<qpx_config>()) }, QPX_OK);
+    let mut cfg = unsafe { cfg.assume_init() };
+    assert!(cfg.leader_order.is_null() && cfg.leader_order_len == 0);
+    let members = [0u32, 1, 2];
+    cfg.members = members.as_ptr();
+    cfg.members_len = 3;
+    let mut h = ptr::null_mut();
+    let (good, bad) = ([2u32, 0, 1], [2u32, 2, 1]);
+    cfg.leader_order = good.as_ptr();
+    cfg.leader_order_len = 3;
+    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
+    unsafe { qpx_replica_free(h) };
+    cfg.leader_order = bad.as_ptr();
+    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_CONFIG);
+    cfg.leader_order = ptr::null();
+    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_ARGUMENT);
+    // An ABI 0.3 caller's struct ends before `leader_order`: whatever follows is not read.
+    cfg.leader_order = bad.as_ptr();
+    cfg.struct_size = std::mem::offset_of!(qpx_config, leader_order);
+    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
+    unsafe { qpx_replica_free(h) };
+}

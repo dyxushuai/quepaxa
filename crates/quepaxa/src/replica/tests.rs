@@ -159,8 +159,15 @@ fn decisions_are_learned_up_to_the_last_valid_slot() {
 #[test]
 fn snapshots_may_cover_slots_up_to_the_last_valid_one() {
     let members = [NodeId(0), NodeId(1), NodeId(2)];
-    let state =
-        |next| CoreState { next, schedule: Schedule::new(&members), dedup: Dedup::default() }.encode();
+    let state = |next| {
+        CoreState {
+            next,
+            leaders: members.to_vec(),
+            schedule: Schedule::new(&members),
+            dedup: Dedup::default(),
+        }
+        .encode()
+    };
     assert_eq!(replica().install_snapshot(Timestamp(1), Slot(MAX_SLOT - 1), state(MAX_SLOT)), Ok(true));
     assert_eq!(
         replica().install_snapshot(Timestamp(1), Slot(MAX_SLOT), state(MAX_SLOT + 1)),
@@ -171,7 +178,13 @@ fn snapshots_may_cover_slots_up_to_the_last_valid_one() {
 #[test]
 fn requests_below_the_floor_or_beyond_the_window_get_no_vote() {
     let members = [NodeId(0), NodeId(1), NodeId(2)];
-    let state = CoreState { next: 10, schedule: Schedule::new(&members), dedup: Dedup::default() }.encode();
+    let state = CoreState {
+        next: 10,
+        leaders: members.to_vec(),
+        schedule: Schedule::new(&members),
+        dedup: Dedup::default(),
+    }
+    .encode();
     let replies = |slot: u64| {
         let mut r = replica();
         assert_eq!(r.install_snapshot(Timestamp(1), Slot(9), state.clone()), Ok(true));

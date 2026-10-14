@@ -25,7 +25,8 @@
 // ABI minor version: additive changes bump it (any change while the major is 0).
 // 0.2: `qpx_install_snapshot` may return `QPX_IGNORED`.
 // 0.3: size-aware `qpx_config_init`, `qpx_get_metrics`, `qpx_last_error`, strict draining.
-#define QPX_ABI_VERSION_MINOR 3
+// 0.4: `qpx_config.leader_order` (appended; older layouts keep the default order).
+#define QPX_ABI_VERSION_MINOR 4
 
 // Success.
 #define QPX_OK 0
@@ -133,6 +134,11 @@ typedef struct {
   uint64_t hedge_min_ns;
   // Upper bound of the hedge delay, nanoseconds.
   uint64_t hedge_max_ns;
+  // Preferred leaders, first to last (every member once), or null for "by id".
+  // Every member must use the same order. ABI 0.4.
+  const uint32_t *leader_order;
+  // Number of `leader_order` ids (0 with a null `leader_order`).
+  size_t leader_order_len;
 } qpx_config;
 
 // A borrowed byte range. `ptr` may be null when `len` is 0.
@@ -222,7 +228,7 @@ int32_t qpx_config_init(qpx_config *cfg, size_t size);
 //
 // # Safety
 // `cfg` must point to an initialized `qpx_config` whose `members` points to
-// `members_len` ids; `records` must point to `n_records` valid `qpx_bytes`; `out` must
+// `members_len` ids (and `leader_order`, if not null, to `leader_order_len` ids); `records` must point to `n_records` valid `qpx_bytes`; `out` must
 // be writable. On success `*out` owns a handle to release with `qpx_replica_free`.
 int32_t qpx_replica_new(const qpx_config *cfg,
                         const qpx_bytes *records,
