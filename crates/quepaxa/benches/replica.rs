@@ -4,8 +4,8 @@ use std::collections::VecDeque;
 use std::hint::black_box;
 
 use bytes::Bytes;
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use quepaxa::{Action, Config, Input, NodeId, Replica, Timestamp};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
+use quepaxa::{Action, Config, Input, NodeId, Replica, Slot, Timestamp};
 
 fn replica(id: u32, n: u32) -> Replica {
     let cfg = Config::new([5; 16], NodeId(id), (0..n).map(NodeId).collect(), [id as u8 + 1; 32]);
@@ -69,6 +69,33 @@ fn bench(c: &mut Criterion) {
             lone.handle(Timestamp(1), Input::Message(junk.clone())).unwrap();
             lone.poll_actions(&mut out);
         })
+    });
+    g.finish();
+
+    // Compaction after a snapshot interval of 10,000 decided slots (kv-tokio's default).
+    let mut g = c.benchmark_group("compaction");
+    g.sample_size(20);
+    g.bench_function("compact_10k_slots", |b| {
+        b.iter_batched(
+            || {
+                let mut r = [replica(0, 1)];
+                let mut q = VecDeque::new();
+                settle(&mut r, &mut q);
+                for i in 0..10_000u32 {
+                    r[0].propose(Timestamp(1), Bytes::from(format!("PUT key{i} value{i}"))).unwrap();
+                    settle(&mut r, &mut q);
+                }
+                let [r] = r;
+                (r.emitted_index(), r.core_state(), r)
+            },
+            |(next, state, mut r)| {
+                r.compact(Timestamp(2), Slot(next - 1), state).unwrap();
+                r.poll_actions(&mut out);
+                out.clear();
+                r
+            },
+            BatchSize::LargeInput,
+        )
     });
     g.finish();
 }

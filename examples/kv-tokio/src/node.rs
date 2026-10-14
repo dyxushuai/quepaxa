@@ -2,7 +2,7 @@
 //! executes actions in order. Persists issued while handling a burst of events share one
 //! fsync (group commit); their gated messages leave only after it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
@@ -11,6 +11,7 @@ use quepaxa::{Action, Input, PersistId, ProposalId, Replica, Slot, Timestamp};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
+use crate::kv::Kv;
 use crate::storage::{Disk, decode_snapshot, encode_snapshot};
 
 /// Largest frame on a peer link; snapshots larger than this are not taken (see `maybe_snapshot`).
@@ -98,7 +99,7 @@ fn decode_put(b: &[u8]) -> Option<(String, String)> {
 pub struct Node {
     replica: Replica,
     disk: Disk,
-    kv: BTreeMap<String, String>,
+    kv: Kv,
     /// Next slot to apply.
     applied: u64,
     snapshot_every: u64,
@@ -132,7 +133,7 @@ impl Node {
         Self {
             replica,
             disk,
-            kv: BTreeMap::new(),
+            kv: Kv::default(),
             applied: 0,
             snapshot_every: every,
             last_snapshot: 0,
@@ -392,27 +393,26 @@ impl Node {
     /// lagging replica can always fetch the latest snapshot.
     /// Encodes a snapshot on the event loop (a consistent cut) and writes it in the
     /// background, so the fsync never stalls consensus; the log is compacted once it is
-    /// durable (`Ev::SnapshotSaved`).
+    /// durable (`Ev::SnapshotSaved`). Only the shard pointers are copied here.
     fn maybe_snapshot(&mut self) {
         if self.snapshotting || self.applied == 0 || self.applied < self.last_snapshot + self.snapshot_every {
             return;
         }
         let through = self.applied - 1;
-        let core = self.replica.core_state();
-        let bytes = Bytes::from(encode_snapshot(through, &core, &self.kv));
+        let (core, kv) = (self.replica.core_state(), self.kv.clone());
         // The next attempt waits a full interval, also after a failure.
         self.last_snapshot = self.applied;
-        if bytes.len() + 1 > MAX_FRAME {
-            eprintln!(
-                "kv-tokio: snapshot of {} bytes exceeds the peer frame limit; not compacting",
-                bytes.len()
-            );
-            return;
-        }
         self.snapshotting = true;
         let (writer, events) = (self.disk.snapshots(), self.events.clone());
         std::thread::spawn(move || {
-            let saved = writer.save(through, &bytes).map_err(|e| e.to_string());
+            let bytes = Bytes::from(encode_snapshot(through, &core, &kv));
+            // Unshare the shards now: until then every write copies the shard it touches.
+            drop(kv);
+            let saved = if bytes.len() + 1 > MAX_FRAME {
+                Err(format!("{} bytes exceed the peer frame limit", bytes.len()))
+            } else {
+                writer.save(through, &bytes).map_err(|e| e.to_string())
+            };
             let _ = events.send(Ev::SnapshotSaved { through, core, bytes, saved });
         });
     }
