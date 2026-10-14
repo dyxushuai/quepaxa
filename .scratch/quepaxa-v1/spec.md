@@ -79,7 +79,9 @@ enforced by the action type.
 
 Durable records (core-encoded, `"QR"` v1, CRC-32C): `Incarnation(n)` (first, every start),
 `RecorderState { slot, register }`, `LeaderReservation { through }`, `Decided { slot,
-proposal }`, `Compacted { through, core_state }`.
+proposal }`, `Compacted { through, core_state }`. Since 0.3 a register is written as kind 6,
+whose `agg` and `prev_agg` may reference an identical earlier field instead of repeating
+its value (kind 2 is still read; 0.2 cannot read kind 6).
 
 1. A reply is released only after every write that produced the state it reports is
    durable: it rides in the `then` of the persist carrying the write, or is parked behind the

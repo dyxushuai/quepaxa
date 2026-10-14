@@ -342,6 +342,10 @@ impl<'a> Reader<'a> {
         Ok(Proposal { priority, key, value: self.value()? })
     }
 
+    pub fn peek_u8(&self) -> Result<u8, DecodeError> {
+        self.buf.get(self.pos).copied().ok_or(DecodeError::Truncated)
+    }
+
     pub fn opt_proposal(&mut self) -> Result<Option<Proposal>, DecodeError> {
         match self.u8()? {
             NIL => Ok(None),

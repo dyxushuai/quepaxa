@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa` **durable format**: recorder registers are written as a new record kind that
+  stores a value repeated across `first`/`agg`/`prev_agg` once (about 30% fewer bytes
+  persisted on the fast path). Records written by 0.2 are still read; 0.2 cannot read
+  records written by this version, so downgrading needs a fresh data directory.
+
 - `quepaxa`: CRC-32C for durable records uses slicing-by-8 (about 3-4x faster record
   encoding); `Committed` documents that a snapshot install reports the snapshot's slot;
   `install_snapshot` documents that the application snapshot must be durable before the
