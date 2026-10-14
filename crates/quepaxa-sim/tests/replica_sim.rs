@@ -40,7 +40,8 @@ fn crash_heavy_runs_never_lose_acknowledged_state() {
 
 #[test]
 fn replica_absent_for_the_whole_run_catches_up_quickly() {
-    for seed in 0..5 {
+    // Enough seeds to hit peers compacting past a snapshot while it is being installed.
+    for seed in 0..50 {
         let cfg = SimConfig { absent: Some(2), heal_budget_ms: 300, ..calm(3, seed) };
         let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
         assert!(report.slots > 100, "{report:?}");
