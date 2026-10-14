@@ -6,18 +6,57 @@
 //! LAG`, so the schedule of any slot it touches is already fixed by its decided prefix.
 //! When `ROTATE_AFTER` consecutive slots are decided with values that did not originate at
 //! their leader (it is down, partitioned or slow), the leader moves to the back.
+//!
+//! Membership changes ride the same mechanism: an order is always the slot's members,
+//! preferred leaders first, so a membership change decided in slot `s` is a new order from
+//! `s + LAG` (a new epoch). The same window bound then guarantees that every proposer of a
+//! slot uses the same recorders and majority.
 
 use alloc::vec::Vec;
 use bytes::BufMut;
 
 use crate::codec::{DecodeError, Reader};
 
-use crate::types::{NodeId, Slot};
+use crate::types::{NodeId, ProposalId, Slot};
 
 /// Slots between deciding a schedule change and it taking effect.
 pub(crate) const LAG: u64 = 64;
 /// Consecutive slots not led by their leader before it is rotated out.
 const ROTATE_AFTER: u32 = 8;
+/// Upper bound on members in one order (keeps decoding allocations bounded).
+pub(crate) const MAX_MEMBERS: usize = 1024;
+
+/// Identity of a proposed membership change: `(origin, incarnation, id)`.
+pub(crate) type ChangeKey = (NodeId, u64, ProposalId);
+
+/// Encodes a membership change's new order (members, preferred leaders first).
+pub(crate) fn encode_order(order: &[NodeId]) -> bytes::Bytes {
+    let mut out = Vec::with_capacity(4 + 4 * order.len());
+    out.put_u32_le(order.len() as u32);
+    for n in order {
+        out.put_u32_le(n.0);
+    }
+    bytes::Bytes::from(out)
+}
+
+/// Decodes an order written by [`encode_order`]: non-empty, without duplicates.
+pub(crate) fn decode_order(b: &bytes::Bytes) -> Option<Vec<NodeId>> {
+    let mut r = Reader::new(b);
+    let len = r.u32().ok()? as usize;
+    if len == 0 || len > MAX_MEMBERS {
+        return None;
+    }
+    let mut order = Vec::with_capacity(len);
+    for _ in 0..len {
+        let n = NodeId(r.u32().ok()?);
+        if order.contains(&n) {
+            return None;
+        }
+        order.push(n);
+    }
+    r.finish().ok()?;
+    Some(order)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "model", derive(Hash))]
@@ -27,6 +66,12 @@ pub(crate) struct Schedule {
     streak: u32,
     /// No new rotation is counted until the last one takes effect.
     quiet_until: u64,
+    /// Membership epoch in force from `epoch_from` (0: the configured members).
+    epoch: u64,
+    epoch_from: u64,
+    /// Changes already applied, so a duplicate decided later (hedging may include one
+    /// twice) never reverts a newer membership.
+    applied: Vec<ChangeKey>,
 }
 
 impl Schedule {
@@ -39,7 +84,14 @@ impl Schedule {
 
     /// A schedule whose first leaders are `order`, first to last.
     pub fn with_order(order: Vec<NodeId>) -> Self {
-        Self { history: alloc::vec![(0, order)], streak: 0, quiet_until: 0 }
+        Self {
+            history: alloc::vec![(0, order)],
+            streak: 0,
+            quiet_until: 0,
+            epoch: 0,
+            epoch_from: 0,
+            applied: Vec::new(),
+        }
     }
 
     fn order(&self, slot: Slot) -> &[NodeId] {
@@ -51,6 +103,58 @@ impl Schedule {
         self.order(slot)[0]
     }
 
+    /// The members of `slot`'s epoch: its recorders, preferred leaders first.
+    pub fn members(&self, slot: Slot) -> &[NodeId] {
+        self.order(slot)
+    }
+
+    /// Whether `node` is a member of any epoch still in the schedule (current or pending).
+    pub fn knows(&self, node: NodeId) -> bool {
+        self.history.iter().any(|(_, order)| order.contains(&node))
+    }
+
+    /// Everyone in any epoch still in the schedule, without duplicates.
+    pub fn everyone(&self) -> Vec<NodeId> {
+        let mut all: Vec<NodeId> = self.history.iter().flat_map(|(_, o)| o.iter().copied()).collect();
+        all.sort_unstable();
+        all.dedup();
+        all
+    }
+
+    /// The latest epoch and the slot it starts at (possibly still in the future).
+    pub fn epoch(&self) -> (u64, u64) {
+        (self.epoch, self.epoch_from)
+    }
+
+    /// Applies membership change `key`, decided in `slot`: from `slot + LAG` on, `order`
+    /// (the new members, preferred leaders first) leads. Returns the new epoch and its first
+    /// slot, or `None` if ignored because another change has not taken effect yet or this
+    /// one was already applied. Feed it in slot order, after `observe` for the same slot.
+    pub fn reconfigure(&mut self, slot: Slot, key: ChangeKey, order: Vec<NodeId>) -> Option<(u64, u64)> {
+        if slot.0 < self.epoch_from || self.applied.contains(&key) {
+            return None;
+        }
+        let from = slot.0 + LAG;
+        // A rotation counted in this very slot is superseded.
+        if self.history.last().is_some_and(|(f, _)| *f == from) {
+            self.history.pop();
+        }
+        self.history.push((from, order));
+        self.epoch += 1;
+        self.epoch_from = from;
+        self.applied.push(key);
+        self.streak = 0;
+        self.quiet_until = from;
+        self.prune(slot);
+        Some((self.epoch, from))
+    }
+
+    /// Older schedules can no longer apply to any slot a replica will drive.
+    fn prune(&mut self, slot: Slot) {
+        let keep_from = self.history.partition_point(|(f, _)| *f <= slot.0).saturating_sub(1);
+        self.history.drain(..keep_from);
+    }
+
     /// 0 for the leader, then the hedging order; a non-member ranks last.
     pub fn position(&self, node: NodeId, slot: Slot) -> u64 {
         let order = self.order(slot);
@@ -58,6 +162,14 @@ impl Schedule {
     }
 
     pub fn encode(&self, out: &mut Vec<u8>) {
+        out.put_u64_le(self.epoch);
+        out.put_u64_le(self.epoch_from);
+        out.put_u32_le(self.applied.len() as u32);
+        for (origin, incarnation, id) in &self.applied {
+            out.put_u32_le(origin.0);
+            out.put_u64_le(*incarnation);
+            out.put_u64_le(id.0);
+        }
         out.put_u32_le(self.streak);
         out.put_u64_le(self.quiet_until);
         out.put_u32_le(self.history.len() as u32);
@@ -70,8 +182,21 @@ impl Schedule {
         }
     }
 
-    /// Restores a schedule; `members` must be the same set the encoder had.
-    pub fn decode(r: &mut Reader<'_>, members: &[NodeId]) -> Result<Self, DecodeError> {
+    /// Restores a schedule. Before epochs (`with_epochs` false) every order is a permutation
+    /// of the configured `members`.
+    pub fn decode(r: &mut Reader<'_>, members: &[NodeId], with_epochs: bool) -> Result<Self, DecodeError> {
+        let (mut epoch, mut epoch_from, mut applied) = (0, 0, Vec::new());
+        if with_epochs {
+            epoch = r.u64()?;
+            epoch_from = r.u64()?;
+            let n = r.u32()? as usize;
+            for _ in 0..n {
+                applied.push((NodeId(r.u32()?), r.u64()?, ProposalId(r.u64()?)));
+            }
+            if applied.len() as u64 != epoch {
+                return Err(DecodeError::BadTag);
+            }
+        }
         let streak = r.u32()?;
         if streak >= ROTATE_AFTER {
             return Err(DecodeError::BadTag);
@@ -82,13 +207,13 @@ impl Schedule {
         for _ in 0..n {
             let from = r.u64()?;
             let len = r.u32()? as usize;
-            if len != members.len() {
+            if len == 0 || len > MAX_MEMBERS || (!with_epochs && len != members.len()) {
                 return Err(DecodeError::BadTag);
             }
             let mut order = Vec::with_capacity(len);
             for _ in 0..len {
                 let node = NodeId(r.u32()?);
-                if !members.contains(&node) || order.contains(&node) {
+                if (!with_epochs && !members.contains(&node)) || order.contains(&node) {
                     return Err(DecodeError::BadTag);
                 }
                 order.push(node);
@@ -98,7 +223,7 @@ impl Schedule {
         if history.is_empty() || !history.is_sorted_by_key(|(f, _)| *f) {
             return Err(DecodeError::BadTag);
         }
-        Ok(Self { history, streak, quiet_until })
+        Ok(Self { history, streak, quiet_until, epoch, epoch_from, applied })
     }
 
     /// Feeds each decided slot exactly once, in slot order, with its value's origin.
@@ -118,9 +243,7 @@ impl Schedule {
             self.history.push((from, order));
             self.streak = 0;
             self.quiet_until = from;
-            // Older schedules can no longer apply to any slot a replica will drive.
-            let keep_from = self.history.partition_point(|(f, _)| *f <= slot.0).saturating_sub(1);
-            self.history.drain(..keep_from);
+            self.prune(slot);
         }
     }
 }
@@ -187,11 +310,69 @@ mod tests {
             }
             bytes::Bytes::from(out)
         };
-        let decode =
-            |b: &bytes::Bytes| Schedule::decode(&mut Reader::new(b), &members).map(|s| s.history.len());
+        let decode = |b: &bytes::Bytes| {
+            Schedule::decode(&mut Reader::new(b), &members, false).map(|s| s.history.len())
+        };
         assert_eq!(decode(&encoded(&[0, 9])), Ok(2));
         assert!(decode(&encoded(&[])).is_err());
         assert!(decode(&encoded(&[9, 0])).is_err());
+    }
+
+    fn key(id: u64) -> ChangeKey {
+        (NodeId(0), 1, ProposalId(id))
+    }
+
+    #[test]
+    fn a_membership_change_takes_effect_a_window_later() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2]));
+        assert_eq!(s.reconfigure(Slot(10), key(1), ids(&[3, 1, 2])), Some((1, 10 + LAG)));
+        assert_eq!(s.members(Slot(10 + LAG - 1)), ids(&[0, 1, 2]));
+        assert_eq!((s.members(Slot(10 + LAG)), s.leader(Slot(10 + LAG))), (&ids(&[3, 1, 2])[..], NodeId(3)));
+        assert!(s.knows(NodeId(3)) && s.knows(NodeId(0)));
+        assert_eq!(s.everyone(), ids(&[0, 1, 2, 3]));
+    }
+
+    #[test]
+    fn one_change_at_a_time_and_never_twice() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2]));
+        s.reconfigure(Slot(10), key(1), ids(&[1, 2, 3])).unwrap();
+        assert_eq!(s.reconfigure(Slot(11), key(2), ids(&[0, 1])), None, "the first is still pending");
+        assert_eq!(s.reconfigure(Slot(10 + LAG), key(1), ids(&[1, 2, 3])), None, "a late duplicate");
+        assert_eq!(s.reconfigure(Slot(10 + LAG), key(2), ids(&[0, 1])), Some((2, 10 + 2 * LAG)));
+        assert_eq!(s.epoch(), (2, 10 + 2 * LAG));
+    }
+
+    #[test]
+    fn a_change_supersedes_a_rotation_counted_in_the_same_slot() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2]));
+        for slot in 0..8 {
+            s.observe(Slot(slot), NodeId(1));
+        }
+        s.reconfigure(Slot(7), key(1), ids(&[2, 0])).unwrap();
+        assert_eq!(s.members(Slot(7 + LAG)), ids(&[2, 0]));
+        // Rotations resume in the new epoch, counted from its own leader.
+        for slot in (7 + LAG)..(7 + LAG + 8) {
+            s.observe(Slot(slot), NodeId(0));
+        }
+        assert_eq!(s.leader(Slot(7 + 2 * LAG + 7)), NodeId(0));
+    }
+
+    #[test]
+    fn epochs_round_trip() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2]));
+        s.reconfigure(Slot(3), key(9), ids(&[4, 5, 6, 7])).unwrap();
+        let mut out = Vec::new();
+        s.encode(&mut out);
+        let b = bytes::Bytes::from(out);
+        assert_eq!(Schedule::decode(&mut Reader::new(&b), &ids(&[0, 1, 2]), true), Ok(s));
+    }
+
+    #[test]
+    fn orders_decode_only_when_well_formed() {
+        assert_eq!(decode_order(&encode_order(&ids(&[2, 0]))), Some(ids(&[2, 0])));
+        assert_eq!(decode_order(&encode_order(&[])), None);
+        assert_eq!(decode_order(&encode_order(&ids(&[1, 1]))), None);
+        assert_eq!(decode_order(&bytes::Bytes::from_static(&[1, 0, 0, 0])), None);
     }
 
     proptest::proptest! {

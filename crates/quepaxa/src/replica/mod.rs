@@ -17,7 +17,7 @@ use core::mem;
 use self::gate::Gate;
 
 use crate::api::{Action, Config, DropReason, Error, Input, Metrics, Outbound};
-use crate::batch::{self, Entry, Item};
+use crate::batch::{self, Entry, Item, Kind};
 use crate::codec::{Body, Envelope, Message, WireCtx};
 use crate::core_state::CoreState;
 use crate::dedup::Dedup;
@@ -102,8 +102,8 @@ pub struct Replica {
     hedged: VecDeque<Item>,
     /// Own entries handed to the leader, with when.
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
-    /// Own proposals awaiting commit: when they were made, and whether it is a barrier.
-    outstanding: BTreeMap<ProposalId, (Timestamp, bool)>,
+    /// Own proposals awaiting commit: when they were made, and what they are.
+    outstanding: BTreeMap<ProposalId, (Timestamp, Kind)>,
     /// Smoothed propose-to-commit latency of own proposals, in nanoseconds.
     commit_latency: Option<u64>,
     next_batch: u64,
@@ -249,17 +249,50 @@ impl Replica {
     /// Queues `payload` for the log. The returned id later appears in exactly one of
     /// [`Action::Committed`] or [`Action::Dropped`], unless the replica crashes first.
     pub fn propose(&mut self, now: Timestamp, payload: Bytes) -> Result<ProposalId, Error> {
-        self.enqueue(now, payload, false)
+        self.enqueue(now, payload, Kind::App)
     }
 
     /// Requests a linearizable read point. The returned id later appears in exactly one of
     /// [`Action::ReadReady`] or [`Action::Dropped`]: once the application has applied every
     /// commit up to the reported slot, a read of its state is linearizable.
     pub fn read_barrier(&mut self, now: Timestamp) -> Result<ProposalId, Error> {
-        self.enqueue(now, Bytes::new(), true)
+        self.enqueue(now, Bytes::new(), Kind::Barrier)
     }
 
-    fn enqueue(&mut self, now: Timestamp, payload: Bytes, barrier: bool) -> Result<ProposalId, Error> {
+    /// Proposes new membership: `members`, with `leader_order` as the preferred leaders
+    /// (empty: by id). Once decided in slot `s` it takes effect at slot `s + 64`, reported by
+    /// [`Action::Reconfigured`] in log order; the id is reported like a proposal's. One
+    /// change at a time: [`Error::ReconfigurationPending`] until the previous one took
+    /// effect (a concurrent one decided later than another is ignored by every replica).
+    ///
+    /// A replica joining the cluster runs with the original `Config` (its own id need not
+    /// be a member) and catches up before its first slot.
+    pub fn propose_reconfiguration(
+        &mut self,
+        now: Timestamp,
+        members: Vec<NodeId>,
+        leader_order: Vec<NodeId>,
+    ) -> Result<ProposalId, Error> {
+        let mut by_id = members.clone();
+        by_id.sort_unstable();
+        by_id.dedup();
+        if members.is_empty() || by_id.len() != members.len() || members.len() > crate::schedule::MAX_MEMBERS
+        {
+            return Err(Error::InvalidConfig("members must be non-empty and unique"));
+        }
+        let order = if leader_order.is_empty() { by_id.clone() } else { leader_order };
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        if sorted != by_id {
+            return Err(Error::InvalidConfig("leader_order must list every member exactly once"));
+        }
+        if self.schedule.epoch().1 > self.committed {
+            return Err(Error::ReconfigurationPending);
+        }
+        self.enqueue(now, crate::schedule::encode_order(&order), Kind::Reconfigure)
+    }
+
+    fn enqueue(&mut self, now: Timestamp, payload: Bytes, kind: Kind) -> Result<ProposalId, Error> {
         self.begin(now)?;
         if self.fenced {
             return Err(Error::Fenced);
@@ -269,12 +302,12 @@ impl Replica {
         }
         let id = ProposalId(self.next_proposal);
         let item =
-            Item { entry: Entry { origin: self.me, incarnation: self.incarnation, id, payload }, barrier };
+            Item { entry: Entry { origin: self.me, incarnation: self.incarnation, id, payload }, kind };
         if !batch::fits_alone(&item, self.cfg.max_batch_bytes as usize) {
             return Err(Error::PayloadTooLarge);
         }
         self.next_proposal += 1;
-        self.outstanding.insert(id, (self.now, barrier));
+        self.outstanding.insert(id, (self.now, kind));
         self.pending.push_back(item);
         self.pump();
         self.flush();
@@ -417,7 +450,8 @@ impl Replica {
             return;
         };
         let from = msg.env.from;
-        if msg.env.to != self.me || from == self.me || !self.cfg.members.contains(&from) {
+        let known = self.cfg.members.contains(&from) || self.schedule.knows(from);
+        if msg.env.to != self.me || from == self.me || !known {
             self.metrics.messages_rejected += 1;
             return;
         }

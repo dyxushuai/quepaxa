@@ -115,8 +115,8 @@ impl Config {
         sorted.sort_unstable();
         sorted.dedup();
         let checks = [
+            (!self.members.is_empty(), "members must not be empty"),
             (sorted.len() == self.members.len(), "members must be unique"),
-            (sorted.contains(&self.id), "id must be a member"),
             (self.max_batch_bytes > 0, "max_batch_bytes must be positive"),
             (
                 u64::from(self.max_message_bytes) >= 2 * u64::from(self.max_batch_bytes) + MESSAGE_OVERHEAD,
@@ -233,6 +233,17 @@ pub enum Action {
         /// The last slot it covers (at least).
         through: Slot,
     },
+    /// A membership change was applied (in the log order of `Commit`): from slot `from`,
+    /// `members` (preferred leaders first) are the replicas and majorities are theirs.
+    /// A replica not in `members` may shut down once it has applied the slot before `from`.
+    Reconfigured {
+        /// The new epoch (the configured members are epoch 0).
+        epoch: u64,
+        /// First slot of the epoch.
+        from: Slot,
+        /// The members, preferred leaders first.
+        members: Vec<NodeId>,
+    },
     /// A local proposal will not be reported again (see [`DropReason`] for whether it may
     /// still commit).
     Dropped {
@@ -294,6 +305,9 @@ pub enum Error {
     /// The core state passed to `compact` or `install_snapshot` is malformed or does not
     /// match the slot it claims to cover.
     InvalidCoreState,
+    /// A membership change is still waiting to take effect; propose the next one after its
+    /// [`Action::Reconfigured`] slot is committed.
+    ReconfigurationPending,
 }
 
 impl fmt::Display for Error {
@@ -307,6 +321,7 @@ impl fmt::Display for Error {
             Error::NotDrained => f.write_str("poll_actions must drain actions before the next call"),
             Error::UnknownPersistId => f.write_str("unknown persist id"),
             Error::InvalidCoreState => f.write_str("invalid core state"),
+            Error::ReconfigurationPending => f.write_str("a membership change has not taken effect yet"),
         }
     }
 }

@@ -143,9 +143,13 @@ fn invalid_configs_are_rejected() {
     let mut dup = config(&[0, 0]);
     dup.id = NodeId(0);
     assert!(matches!(Replica::new(dup, [], T0), Err(Error::InvalidConfig(_))));
-    let mut stranger = config(&[0, 1]);
-    stranger.id = NodeId(7);
-    assert!(matches!(Replica::new(stranger, [], T0), Err(Error::InvalidConfig(_))));
+    // A replica outside the configured members is a joining replica, not an error.
+    let mut nobody = config(&[0]);
+    nobody.members.clear();
+    assert!(matches!(Replica::new(nobody, [], T0), Err(Error::InvalidConfig(_))));
+    let mut joiner = config(&[0, 1]);
+    joiner.id = NodeId(7);
+    assert!(Replica::new(joiner, [], T0).is_ok());
 }
 
 #[test]
@@ -358,5 +362,81 @@ fn a_leader_order_must_list_every_member_once() {
         let mut cfg = config(&[0, 1, 2]);
         cfg.leader_order = order.iter().copied().map(NodeId).collect();
         assert!(matches!(Replica::new(cfg, [], T0), Err(Error::InvalidConfig(_))), "{order:?}");
+    }
+}
+
+/// Like [`run_cluster`], but replicas in `down` neither send nor receive.
+fn run_without(rs: &mut [Replica], down: &[usize]) -> Vec<(usize, Action)> {
+    let mut queue = std::collections::VecDeque::new();
+    let mut seen = Vec::new();
+    loop {
+        for (i, r) in rs.iter_mut().enumerate() {
+            for a in drain(r) {
+                match a {
+                    Action::Send(o) => queue.push_back((o.to.0 as usize, Input::Message(o.bytes))),
+                    Action::Persist { id, then, .. } => {
+                        queue.extend(then.into_iter().map(|o| (o.to.0 as usize, Input::Message(o.bytes))));
+                        queue.push_back((i, Input::Persisted(id)));
+                    }
+                    other => seen.push((i, other)),
+                }
+            }
+        }
+        let Some((to, input)) = queue.pop_front() else { return seen };
+        if down.contains(&to) && !matches!(input, Input::Persisted(_)) {
+            continue;
+        }
+        rs[to].handle(T0, input).unwrap();
+    }
+}
+
+#[test]
+fn a_member_is_replaced_and_the_new_majority_commits_without_it() {
+    // Replica 3 joins with the original configuration; replica 0 leaves.
+    let mut rs = [ordered(0, &[]), ordered(1, &[]), ordered(2, &[]), ordered(3, &[])];
+    run_without(&mut rs, &[]);
+    let id = rs[0].propose_reconfiguration(T0, vec![NodeId(1), NodeId(2), NodeId(3)], vec![]).unwrap();
+    let mut seen = run_without(&mut rs, &[]);
+    assert!(seen.iter().any(|(i, a)| *i == 0 && matches!(a, Action::Committed { id: c, .. } if *c == id)));
+    assert_eq!(
+        rs[1].propose_reconfiguration(T0, vec![NodeId(0), NodeId(1), NodeId(2)], vec![]),
+        Err(Error::ReconfigurationPending)
+    );
+    // Fill the window until the new epoch is in force.
+    for k in 0..70u32 {
+        rs[1].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+        seen.extend(run_without(&mut rs, &[]));
+    }
+    let reconfigured: Vec<usize> = seen
+        .iter()
+        .filter_map(|(i, a)| match a {
+            Action::Reconfigured { epoch: 1, members, .. }
+                if members == &[NodeId(1), NodeId(2), NodeId(3)] =>
+            {
+                Some(*i)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reconfigured, [0, 1, 2, 3], "every replica, the joiner included, applies the change once");
+    let before = rs[1].commit_index();
+    assert!(rs.iter().all(|r| r.commit_index() == before), "the joiner caught up");
+    // Without replica 0 the new members still form a majority, on the fast path.
+    let fast = rs[1].metrics().fast_path_decisions;
+    rs[3].propose(T0, Bytes::from_static(b"after")).unwrap();
+    run_without(&mut rs, &[0]);
+    assert_eq!(rs[1].commit_index(), before + 1);
+    assert_eq!(rs[3].commit_index(), before + 1);
+    assert_eq!(rs[1].metrics().fast_path_decisions, fast + 1, "replica 1 now leads");
+}
+
+#[test]
+fn membership_changes_are_validated() {
+    let mut r = ordered(0, &[]);
+    drain(&mut r);
+    for (members, order) in [(vec![], vec![]), (vec![1, 1], vec![]), (vec![1, 2], vec![2])] {
+        let members = members.into_iter().map(NodeId).collect();
+        let order = order.into_iter().map(NodeId).collect();
+        assert!(matches!(r.propose_reconfiguration(T0, members, order), Err(Error::InvalidConfig(_))));
     }
 }

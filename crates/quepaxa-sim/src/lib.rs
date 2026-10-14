@@ -54,6 +54,11 @@ pub struct SimConfig {
     pub retransmit_ms: u64,
     /// Replica `hedge_max`, in milliseconds.
     pub hedge_max_ms: u64,
+    /// Extra replicas that start outside the cluster and may join it by reconfiguration.
+    pub spares: usize,
+    /// Probability per tick (per mille) of proposing a new membership of `nodes` replicas
+    /// drawn from members and spares.
+    pub reconfigure: u32,
     /// Upper bound on one persist's latency.
     pub max_persist_ms: u64,
     /// Replica limit on concurrent slots.
@@ -99,6 +104,8 @@ impl SimConfig {
             links_ms: None,
             retransmit_ms: 20,
             hedge_max_ms: 400,
+            spares: 0,
+            reconfigure: 0,
             max_persist_ms: 5,
             in_flight_slots: 4,
             absent: None,
@@ -140,6 +147,8 @@ pub struct Report {
     pub local_batches: usize,
     /// Propose-to-`Committed` latency of every acknowledged write, in microseconds.
     pub commit_latencies_us: Vec<u64>,
+    /// Membership changes applied (by the first replica to apply each).
+    pub reconfigurations: u64,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -187,6 +196,12 @@ struct Node {
     incarnation_payloads: HashMap<ProposalId, Bytes>,
     /// When each local proposal of the current incarnation was made.
     proposed_at: HashMap<ProposalId, u64>,
+    /// Membership changes proposed here (they appear in no `Commit`).
+    changes: BTreeSet<ProposalId>,
+    /// Removed from the cluster: shut down once it applied every slot before this one.
+    retire_from: Option<u64>,
+    /// Shut down after removal (restarted only if a later change adds it back).
+    retired: bool,
 }
 
 /// A deterministic simulation run.
@@ -207,6 +222,9 @@ pub struct Sim {
     kv: kv::Kv,
     pending_installs: Vec<(usize, usize, u64)>,
     history: invariants::History,
+    /// The latest membership any replica applied, and its epoch.
+    members: Vec<usize>,
+    epoch: u64,
 }
 
 fn cluster_id() -> [u8; 16] {
@@ -217,8 +235,9 @@ impl Sim {
     /// Builds a fresh cluster.
     pub fn new(cfg: SimConfig) -> Self {
         let rng = SplitMix64::new(cfg.seed);
-        let nodes_len = cfg.nodes;
-        let nodes = (0..cfg.nodes)
+        let nodes_len = cfg.nodes + cfg.spares;
+        let initial: Vec<usize> = (0..cfg.nodes).collect();
+        let nodes = (0..nodes_len)
             .map(|_| Node {
                 replica: None,
                 generation: 0,
@@ -233,6 +252,9 @@ impl Sim {
                 outstanding: HashMap::new(),
                 incarnation_payloads: HashMap::new(),
                 proposed_at: HashMap::new(),
+                changes: BTreeSet::new(),
+                retire_from: None,
+                retired: false,
             })
             .collect();
         let mut sim = Self {
@@ -251,11 +273,13 @@ impl Sim {
             kv: kv::Kv::new(nodes_len),
             pending_installs: Vec::new(),
             history: invariants::History::default(),
+            members: initial,
+            epoch: 0,
         };
         if let Some((node, at)) = sim.cfg.kill {
             sim.push(at * MS, Event::Kill { node });
         }
-        for i in 0..sim.cfg.nodes {
+        for i in 0..sim.nodes.len() {
             if sim.cfg.absent != Some(i) {
                 sim.start(i);
             }
@@ -363,7 +387,7 @@ impl Sim {
     fn converged(&self) -> bool {
         let target = self.ledger.slots() as u64;
         self.queue.iter().all(|std::cmp::Reverse((_, _, e))| !matches!(e, Event::Restart { .. }))
-            && self.nodes.iter().all(|n| {
+            && self.members.iter().map(|&i| &self.nodes[i]).all(|n| {
                 n.replica.as_ref().is_some_and(|r| r.commit_index() == target)
                     && n.next_commit == target
                     && n.outstanding.is_empty()
@@ -404,6 +428,7 @@ impl Sim {
         };
         node.incarnation_payloads.clear();
         node.proposed_at.clear();
+        node.changes.clear();
         node.timer_at = None;
         let _ = writeln!(self.trace, "{} start n{i} g{}", self.now, node.generation);
         self.drain(i);
@@ -453,12 +478,16 @@ impl Sim {
                     self.inject_faults();
                 }
                 if self.faults_on && self.chance(self.cfg.propose) {
-                    let i = self.rng.below(self.cfg.nodes as u64) as usize;
+                    let i = self.member();
                     self.propose(i)?;
                 }
                 if self.faults_on && self.chance(self.cfg.read) {
-                    let i = self.rng.below(self.cfg.nodes as u64) as usize;
+                    let i = self.member();
                     self.read(i)?;
+                }
+                // Checked only when enabled, so other configurations keep their random streams.
+                if self.faults_on && self.cfg.reconfigure > 0 && self.chance(self.cfg.reconfigure) {
+                    self.reconfigure()?;
                 }
                 if self.faults_on {
                     self.push(self.now + MS, Event::Tick);
@@ -467,7 +496,7 @@ impl Sim {
             Event::Restart { node } => {
                 let killed =
                     self.faults_on && self.cfg.kill.is_some_and(|(k, at)| k == node && self.now >= at * MS);
-                if self.nodes[node].replica.is_none() && !killed {
+                if self.nodes[node].replica.is_none() && !killed && !self.nodes[node].retired {
                     self.start(node);
                 }
             }
@@ -525,11 +554,38 @@ impl Sim {
         result.map_err(|e| self.fail(&e))
     }
 
+    /// A random member of the latest membership.
+    fn member(&mut self) -> usize {
+        self.members[self.rng.below(self.members.len() as u64) as usize]
+    }
+
+    /// Proposes `nodes` replicas drawn from everyone, at a random member.
+    fn reconfigure(&mut self) -> Result<(), String> {
+        let mut pool: Vec<usize> = (0..self.nodes.len()).collect();
+        for k in (1..pool.len()).rev() {
+            pool.swap(k, self.rng.below(k as u64 + 1) as usize);
+        }
+        pool.truncate(self.cfg.nodes);
+        let i = self.member();
+        let Some(r) = self.nodes[i].replica.as_mut() else { return Ok(()) };
+        let members = pool.iter().map(|&m| NodeId(m as u32)).collect();
+        match r.propose_reconfiguration(Timestamp(self.now), members, Vec::new()) {
+            Ok(id) => {
+                self.nodes[i].changes.insert(id);
+                let _ = writeln!(self.trace, "{} n{i} proposes members {pool:?}", self.now);
+            }
+            Err(quepaxa::Error::ReconfigurationPending | quepaxa::Error::Busy) => {}
+            Err(e) => return Err(self.fail(&format!("propose_reconfiguration failed: {e}"))),
+        }
+        self.drain(i);
+        Ok(())
+    }
+
     fn inject_faults(&mut self) {
         let n = self.cfg.nodes;
         if self.cut.is_empty() && n > 2 && self.chance(self.cfg.partition) {
             while self.cut.len() < (n - 1) / 2 {
-                let x = self.rng.below(n as u64) as usize;
+                let x = self.member();
                 self.cut.insert(x);
             }
             let _ = writeln!(self.trace, "{} partition {:?}", self.now, self.cut);
@@ -540,7 +596,7 @@ impl Sim {
         // Keep a majority up so the fault phase still makes progress.
         let down = self.nodes.iter().filter(|x| x.replica.is_none()).count();
         if down < (n - 1) / 2 && self.chance(self.cfg.crash) {
-            let i = self.rng.below(n as u64) as usize;
+            let i = self.member();
             self.crash(i);
         }
     }
@@ -644,6 +700,18 @@ impl Sim {
         for a in actions {
             self.on_action(i, a);
         }
+        // An operator shuts a removed replica down once it is no longer needed: when it has
+        // applied every slot of its last epoch and nothing is being written.
+        let n = &self.nodes[i];
+        if n.retire_from.is_some_and(|f| n.next_commit >= f) && n.pending.is_empty() {
+            let n = &mut self.nodes[i];
+            n.replica = None;
+            n.retired = true;
+            n.retire_from = None;
+            n.generation += 1;
+            let _ = writeln!(self.trace, "{} n{i} retires", self.now);
+            return;
+        }
         if let Some(r) = self.nodes[i].replica.as_ref() {
             self.report.max_retained_slots = self.report.max_retained_slots.max(r.metrics().retained_slots);
         }
@@ -684,6 +752,7 @@ impl Sim {
                 self.push(done, Event::PersistDone { node: i, generation, id: id.0 });
             }
             Action::Commit { slot, entries } => self.on_commit(i, slot, entries),
+            Action::Committed { id, .. } if self.nodes[i].changes.remove(&id) => {}
             Action::Committed { id, slot } => {
                 let n = &mut self.nodes[i];
                 if let Some(at) = n.proposed_at.remove(&id) {
@@ -708,6 +777,29 @@ impl Sim {
             Action::Dropped { id, .. } => {
                 self.nodes[i].outstanding.remove(&id);
                 self.kv.read_dropped(i, id);
+            }
+            Action::Reconfigured { epoch, members, from } => {
+                let _ = writeln!(self.trace, "{} n{i} epoch {epoch} from {}: {members:?}", self.now, from.0);
+                if epoch > self.epoch {
+                    self.epoch = epoch;
+                    self.report.reconfigurations += 1;
+                    let next: Vec<usize> = members.iter().map(|m| m.0 as usize).collect();
+                    // Clients of a removed replica get no answers; that is not a failure.
+                    for gone in self.members.clone().into_iter().filter(|m| !next.contains(m)) {
+                        self.nodes[gone].outstanding.clear();
+                        self.kv.abandon_reads(gone);
+                        self.nodes[gone].retire_from = Some(from.0);
+                    }
+                    for &back in &next {
+                        let n = &mut self.nodes[back];
+                        n.retire_from = None;
+                        if std::mem::take(&mut n.retired) {
+                            let _ = writeln!(self.trace, "{} n{back} rejoins", self.now);
+                            self.push(self.now, Event::Restart { node: back });
+                        }
+                    }
+                    self.members = next;
+                }
             }
             Action::ReadReady { id, .. } => self.kv.read_ready(i, id),
             Action::SnapshotNeeded { peer, through } => {

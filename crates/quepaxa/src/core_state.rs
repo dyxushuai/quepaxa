@@ -11,7 +11,8 @@ use crate::types::NodeId;
 
 /// 2: the schedule is the one as of `next` (version 1 stored the decided-prefix schedule).
 /// 3: adds the configured leader order the schedule was built from.
-const VERSION: u8 = 3;
+/// 4: the schedule carries membership epochs (orders may name non-configured members).
+const VERSION: u8 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CoreState {
@@ -63,7 +64,7 @@ impl CoreState {
             }
             leaders
         };
-        let schedule = Schedule::decode(&mut r, members)?;
+        let schedule = Schedule::decode(&mut r, members, version >= 4)?;
         let dedup = Dedup::decode(&mut r)?;
         r.finish()?;
         Ok(Self { next, leaders, schedule, dedup })
@@ -123,7 +124,13 @@ mod tests {
         };
         let mut v2 = alloc::vec![2u8];
         v2.extend_from_slice(&4u64.to_le_bytes());
-        state.schedule.encode(&mut v2);
+        // The pre-epoch schedule encoding: no rotation pending, one order by id.
+        v2.extend_from_slice(&0u32.to_le_bytes());
+        v2.extend_from_slice(&0u64.to_le_bytes());
+        v2.extend_from_slice(&1u32.to_le_bytes());
+        v2.extend_from_slice(&0u64.to_le_bytes());
+        v2.extend_from_slice(&3u32.to_le_bytes());
+        (0..3u32).for_each(|n| v2.extend_from_slice(&n.to_le_bytes()));
         state.dedup.encode(&mut v2);
         assert_eq!(CoreState::decode(&Bytes::from(v2), &members()), Ok(state));
     }

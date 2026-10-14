@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/schedule.rs b/crates/quepaxa/src/schedule.rs
+--- a/crates/quepaxa/src/schedule.rs
++++ b/crates/quepaxa/src/schedule.rs
+@@ -124,7 +124,7 @@
+     /// slot, or `None` if ignored because another change has not taken effect yet or this
+     /// one was already applied. Feed it in slot order, after `observe` for the same slot.
+     pub fn reconfigure(&mut self, slot: Slot, key: ChangeKey, order: Vec<NodeId>) -> Option<(u64, u64)> {
+-        if slot.0 < self.epoch_from || self.applied.contains(&key) {
++        if slot.0 < self.epoch_from {
+             return None;
+         }
+         let from = slot.0 + LAG;

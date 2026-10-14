@@ -64,5 +64,6 @@ that matters, and every test stays green. The canaries make that loud.
 
 Current canaries: skipped phase-3 adoption, deciding on any matching aggregate, local or
 remote replies before persisting, sends before the incarnation is durable, commit-time
-dedup disabled, checkpoints dropping recorder state, read barriers answered locally, and a
-restarted leader reusing its top priority.
+dedup disabled, checkpoints dropping recorder state, read barriers answered locally, a
+restarted leader reusing its top priority, a membership change taking effect early or
+applied twice, and proposers using the configured members instead of the slot's.

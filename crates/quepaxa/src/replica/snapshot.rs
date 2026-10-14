@@ -90,7 +90,7 @@ impl Replica {
             .outstanding
             .iter()
             .filter(|(id, _)| self.dedup.contains(me, inc, **id))
-            .map(|(id, (_, barrier))| (*id, *barrier))
+            .map(|(id, (_, kind))| (*id, *kind == crate::batch::Kind::Barrier))
             .collect();
         for (id, barrier) in done {
             self.outstanding.remove(&id);
