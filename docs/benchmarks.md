@@ -84,25 +84,27 @@ leader fast path (100 ms) + decision broadcast to the client's replica (50 ms), 
 
 Five replicas in five regions (rough public-cloud round trips: us-east, us-west, eu-west,
 ap-northeast, sa-east), fault-free, 20 s of writes spread over all replicas, client
-latency from `propose` to `Committed`. Each row places the initial leader in another
-region. The simulator retransmits after 20 ms, below every inter-region round trip, so
-retransmit counts are inflated.
+latency from `propose` to `Committed`, 3 seeds. Each row places the initial leader in
+another region. Timers suit the WAN: `retransmit_interval` 400 ms (above the longest round
+trip), `hedge_max` 3 s.
 
-| Leader region | p50 (100 writes/tick) | p90 | p99 | p50 (20 writes/tick) | p90 | p99 |
-|---|---|---|---|---|---|---|
-| us-east | 181 ms | 280 ms | 314 ms | 175 ms | 278 ms | 431 ms |
-| us-west | 485 ms | 610 ms | 712 ms | 238 ms | 421 ms | 694 ms |
-| eu-west | 749 ms | 1,213 ms | 1,634 ms | 297 ms | 471 ms | 634 ms |
-| ap-northeast | 484 ms | 2,054 ms | 6,354 ms | 752 ms | 1,498 ms | 2,149 ms |
-| sa-east | 463 ms | 3,231 ms | 17,477 ms | 720 ms | 1,817 ms | 5,478 ms |
+| Leader region | p50 | p90 | p99 |
+|---|---|---|---|
+| us-east | 182 ms | 279 ms | 296 ms |
+| us-west | 242 ms | 302 ms | 321 ms |
+| eu-west | 305 ms | 394 ms | 419 ms |
+| ap-northeast | 390 ms | 509 ms | 539 ms |
+| sa-east | 366 ms | 497 ms | 524 ms |
 
-Placement matters several-fold (#28). Replica metrics show why the far placements are so
-much worse than the round trips alone explain: followers hedge almost every forwarded
-entry (`hedged` ≈ `forwarded`). The hedge delay follows each follower's own commit latency,
-which its hedged proposals (decided through its nearer majority) pull below the path
-through a distant leader, so hedging becomes the norm and slots fall back to contended
-randomized rounds; under load the same happens with nearer leaders. Hedged slots also
-rotate the leader by member order, not by latency.
+No hedges, no retransmits, every slot on the fast path: the leader's placement alone moves
+client latency by about 2x (#28).
+
+The timers matter as much. With the simulator's LAN timers (20 ms retransmit, 400 ms hedge
+cap) the same runs retransmitted every request several times and, with a distant leader,
+capped the hedge delay below the commit path, so followers hedged nearly every entry and
+p99 reached 6-17 s. The library defaults (50 ms retransmit, 1 s hedge cap) are tuned for a
+LAN: on a WAN set `retransmit_interval` above the round trip to the farthest member of a
+majority, and `hedge_max` above the slowest client commit path.
 
 ## Not measured
 

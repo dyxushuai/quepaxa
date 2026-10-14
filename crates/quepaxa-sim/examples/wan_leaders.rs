@@ -38,6 +38,10 @@ fn main() {
                 crash: 0,
                 max_latency_ms: 5,
                 links_ms: Some(links.clone()),
+                // WAN timers: retransmit above the longest round trip, hedge cap above the
+                // slowest commit path.
+                retransmit_ms: 400,
+                hedge_max_ms: 3_000,
                 fault_phase_ms: 20_000,
                 heal_budget_ms: 120_000,
                 propose: std::env::var("WAN_PROPOSE").ok().and_then(|s| s.parse().ok()).unwrap_or(100),

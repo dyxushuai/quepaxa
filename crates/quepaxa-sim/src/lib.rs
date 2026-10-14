@@ -50,6 +50,10 @@ pub struct SimConfig {
     pub max_latency_ms: u64,
     /// Base one-way latency from replica `i` to replica `j` (a WAN placement); none on loopback.
     pub links_ms: Option<Vec<Vec<u64>>>,
+    /// Replica `retransmit_interval`, in milliseconds.
+    pub retransmit_ms: u64,
+    /// Replica `hedge_max`, in milliseconds.
+    pub hedge_max_ms: u64,
     /// Upper bound on one persist's latency.
     pub max_persist_ms: u64,
     /// Replica limit on concurrent slots.
@@ -93,6 +97,8 @@ impl SimConfig {
             read: 150,
             max_latency_ms: 20,
             links_ms: None,
+            retransmit_ms: 20,
+            hedge_max_ms: 400,
             max_persist_ms: 5,
             in_flight_slots: 4,
             absent: None,
@@ -372,8 +378,8 @@ impl Sim {
             chunk.copy_from_slice(&self.rng.next_u64().to_le_bytes());
         }
         let mut cfg = Config::new(cluster_id(), NodeId(i as u32), members, seed);
-        cfg.retransmit_interval = 20 * MS;
-        cfg.hedge_max = 400 * MS;
+        cfg.retransmit_interval = self.cfg.retransmit_ms * MS;
+        cfg.hedge_max = self.cfg.hedge_max_ms * MS;
         cfg.max_in_flight_slots = self.cfg.in_flight_slots;
         cfg.max_batch_bytes = 4096;
         cfg.max_message_bytes = self.cfg.max_message_bytes;
