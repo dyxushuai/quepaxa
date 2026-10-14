@@ -38,12 +38,15 @@ pub struct Config {
     pub max_in_flight_slots: u32,
     /// How many local proposals may be pending before [`Error::Busy`].
     pub max_outstanding_proposals: u32,
-    /// How often an unanswered record request is re-sent, in nanoseconds.
+    /// How often an unanswered record request is re-sent, in nanoseconds. The default
+    /// (50 ms) suits a LAN; across regions set it above the round trip to the farthest
+    /// member of a majority, or every request is sent several times.
     pub retransmit_interval: u64,
     /// Lower bound of the adaptive hedge delay, in nanoseconds.
     pub hedge_min: u64,
     /// Upper bound of the adaptive hedge delay, in nanoseconds; a quarter of it is used
-    /// until a commit latency has been observed.
+    /// until a commit latency has been observed. Keep it above the slowest client commit
+    /// path (through the leader) or followers hedge routinely, which costs throughput.
     pub hedge_max: u64,
 }
 

@@ -46,8 +46,14 @@ pub struct SimConfig {
     pub propose: u32,
     /// Probability per tick that some replica receives a client read.
     pub read: u32,
-    /// Upper bound on one-way message latency.
+    /// Upper bound on one-way message latency (jitter on top of `links_ms`).
     pub max_latency_ms: u64,
+    /// Base one-way latency from replica `i` to replica `j` (a WAN placement); none on loopback.
+    pub links_ms: Option<Vec<Vec<u64>>>,
+    /// Replica `retransmit_interval`, in milliseconds.
+    pub retransmit_ms: u64,
+    /// Replica `hedge_max`, in milliseconds.
+    pub hedge_max_ms: u64,
     /// Upper bound on one persist's latency.
     pub max_persist_ms: u64,
     /// Replica limit on concurrent slots.
@@ -90,6 +96,9 @@ impl SimConfig {
             propose: 300,
             read: 150,
             max_latency_ms: 20,
+            links_ms: None,
+            retransmit_ms: 20,
+            hedge_max_ms: 400,
             max_persist_ms: 5,
             in_flight_slots: 4,
             absent: None,
@@ -129,6 +138,8 @@ pub struct Report {
     pub metrics: Vec<quepaxa::Metrics>,
     /// Most uncommitted local batches any live replica held at the end.
     pub local_batches: usize,
+    /// Propose-to-`Committed` latency of every acknowledged write, in microseconds.
+    pub commit_latencies_us: Vec<u64>,
 }
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -174,6 +185,8 @@ struct Node {
     /// Local proposals of the current incarnation awaiting `Committed`.
     outstanding: HashMap<ProposalId, Bytes>,
     incarnation_payloads: HashMap<ProposalId, Bytes>,
+    /// When each local proposal of the current incarnation was made.
+    proposed_at: HashMap<ProposalId, u64>,
 }
 
 /// A deterministic simulation run.
@@ -219,6 +232,7 @@ impl Sim {
                 installed: None,
                 outstanding: HashMap::new(),
                 incarnation_payloads: HashMap::new(),
+                proposed_at: HashMap::new(),
             })
             .collect();
         let mut sim = Self {
@@ -364,8 +378,8 @@ impl Sim {
             chunk.copy_from_slice(&self.rng.next_u64().to_le_bytes());
         }
         let mut cfg = Config::new(cluster_id(), NodeId(i as u32), members, seed);
-        cfg.retransmit_interval = 20 * MS;
-        cfg.hedge_max = 400 * MS;
+        cfg.retransmit_interval = self.cfg.retransmit_ms * MS;
+        cfg.hedge_max = self.cfg.hedge_max_ms * MS;
         cfg.max_in_flight_slots = self.cfg.in_flight_slots;
         cfg.max_batch_bytes = 4096;
         cfg.max_message_bytes = self.cfg.max_message_bytes;
@@ -389,6 +403,7 @@ impl Sim {
             None => 0,
         };
         node.incarnation_payloads.clear();
+        node.proposed_at.clear();
         node.timer_at = None;
         let _ = writeln!(self.trace, "{} start n{i} g{}", self.now, node.generation);
         self.drain(i);
@@ -542,6 +557,7 @@ impl Sim {
                 self.kv.write_invoked(payload.clone());
                 self.nodes[i].outstanding.insert(id, payload.clone());
                 self.nodes[i].incarnation_payloads.insert(id, payload);
+                self.nodes[i].proposed_at.insert(id, self.now);
             }
             Err(quepaxa::Error::Busy) => {}
             Err(e) => return Err(self.fail(&format!("propose failed: {e}"))),
@@ -613,7 +629,8 @@ impl Sim {
         }
         let copies = if self.faults_on && self.chance(self.cfg.dup) { 2 } else { 1 };
         for _ in 0..copies {
-            let at = self.now + 1 + self.rng.below(self.cfg.max_latency_ms * MS);
+            let base = self.cfg.links_ms.as_ref().map_or(0, |l| l[from][to] * MS);
+            let at = self.now + 1 + base + self.rng.below(self.cfg.max_latency_ms * MS);
             self.push(at, Event::Deliver { to, bytes: out.bytes.to_vec() });
         }
     }
@@ -669,6 +686,9 @@ impl Sim {
             Action::Commit { slot, entries } => self.on_commit(i, slot, entries),
             Action::Committed { id, slot } => {
                 let n = &mut self.nodes[i];
+                if let Some(at) = n.proposed_at.remove(&id) {
+                    self.report.commit_latencies_us.push((self.now - at) / 1_000);
+                }
                 let payload = n.incarnation_payloads.get(&id).cloned();
                 n.outstanding.remove(&id);
                 if let Some(p) = &payload {
