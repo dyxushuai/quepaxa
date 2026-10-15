@@ -66,6 +66,21 @@ jobs:
           PROPTEST_CASES: "100000"
         run: cargo nextest run --release -p quepaxa --no-fail-fast
 
+  tla:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: TLC simulation of the independent model, then its seeded bugs
+        env:
+          TLA_SECONDS: "1200"
+          TLA_BUG_SECONDS: "300"
+        run: verification/tla/run.sh
+
   bench:
     runs-on: ubuntu-24.04
     permissions:
@@ -154,7 +169,7 @@ jobs:
           path: mutants.out/
 
   report:
-    needs: [fuzz, simulation, bench, coverage, mutants]
+    needs: [fuzz, simulation, tla, bench, coverage, mutants]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     permissions:

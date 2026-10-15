@@ -12,6 +12,7 @@ lemmas, checked on the real code — there is no second model to drift from it.
 | Single-slot simulation | `crates/quepaxa/src/slot_sim.rs` | G1–G5 on proposer/recorder state after every event under loss, duplication, reordering, partitions | every PR |
 | Replica simulation | `crates/quepaxa-sim` (`tests/replica_sim.rs`) | agreement, validity, at-most-once, ordered commits, KV linearizability, convergence after heal, and **G1/G3/G4/G5 on every replica's recorder state after every event**; crash-restart losing unsynced or torn writes; snapshots | every PR (40 seeds), nightly (100k seeds) |
 | Model checking | `crates/quepaxa-sim/src/model.rs` (`tests/model_check.rs`) | every schedule within *k* deviations from a fair default (reorder, loss, duplication, early timer, partition) plus crash-restarts losing any suffix of the write in progress, with client retries: the same invariants in every state, liveness after the partition heals | every PR (exhaustive), nightly (+1 deviation, exhaustive) |
+| Independent model | `verification/tla/QuePaxa.tla` (TLA+, TLC) | one slot of the paper's algorithms written apart from the Rust code: Agreement and Validity over random behaviours with loss and reordering; two seeded protocol bugs must be found | nightly (20 min) |
 | Fuzzing | bolero targets in `crates/quepaxa/src` | decoding of messages, batches, durable records, core state | corpus replay every PR, 20 min/target nightly |
 | Unsafe code | `crates/quepaxa-ffi` | Miri; ASan/UBSan on the C smoke test | every PR |
 | Mutation testing | `.cargo/mutants.toml`, `verification/mutants-check.sh` | test strength over the whole workspace; fails on any missed mutant not in `verification/mutants-accepted.txt` | weekly |
@@ -36,6 +37,7 @@ cargo nextest run --release -p quepaxa-sim --test model_check   # model checking
 QPX_SIM_SEEDS=100000 cargo nextest run --release -p quepaxa-sim --test replica_sim
 QPX_MODEL_EXTRA_DEVIATIONS=1 cargo nextest run --release -p quepaxa-sim --test model_check
 verification/canaries.sh [name]                                 # seeded bugs
+TLA_SECONDS=120 verification/tla/run.sh                          # TLA+ model (Java or Docker)
 cargo mutants -p quepaxa -f crates/quepaxa/src/dedup.rs          # mutants of one file (whole workspace tested)
 cargo +nightly bolero test -p quepaxa 'codec::tests::decode_never_panics_on_arbitrary_input' --target x86_64-unknown-linux-gnu -T 60s
 ```
