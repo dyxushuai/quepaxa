@@ -48,10 +48,15 @@ restart, compaction and snapshot installation. The C ABI follows the same model;
   ([ADR 0002](https://github.com/dyxushuai/quepaxa/blob/main/docs/adr/0002-structural-persist-before-send.md)); leaders never reuse their
   fast-path priority after a restart.
 - Linearizable reads through read barriers; commit-time dedup applies each entry once.
+- Membership changes through the log (`Replica::propose_reconfiguration`), effective 64
+  slots after they are decided, one at a time; a configurable leader order
+  (`Config::leader_order`) to put the leader where a majority is closest
+  ([design](https://github.com/dyxushuai/quepaxa/blob/main/docs/design/reconfiguration.md)).
 - Verified by unit and property tests, a deterministic simulator (loss, duplication,
   reordering, partitions, crash-restart with lost and torn writes, snapshots) with
   agreement and linearizability oracles, delay-bounded model checking of the real replica,
-  fuzzing, Miri, and mutation testing. See the [spec](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa-v1/spec.md) §9.
+  fuzzing, Miri, mutation testing with a ratchet, and seeded-bug canaries that must keep
+  failing. See [VERIFICATION.md](https://github.com/dyxushuai/quepaxa/blob/main/VERIFICATION.md).
 
 ## Platforms
 
@@ -62,8 +67,9 @@ Android (emulator) and iOS (simulator); the core builds for `wasm32-unknown-unkn
 ## Status
 
 Pre-1.0. The wire format, durable format and C ABI may change between minor versions until
-1.0. Not in v1: membership reconfiguration, Byzantine faults, latency-tuned leader order
-([#28](https://github.com/dyxushuai/quepaxa/issues/28)). Performance measurements: [docs/benchmarks.md](https://github.com/dyxushuai/quepaxa/blob/main/docs/benchmarks.md). Design record:
+1.0 (see the [changelog](https://github.com/dyxushuai/quepaxa/blob/main/CHANGELOG.md) for upgrade notes). Not supported: Byzantine
+faults, witnesses (vote-only members), automatic latency-based leader tuning. Performance
+measurements, on disk and in memory: [docs/benchmarks.md](https://github.com/dyxushuai/quepaxa/blob/main/docs/benchmarks.md). Design record:
 [spec](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa-v1/spec.md), [decisions](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa/map.md),
 [ADRs](https://github.com/dyxushuai/quepaxa/tree/main/docs/adr).
 
