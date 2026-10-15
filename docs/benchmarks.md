@@ -28,6 +28,41 @@ implementation's shape — 17-byte commands (1-byte operation, 8-byte key, 8-byt
 alphabet — over 24 pipelined connections spread across the replicas, 5 s per point.
 Requests unanswered 5 s after the run are counted separately; none occurred.
 
+### On disk
+
+Data under `target/kv-data` on the VM's ext4 volume (a Proxmox virtual disk; one 512-byte
+append + `fsync` takes 1.1 ms at the median, 2.1 ms at p99). Measured 2026-10-15. The disk
+is shared with other VMs: an occasional run shows a p99 several times higher; rerun before
+trusting a single outlier.
+
+| Offered rate | Achieved | Errors | p50 | p90 | p99 |
+|---|---|---|---|---|---|
+| 5,000/s | 4,974/s | 0 | 5.9 ms | 9.2 ms | 11.4 ms |
+| 20,000/s | 20,096/s | 0 | 6.4 ms | 9.4 ms | 11.9 ms |
+| 50,000/s | 49,953/s | 0 | 6.5 ms | 9.5 ms | 11.0 ms |
+| 100,000/s | 99,829/s | 0 | 6.5 ms | 9.5 ms | 11.4 ms |
+| 150,000/s | 149,849/s | 0 | 6.6 ms | 9.8 ms | 17.9 ms |
+| 200,000/s | 199,915/s | 0 | 6.9 ms | 9.4 ms | 14.7 ms |
+| 250,000/s | 250,027/s | 0 | 7.2 ms | 10.0 ms | 14.2 ms |
+
+Latency is a few `fsync`s on the commit path and barely depends on load: each fsync
+covers everything queued while the previous one ran (group commit), so throughput scales
+without longer waits. Two changes (#50) halved it from 11.6 ms (p50 at 5k/s):
+
+- **Commits are applied before their local `Decided` record is durable.** A decision is
+  already durable at a majority of recorders, so a replica that crashes first learns it
+  again; this takes one fsync off every replica's commit path (11.6 → 9.2 ms alone).
+- **kv-tokio writes on its own thread.** The event loop no longer blocks in `fsync`:
+  persists issued meanwhile share the next one (9.2 → 5.9 ms with the change above).
+
+### In memory (CPU bound)
+
+The same runs with the data directories on tmpfs, where `fsync` costs nothing: an upper
+bound set by CPU and loopback I/O. Until 2026-10-15 `run-local.sh` put its data in
+`mktemp -d`, which is tmpfs on this VM, so these were the numbers first published here as
+"persisting with fsync"; they were not. `run-local.sh` now defaults to `target/kv-data`
+(override with `KV_DATA_ROOT`) and warns on tmpfs. Measured 2026-10-14.
+
 | Offered rate | Achieved | Errors | p50 | p90 | p99 |
 |---|---|---|---|---|---|
 | 5,000/s | 4,974/s | 0 | 0.29 ms | 0.58 ms | 0.95 ms |
@@ -38,22 +73,17 @@ Requests unanswered 5 s after the run are counted separately; none occurred.
 | 200,000/s | 199,903/s | 43 (`Busy`) | 0.81 ms | 1.9 ms | 42.2 ms |
 | 250,000/s | 240,314/s | 48,629 (`Busy`) | 1.1 ms | 752 ms | 2,253 ms |
 
-Saturation sets in near 200k operations/s; beyond it `max_outstanding_proposals` (4096
-per replica) pushes back with `Busy` instead of queueing without bound. Measured
-2026-10-14 (#50) on the same VM while other workloads used 1-3 cores.
-
-Before #50 the same setup saturated near 100k/s (p90 30.7 ms, p99 124 ms at 100k/s). The
-changes, each found by measurement:
+Here saturation sets in near 200k operations/s, where `max_outstanding_proposals` (4096
+per replica) pushes back with `Busy`. Before #50 it was near 100k/s (p90 30.7 ms, p99
+124 ms at 100k/s). The changes, each found by measurement:
 
 - **Peer and client I/O batching** (`perf`: 65% of CPU in Tokio workers, about half of
   it in the kernel, one or two syscalls per frame). Frames queued while a batch is being
   written now leave in one `write`; reads go through a 64 KiB buffer; client replies are
   flushed only before waiting on one that is not ready.
 - **Snapshots off the event loop** (stall-fills and leader rotations clustered at every
-  10,000th slot). The snapshot is encoded once on the loop and written and synced on a
-  background thread; the log is compacted once it is durable. Encoding still runs on the
-  loop and grows with the state (about 10 ms at 3 MB), which is most of the remaining
-  p99 tail.
+  10,000th slot), then shared by shard and encoded on a background thread, with mimalloc
+  for the cross-thread frees.
 - **CRC-32C slicing-by-8**: `Record::encode` (dominated by the checksum) went from 6.7%
   to 1.8% of the replica thread's samples.
 

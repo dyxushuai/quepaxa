@@ -7,7 +7,12 @@ rate=${1:-20000}; secs=${2:-10}; delay=${3:-0}
 root=$(cd "$(dirname "$0")/../.." && pwd)
 cargo build --release -q --manifest-path "$root/Cargo.toml" -p kv-tokio
 bin="$root/target/release"
-data=$(mktemp -d)
+# Data must live on the disk under test: /tmp is often tmpfs, where fsync costs nothing.
+data_root=${KV_DATA_ROOT:-$root/target/kv-data}
+mkdir -p "$data_root"
+data=$(mktemp -d -p "$data_root")
+fstype=$(df -T "$data" | awk 'NR==2 {print $2}')
+if [ "$fstype" = tmpfs ]; then echo "warning: $data is on tmpfs; fsync is free there" >&2; fi
 members="0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102"
 pids=()
 owns_netem=0
