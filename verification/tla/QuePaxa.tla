@@ -6,11 +6,11 @@
 (* (S, Fc, Ac, Ap); proposers walk steps 4r+phase; the leader may use the *)
 (* top priority H at the first step; everyone else draws priorities.      *)
 (*                                                                         *)
-(* The network is a set of messages, each delivered once, in any order, or *)
-(* never (loss, reordering). Duplication adds no behaviour: a recorder     *)
-(* ignores a request below its step and takes the maximum within one, and *)
-(* a recorder's replies to one request step at one step are identical      *)
-(* (Fc and Ap are fixed when it enters the step), so a copy is a no-op.    *)
+(* The network delivers messages in any order, or never (loss, reordering).*)
+(* Requests stay in it and may be delivered again at any time: proposers   *)
+(* retransmit unanswered requests, and a recorder answers every copy with  *)
+(* its current summary, which may be newer. A reply is delivered at most   *)
+(* once: copies of one reply are identical, so a copy adds nothing.        *)
 (* A proposer sends its requests for a step when it enters the step; with  *)
 (* delivery arbitrary, sending them one by one adds only interleavings.    *)
 (* Random priorities are a nondeterministic choice per recorder.           *)
@@ -72,7 +72,7 @@ Record(m) ==
                     ELSE g
     IN /\ m \in msgs /\ m.type = "req"
        /\ reg' = [reg EXCEPT ![m.to] = new]
-       /\ msgs' = (msgs \ {m}) \cup {[type |-> "rep", from |-> m.to, to |-> m.from, req |-> m.step,
+       /\ msgs' = msgs \cup {[type |-> "rep", from |-> m.to, to |-> m.from, req |-> m.step,
                              step |-> new.step, first |-> new.first, prev |-> new.prev]}
        /\ UNCHANGED pst
 

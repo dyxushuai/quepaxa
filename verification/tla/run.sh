@@ -23,16 +23,22 @@ if [[ ! -f "$jar" ]]; then
   mv "$jar.part" "$jar"
 fi
 
-# tlc <spec dir> <seconds>: prints TLC's output; TLC runs until the time is up.
+# tlc <spec dir> <seconds>: prints TLC's output and returns its status: 124 when the time
+# ran out (no violation found), 12 for an invariant violation, anything else is a failure.
 tlc() {
   local args=(-cp tla2tools.jar tlc2.TLC -simulate -depth 300 -workers auto -deadlock -metadir /tmp/tlc-$$ QuePaxa.tla)
+  cp "$jar" "$1/tla2tools.jar"
+  local status
   if command -v java >/dev/null; then
-    (cd "$1" && cp "$jar" tla2tools.jar && timeout "$2" java -XX:+UseParallelGC "${args[@]}"; rm -f tla2tools.jar)
+    (cd "$1" && timeout "$2" java -XX:+UseParallelGC "${args[@]}")
+    status=$?
   else
     # The time limit runs inside the container: killing the client would leave it running.
-    docker run --rm -v "$jar:/spec-tools/tla2tools.jar:ro" -v "$1:/spec" -w /spec \
-      eclipse-temurin:21.0.4_7-jre sh -c "cp /spec-tools/tla2tools.jar . && timeout $2 java ${args[*]}; rm -f tla2tools.jar"
+    docker run --rm -v "$1:/spec" -w /spec eclipse-temurin:21.0.4_7-jre timeout "$2" java "${args[@]}"
+    status=$?
   fi
+  rm -f "$1/tla2tools.jar"
+  return $status
 }
 
 work=$(mktemp -d)
@@ -42,8 +48,9 @@ failed=0
 mkdir "$work/model"
 cp "$here/QuePaxa.tla" "$here/QuePaxa.cfg" "$work/model/"
 out=$(tlc "$work/model" "$seconds" 2>&1)
-if ! grep -q "Running Random Simulation" <<< "$out"; then
-  echo "FAIL    TLC did not run:"; tail -20 <<< "$out"
+status=$?
+if [[ $status -ne 124 ]] || ! grep -q "Running Random Simulation" <<< "$out"; then
+  echo "FAIL    TLC ended with status $status instead of running out of time:"; tail -40 <<< "$out"
   failed=1
 elif grep -qE "violated|^Error" <<< "$out"; then
   echo "FAIL    QuePaxa.tla:"; grep -E -A30 "violated|^Error" <<< "$out" | head -60
@@ -65,7 +72,7 @@ for ((i = 0; i < ${#bugs[@]}; i += 2)); do
   if cmp -s "$here/QuePaxa.tla" "$work/$name/QuePaxa.tla"; then
     echo "STALE   $name: the sed expression no longer matches QuePaxa.tla"
     failed=1
-  elif tlc "$work/$name" "$bug_seconds" > "$work/$name.log" 2>&1; grep -q "Invariant Agreement is violated" "$work/$name.log"; then
+  elif tlc "$work/$name" "$bug_seconds" > "$work/$name.log" 2>&1; [[ $? -eq 12 ]] && grep -q "Invariant Agreement is violated" "$work/$name.log"; then
     echo "CAUGHT  $name"
   else
     echo "MISSED  $name: no Agreement violation within ${bug_seconds}s"; tail -5 "$work/$name.log"
