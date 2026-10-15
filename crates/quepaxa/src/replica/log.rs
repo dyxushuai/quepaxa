@@ -100,8 +100,11 @@ impl Replica {
                 self.send(peer, Body::Decided { slot, proposal: proposal.clone() });
             }
         }
-        self.log.insert(slot, Decision { proposal, durable: false });
+        self.log.insert(slot, Decision { proposal });
         self.advance_committed();
+        // A decision is already durable at a majority of recorders, so it is applied before
+        // its local record is: a replica that crashes first learns it again from peers.
+        self.emit_commits();
         self.after_durable(Effect::DecidedDurable(slot));
     }
 
@@ -130,9 +133,6 @@ impl Replica {
 
     pub(super) fn emit_commits(&mut self) {
         while let Some(d) = self.log.get(&Slot(self.emitted)) {
-            if !d.durable {
-                break;
-            }
             let slot = Slot(self.emitted);
             let key = d.proposal.key;
             self.applied_schedule.observe(slot, key.origin);

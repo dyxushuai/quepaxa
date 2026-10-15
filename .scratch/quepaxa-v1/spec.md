@@ -88,7 +88,9 @@ its value (kind 2 is still read; 0.2 cannot read kind 6).
    last in-flight persist (no empty persists are emitted).
 2. No message leaves a replica before its new incarnation is durable (on restart,
    `Commit`s for already-durable decided slots are re-emitted locally first); the leader's
-   own `H` leaves only after a durable reservation; `Commit` waits for the durable decision.
+   own `H` leaves only after a durable reservation. `Commit` does not wait for the local
+   `Decided` record (a decision is durable at a majority of recorders; a replica that crashes
+   first learns it again); recorder state is dropped only once that record is durable.
 3. After restart a replica never uses `H` for a slot ≤ its recovered reservation.
 4. `Replica::new` takes every durable record in write order; a corrupt record is
    `CorruptRecord`, never skipped. Slots with recovered recorder state are driven.

@@ -202,8 +202,10 @@ pub enum Action {
     },
     /// Send now; no durability required.
     Send(Outbound),
-    /// Apply this slot's entries; slots arrive in strict order without gaps. After a
-    /// restart, slots recovered from storage are emitted again.
+    /// Apply this slot's entries; slots arrive in strict order without gaps, as soon as
+    /// they are decided (the local record of the decision may still be in flight). After a
+    /// restart, slots already returned are emitted again: recovered from storage, or
+    /// learned again from peers.
     Commit {
         /// The slot.
         slot: Slot,

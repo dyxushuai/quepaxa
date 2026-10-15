@@ -130,11 +130,6 @@ fn a_decided_value_that_is_not_a_batch_commits_nothing_and_is_counted() {
     r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
-    let id =
-        out.iter().find_map(|a| if let Action::Persist { id, .. } = a { Some(*id) } else { None }).unwrap();
-    r.handle(Timestamp(2), Input::Persisted(id)).unwrap();
-    out.clear();
-    r.poll_actions(&mut out);
     assert!(out.iter().any(|a| matches!(a, Action::Commit { slot: Slot(0), entries } if entries.is_empty())));
     assert_eq!(r.metrics().corrupt_batches, 1);
 }
@@ -224,11 +219,11 @@ fn r_wire() -> WireCtx {
 }
 
 #[test]
-fn core_state_schedule_covers_only_emitted_slots() {
+fn decisions_are_applied_before_their_local_record_is_durable() {
     let mut r = replica();
     let mut out = Vec::new();
-    // Ten decisions not originated by the leader (node 0) would rotate it, but they are
-    // not durable yet, so nothing is emitted and core state must not reflect them.
+    // Ten decisions not originated by the leader (node 0) rotate it. They are applied at
+    // once (a majority already holds each durably), and core state covers them.
     for slot in 0..10 {
         let env = Envelope {
             cluster_id: [3; 16],
@@ -241,20 +236,11 @@ fn core_state_schedule_covers_only_emitted_slots() {
         r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
         r.poll_actions(&mut out);
     }
-    assert_eq!(r.emitted_index(), 0);
-    let fresh = Schedule::new(&[NodeId(0), NodeId(1), NodeId(2)]);
-    let state = CoreState::decode(&r.core_state(), &r.cfg.members).unwrap();
-    assert_eq!(state.schedule, fresh);
-    assert_ne!(r.schedule, fresh, "the driving schedule already saw the decided prefix");
-    let last = out.iter().rev().find_map(|a| match a {
-        Action::Persist { id, .. } => Some(*id),
-        _ => None,
-    });
-    r.handle(Timestamp(2), Input::Persisted(last.unwrap())).unwrap();
-    r.poll_actions(&mut out);
     assert_eq!(r.emitted_index(), 10);
+    assert_eq!(out.iter().filter(|a| matches!(a, Action::Commit { .. })).count(), 10);
     let state = CoreState::decode(&r.core_state(), &r.cfg.members).unwrap();
     assert_eq!(state.schedule, r.schedule);
+    assert_ne!(r.schedule, Schedule::new(&[NodeId(0), NodeId(1), NodeId(2)]));
 }
 
 proptest! {
