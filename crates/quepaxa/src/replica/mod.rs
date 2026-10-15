@@ -32,7 +32,6 @@ use crate::types::{MAX_SLOT, MAX_STEP, NodeId, PersistId, ProposalId, Slot, Time
 #[cfg_attr(feature = "model", derive(Clone, Hash))]
 struct Decision {
     proposal: Proposal,
-    durable: bool,
 }
 
 #[cfg_attr(feature = "model", derive(Clone, Hash))]
@@ -146,7 +145,7 @@ impl Replica {
                 }
                 Record::Reservation { through } => reservation = reservation.max(Some(through.0)),
                 Record::Decided { slot, proposal } => {
-                    log.insert(slot, Decision { proposal, durable: true });
+                    log.insert(slot, Decision { proposal });
                 }
                 Record::Compacted { through, core_state } => {
                     let state = snapshot::decode_state(through, &core_state, &cfg.members)
@@ -391,12 +390,9 @@ impl Replica {
     fn apply(&mut self, e: Effect) {
         match e {
             Effect::ReservationDurable(t) => self.reserved_durable = self.reserved_durable.max(Some(t)),
+            // The recorder state is only garbage once the decision is durable here.
             Effect::DecidedDurable(slot) => {
-                if let Some(d) = self.log.get_mut(&slot) {
-                    d.durable = true;
-                }
                 self.registers.remove(&slot);
-                self.emit_commits();
             }
             Effect::LocalReply(body) => self.inbox.push_back((self.me, body)),
         }

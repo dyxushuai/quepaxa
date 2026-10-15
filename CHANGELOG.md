@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- `quepaxa`: `Commit` is emitted as soon as a slot is decided, without waiting for its
+  local `Decided` record (a decision is durable at a majority of recorders); on disk this
+  takes one fsync off every replica's commit path.
+- `examples/kv-tokio`: persists are written on their own thread (group commit while the
+  event loop keeps running); `run-local.sh` keeps data on disk (it used tmpfs, which made
+  the published end-to-end latencies fsync-free). On the reference VM's disk, p50 went
+  from 11.6 ms to 5.9 ms at 5k ops/s.
+
 ## 0.3.0 — 2026-10-14
 
 ### Upgrading from 0.2

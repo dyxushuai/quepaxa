@@ -12,7 +12,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
 use crate::kv::Kv;
-use crate::storage::{Disk, decode_snapshot, encode_snapshot};
+use crate::storage::{Disk, SnapshotWriter, decode_snapshot, encode_snapshot};
 
 /// Largest frame on a peer link; snapshots larger than this are not taken (see `maybe_snapshot`).
 pub const MAX_FRAME: usize = 64 << 20;
@@ -71,6 +71,12 @@ pub enum Ev {
         bytes: Bytes,
         saved: Result<bool, String>,
     },
+    /// The writer thread made persists up to `id` durable (or failed to).
+    Persisted {
+        id: PersistId,
+        then: Vec<quepaxa::Outbound>,
+        ok: bool,
+    },
 }
 
 struct PendingPersist {
@@ -98,7 +104,11 @@ fn decode_put(b: &[u8]) -> Option<(String, String)> {
 
 pub struct Node {
     replica: Replica,
-    disk: Disk,
+    /// Taken by the writer thread when the node runs.
+    disk: Option<Disk>,
+    snapshots: SnapshotWriter,
+    /// Persists for the writer thread, in order.
+    jobs: Option<std::sync::mpsc::Sender<Vec<PendingPersist>>>,
     kv: Kv,
     /// Next slot to apply.
     applied: u64,
@@ -132,7 +142,9 @@ impl Node {
     ) -> Self {
         Self {
             replica,
-            disk,
+            snapshots: disk.snapshots(),
+            disk: Some(disk),
+            jobs: None,
             kv: Kv::default(),
             applied: 0,
             snapshot_every: every,
@@ -157,7 +169,8 @@ impl Node {
     /// replica rejects is a corrupted data directory: refuse to start rather than serve a
     /// state inconsistent with the log.
     pub fn restore(&mut self) -> Result<(), String> {
-        let bytes = self.disk.load_snapshot().map_err(|e| format!("read snapshot: {e}"))?;
+        let disk = self.disk.as_ref().ok_or("restore before run")?;
+        let bytes = disk.load_snapshot().map_err(|e| format!("read snapshot: {e}"))?;
         let Some(bytes) = bytes else { return Ok(()) };
         let snap = decode_snapshot(&bytes).ok_or("snapshot.bin is corrupt")?;
         self.kv = snap.kv;
@@ -175,6 +188,12 @@ impl Node {
     }
 
     pub fn run(mut self, rx: Receiver<Ev>) {
+        if let Some(disk) = self.disk.take() {
+            let (jobs, queue) = std::sync::mpsc::channel();
+            let events = self.events.clone();
+            std::thread::spawn(move || write_persists(disk, &queue, &events));
+            self.jobs = Some(jobs);
+        }
         self.drain();
         self.flush();
         loop {
@@ -221,6 +240,19 @@ impl Node {
                 }
             }
             Ev::Client { cmd, reply } => self.on_client(now, cmd, reply),
+            Ev::Persisted { id, then, ok } => {
+                if !ok {
+                    eprintln!("kv-tokio: storage failed; fencing this replica");
+                    self.persists.clear();
+                    self.jobs = None;
+                    let _ = self.replica.handle(now, Input::StorageFailed(id));
+                } else {
+                    for o in then {
+                        self.send(o.to.0, PeerFrame::Msg(o.bytes));
+                    }
+                    let _ = self.replica.handle(now, Input::Persisted(id));
+                }
+            }
             Ev::SnapshotSaved { through, core, bytes, saved } => {
                 self.snapshotting = false;
                 match saved {
@@ -287,7 +319,7 @@ impl Node {
         self.last_snapshot = self.applied;
         self.snapshot_from = None;
         self.drain();
-        if let Err(e) = self.disk.snapshots().save(through, &bytes) {
+        if let Err(e) = self.snapshots.save(through, &bytes) {
             eprintln!("kv-tokio: cannot save the received snapshot ({e}); fencing this replica");
             if let Some(last) = self.persists.last().map(|p| p.id) {
                 self.persists.clear();
@@ -351,40 +383,16 @@ impl Node {
         }
     }
 
-    /// Makes pending persists durable with one fsync, releases their gated messages, and
-    /// acknowledges them; repeats while acknowledgements produce new writes.
+    /// Hands pending persists to the writer thread; their messages leave, and the replica
+    /// hears of them, once they are durable (`Ev::Persisted`). The loop keeps running
+    /// meanwhile, so persists issued during one fsync share the next (group commit).
     fn flush(&mut self) {
-        while !self.persists.is_empty() {
-            let batch = std::mem::take(&mut self.persists);
-            let mut appends: Vec<Bytes> = Vec::new();
-            let mut last = None;
-            let mut gated = Vec::new();
-            let mut ok = true;
-            for p in batch {
-                if p.replace {
-                    appends.clear();
-                    // After a failure nothing more is written: later records assume it.
-                    ok = ok && self.disk.replace(&p.records).is_ok();
-                } else {
-                    appends.extend(p.records);
-                }
-                gated.extend(p.then);
-                last = Some(p.id);
-            }
-            ok = ok && (appends.is_empty() || self.disk.append(&appends).is_ok());
-            let Some(id) = last else { return };
-            let now = self.now();
-            if !ok {
-                eprintln!("kv-tokio: storage failed; fencing this replica");
-                let _ = self.replica.handle(now, Input::StorageFailed(id));
-                self.drain();
-                return;
-            }
-            for o in gated {
-                self.send(o.to.0, PeerFrame::Msg(o.bytes));
-            }
-            let _ = self.replica.handle(now, Input::Persisted(id));
-            self.drain();
+        if self.persists.is_empty() {
+            return;
+        }
+        let batch = std::mem::take(&mut self.persists);
+        if let Some(jobs) = &self.jobs {
+            let _ = jobs.send(batch);
         }
     }
 
@@ -403,7 +411,7 @@ impl Node {
         // The next attempt waits a full interval, also after a failure.
         self.last_snapshot = self.applied;
         self.snapshotting = true;
-        let (writer, events) = (self.disk.snapshots(), self.events.clone());
+        let (writer, events) = (self.snapshots.clone(), self.events.clone());
         std::thread::spawn(move || {
             let bytes = Bytes::from(encode_snapshot(through, &core, &kv));
             // Unshare the shards now: until then every write copies the shard it touches.
@@ -415,6 +423,37 @@ impl Node {
             };
             let _ = events.send(Ev::SnapshotSaved { through, core, bytes, saved });
         });
+    }
+}
+
+/// The writer thread: makes persists durable in order, each group with one fsync, and
+/// reports them; after a failure it writes nothing more (later records assume it).
+fn write_persists(
+    mut disk: Disk,
+    queue: &std::sync::mpsc::Receiver<Vec<PendingPersist>>,
+    events: &SyncSender<Ev>,
+) {
+    while let Ok(mut batch) = queue.recv() {
+        while let Ok(more) = queue.try_recv() {
+            batch.extend(more);
+        }
+        let mut appends: Vec<Bytes> = Vec::new();
+        let (mut last, mut then, mut ok) = (None, Vec::new(), true);
+        for p in batch {
+            if p.replace {
+                appends.clear();
+                ok = ok && disk.replace(&p.records).is_ok();
+            } else {
+                appends.extend(p.records);
+            }
+            then.extend(p.then);
+            last = Some(p.id);
+        }
+        ok = ok && (appends.is_empty() || disk.append(&appends).is_ok());
+        let Some(id) = last else { continue };
+        if events.send(Ev::Persisted { id, then, ok }).is_err() || !ok {
+            return;
+        }
     }
 }
 
