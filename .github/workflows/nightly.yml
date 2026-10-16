@@ -100,6 +100,22 @@ jobs:
           TLA_BUG_SECONDS: "300"
         run: verification/tla/run.sh
 
+  kani:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Kani
+        run: cargo install --locked kani-verifier@0.68.0 && cargo kani setup
+      - name: Bounded proofs
+        run: cargo kani -p quepaxa
+      - name: The seeded bug must fail them
+        run: |
+          git apply verification/kani-canary.patch
+          if cargo kani -p quepaxa > kani.log 2>&1; then echo "::error::the Kani canary was not caught"; exit 1; fi
+          grep -q "VERIFICATION:- FAILED" kani.log
+
   bench:
     runs-on: ubuntu-24.04
     permissions:
@@ -191,7 +207,7 @@ jobs:
           path: mutants.out/
 
   report:
-    needs: [fuzz, simulation, deep, tla, bench, coverage, mutants]
+    needs: [fuzz, simulation, deep, tla, kani, bench, coverage, mutants]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     permissions:

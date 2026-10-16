@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/recorder.rs b/crates/quepaxa/src/recorder.rs
+index 8df3449..8af8787 100644
+--- a/crates/quepaxa/src/recorder.rs
++++ b/crates/quepaxa/src/recorder.rs
+@@ -29,7 +29,7 @@ impl Register {
+     /// Applies `record(s, v)`; returns whether the register changed (and so must be persisted).
+     pub fn record(&mut self, s: Step, v: Proposal) -> bool {
+         if s == self.step {
+-            if self.agg.as_ref().is_some_and(|a| *a >= v) {
++            if self.agg.as_ref().is_some_and(|a| *a > v) {
+                 return false;
+             }
+             self.agg = Some(v);

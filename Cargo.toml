@@ -12,6 +12,7 @@ repository = "https://github.com/dyxushuai/quepaxa"
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

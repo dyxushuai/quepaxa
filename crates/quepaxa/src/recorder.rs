@@ -50,6 +50,47 @@ impl Register {
     }
 }
 
+/// Exhaustive versions of the property test below: every step, register state and value.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+    use crate::proposal::ValueKey;
+    use crate::types::NodeId;
+
+    fn any_proposal() -> Proposal {
+        let key = ValueKey { origin: NodeId(kani::any()), incarnation: kani::any(), seq: kani::any() };
+        Proposal { priority: kani::any(), key, value: bytes::Bytes::new() }
+    }
+
+    fn any_option() -> Option<Proposal> {
+        if kani::any() { Some(any_proposal()) } else { None }
+    }
+
+    /// Paper invariants R1–R6 for one `record` from any register state.
+    #[kani::proof]
+    fn record_upholds_recorder_invariants() {
+        let mut r = Register { step: kani::any(), first: any_option(), agg: any_option(), prev_agg: any_option() };
+        let before = r.clone();
+        let (s, v): (Step, Proposal) = (kani::any(), any_proposal());
+        let changed = r.record(s, v.clone());
+        assert!(r.step >= before.step, "R1 step monotonic");
+        assert!(changed == (r != before), "changed exactly when it must be persisted");
+        if s < before.step {
+            assert!(r == before, "R5 stale discard");
+        } else if s == before.step {
+            assert!(r.first == before.first, "R2 first write-once");
+            assert!(r.agg == core::cmp::max(before.agg.clone(), Some(v)), "R3 aggregate is the maximum");
+            assert!(r.prev_agg == before.prev_agg);
+        } else {
+            let expect = if before.step.checked_add(1) == Some(s) { before.agg.clone() } else { None };
+            assert!(r.prev_agg == expect, "R4 prior aggregate");
+            assert!(r.step == s && r.first == Some(v.clone()) && r.agg == Some(v), "new step");
+        }
+        let sum = r.summary();
+        assert!(sum.step == r.step && sum.first == r.first && sum.prev_agg == r.prev_agg, "R6");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
