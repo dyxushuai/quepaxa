@@ -3,7 +3,7 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
-## Unreleased
+## 0.3.2 — 2026-10-16
 
 - `quepaxa`: `Action::Retired { epoch }` tells a replica removed by a membership change
   when it may shut down: once a majority of the new members durably know every slot of
@@ -14,6 +14,15 @@ All notable changes to this project are documented here. The project follows
 - `quepaxa`: catch-up replies are sent once the decisions they report are durable, and
   even when empty (no wire change).
 - `quepaxa-ffi` (ABI 0.6): `QPX_ACTION_RETIRED` (epoch in `id`).
+- Upgrading: `Retired` relies on catch-up replies from the new members, which older
+  versions send before their decisions are durable. Upgrade every replica before you rely
+  on it to remove one.
+- crates.io and docs.rs: clearer descriptions, keywords and categories; the README has an
+  install section, a runnable quick start (tested as a doctest), a comparison with Raft
+  and Multi-Paxos, and tables of guide chapters and examples.
+- Verification: the nightly simulation runs its 100k seeds per scenario across 8 machines
+  (it never finished within its time limit before), mutation testing caps each test
+  process's memory, and a new canary plants the old retirement rule.
 
 ## 0.3.1 — 2026-10-16
 
