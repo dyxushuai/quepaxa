@@ -136,6 +136,12 @@ fn backpressure_and_size_limits_are_enforced() {
     r.propose(T0, Bytes::new()).unwrap();
     drain(&mut r);
     assert_eq!(r.propose(T0, Bytes::new()), Err(Error::Busy));
+    // The smallest valid batch still fits a read barrier.
+    let mut cfg = config(&[0, 1, 2]);
+    cfg.max_batch_bytes = 64;
+    let mut r = Replica::new(cfg, [], T0).unwrap();
+    drain(&mut r);
+    r.read_barrier(T0).unwrap();
 }
 
 #[test]
@@ -228,7 +234,7 @@ fn configs_that_would_misbehave_at_runtime_are_rejected() {
         |c| c.max_in_flight_slots = 65,
         |c| c.max_in_flight_slots = 0,
         |c| c.max_message_bytes = 2 * c.max_batch_bytes,
-        |c| c.max_batch_bytes = 0,
+        |c| c.max_batch_bytes = 63,
         |c| c.max_outstanding_proposals = 0,
         |c| c.retransmit_interval = 0,
     ];

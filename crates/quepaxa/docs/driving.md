@@ -96,7 +96,8 @@ let mut disk = Vec::new(); // stands in for an append-only, fsync'd file
 let mut queue = VecDeque::new();
 let mut actions = Vec::new();
 
-// Startup: the replica first persists its new incarnation.
+// Startup: a fresh replica persists its new incarnation (a restarted one first
+// re-emits the commits it recovered).
 replica.poll_actions(&mut actions);
 queue.extend(actions.drain(..));
 

@@ -136,10 +136,10 @@ impl Replica {
     /// Starts a replica from the durable records of its previous incarnations, in the
     /// order they were persisted (empty for a fresh replica).
     ///
-    /// `cfg.seed` must be fresh CSPRNG output on every start. The first action is always a
-    /// [`Action::Persist`] of the new incarnation; nothing is sent before it is durable.
-    /// Slots recovered from `durable` are emitted again as [`Action::Commit`]. See
-    /// [`guide::durability`](crate::guide::durability).
+    /// `cfg.seed` must be fresh CSPRNG output on every start. The startup actions are the
+    /// [`Action::Commit`]s of the slots recovered from `durable` (emitted again, in order)
+    /// followed by an [`Action::Persist`] of the new incarnation; nothing is sent before it
+    /// is durable. See [`guide::durability`](crate::guide::durability).
     ///
     /// # Errors
     ///
@@ -311,7 +311,8 @@ impl Replica {
     ///
     /// # Errors
     ///
-    /// As [`Replica::propose`] ([`Error::Busy`], [`Error::Fenced`], [`Error::NotDrained`]).
+    /// As [`Replica::propose`] ([`Error::Busy`], [`Error::Fenced`], [`Error::NotDrained`]);
+    /// a barrier always fits a batch, so never [`Error::PayloadTooLarge`].
     pub fn read_barrier(&mut self, now: Timestamp) -> Result<ProposalId, Error> {
         self.enqueue(now, Bytes::new(), Kind::Barrier)
     }

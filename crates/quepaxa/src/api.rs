@@ -45,8 +45,8 @@ pub struct Config {
     /// Randomness for proposal priorities. Liveness relies on the network being unable to
     /// predict it, so never reuse a seed across starts.
     pub seed: [u8; 32],
-    /// Upper bound on the encoded entries of one batch (one slot). Cluster-wide: every
-    /// member must use the same value.
+    /// Upper bound on the encoded entries of one batch (one slot), at least 64. Cluster-wide:
+    /// every member must use the same value.
     pub max_batch_bytes: u32,
     /// Upper bound on one encoded network message; larger inputs are dropped unread. Must be
     /// at least `2 * max_batch_bytes + 1024` (a reply can carry two full values).
@@ -137,7 +137,8 @@ impl Config {
             (!self.members.is_empty(), "members must not be empty"),
             (self.members.len() <= crate::schedule::MAX_MEMBERS, "at most 1024 members"),
             (sorted.len() == self.members.len(), "members must be unique"),
-            (self.max_batch_bytes > 0, "max_batch_bytes must be positive"),
+            // Room for at least one entry's framing (an empty read barrier is 29 bytes).
+            (self.max_batch_bytes >= 64, "max_batch_bytes must be at least 64"),
             (
                 u64::from(self.max_message_bytes) >= 2 * u64::from(self.max_batch_bytes) + MESSAGE_OVERHEAD,
                 "max_message_bytes must hold two full batches plus 1 KiB of framing",

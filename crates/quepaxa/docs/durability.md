@@ -74,8 +74,8 @@ assert_eq!(replica.commit_index(), 1);
 # Ok::<(), quepaxa::Error>(())
 ```
 
-On every start the replica first persists a new **incarnation** number and sends nothing
-until that is durable. Proposals are identified by `(origin, incarnation, id)`, so ids from
+On every start the replica persists a new **incarnation** number (its startup actions are
+the recovered commits, then that persist) and sends nothing until it is durable. Proposals are identified by `(origin, incarnation, id)`, so ids from
 before a crash are never confused with new ones, and a leader never reuses its reserved
 top priority for a slot it may have used it in before.
 

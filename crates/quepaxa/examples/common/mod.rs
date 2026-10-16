@@ -137,9 +137,9 @@ impl Cluster {
     /// Restarts replica `i` from its disk and its latest application snapshot, with a fresh
     /// seed.
     pub fn restart(&mut self, i: usize, start: u8) {
-        let old = &self.configs[i];
-        let members: Vec<u32> = old.members.iter().map(|m| m.0).collect();
-        let cfg = config(old.id.0, &members, start);
+        // The same configuration, except a fresh seed.
+        let mut cfg = self.configs[i].clone();
+        cfg.seed[1] = start;
         let mut replica =
             Replica::new(cfg, self.nodes[i].disk.clone(), Timestamp(self.now)).expect("recovers");
         let node = &mut self.nodes[i];

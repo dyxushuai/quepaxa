@@ -63,13 +63,20 @@ replica.compact(Timestamp(0), Slot(through), snapshot.1.clone())?;
 settle(&mut replica, &mut disk);
 assert!(disk.len() < records_before);
 
-// After a crash: start from the records, then tell the replica about the snapshot
-// (it may be newer than the last checkpoint that reached the disk).
+replica.propose(Timestamp(0), Bytes::from_static(b"d"))?;
+state.extend(settle(&mut replica, &mut disk));
+
+// After a crash, the application's memory is gone. Restore its snapshot first, then start
+// the replica from the records: it re-emits only the slots after the checkpoint, which
+// apply on top of the snapshot.
+let mut state = snapshot.0.clone();
 let mut replica = Replica::new(config([2; 32]), disk.clone(), Timestamp(1))?;
-settle(&mut replica, &mut disk);
+state.extend(settle(&mut replica, &mut disk));
+assert_eq!(state, [&b"a"[..], b"b", b"c", b"d"]);
+// Then tell the replica about the snapshot: it may be newer than the last checkpoint that
+// reached the disk (here it is not, so nothing changes).
 let installed = replica.install_snapshot(Timestamp(1), Slot(through), snapshot.1)?;
 assert!(!installed, "the checkpoint already covers it");
-assert_eq!(replica.emitted_index(), through + 1);
 # Ok::<(), quepaxa::Error>(())
 ```
 
