@@ -310,3 +310,72 @@ fn a_snapshot_is_asked_for_again_only_after_the_hedge_cap() {
     assert_eq!(asks(&mut r, 2), 0, "the first ask may still be answered");
     assert_eq!(asks(&mut r, 1 + hedge_max), 1, "a lost snapshot is asked for again");
 }
+
+#[test]
+fn catch_up_replies_wait_for_durability_and_are_sent_even_when_empty() {
+    let mut r = replica();
+    let mut out = Vec::new();
+    let msg = |body| {
+        let env = Envelope {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            from: NodeId(1),
+            to: NodeId(0),
+            commit_index: 0,
+        };
+        Input::Message(Message { env, body }.encode())
+    };
+    let entries = |out: &[Action]| -> Vec<(u64, usize)> {
+        out.iter()
+            .flat_map(|a| match a {
+                Action::Send(o) => alloc::vec![o],
+                Action::Persist { then, .. } => then.iter().collect(),
+                _ => Vec::new(),
+            })
+            .filter_map(|o| match Message::decode(&o.bytes, &r_wire()) {
+                Ok(Message { env, body: Body::Entries { proposals, .. } }) => {
+                    Some((env.commit_index, proposals.len()))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    // Nothing decided: the reply still goes out, reporting no progress.
+    r.handle(Timestamp(1), msg(Body::CatchUp { from: Slot(0) })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(entries(&out), [(0, 0)]);
+    out.clear();
+    // Slot 0 is decided but its record is not durable yet: a reply reporting it waits for
+    // that write.
+    r.handle(Timestamp(1), msg(Body::Decided { slot: Slot(0), proposal: proposal(1, 1, 0) })).unwrap();
+    r.poll_actions(&mut out);
+    let persist = out.iter().find_map(|a| match a {
+        Action::Persist { id, .. } => Some(*id),
+        _ => None,
+    });
+    out.clear();
+    r.handle(Timestamp(1), msg(Body::CatchUp { from: Slot(0) })).unwrap();
+    r.poll_actions(&mut out);
+    assert!(entries(&out).is_empty(), "{out:?}");
+    r.handle(Timestamp(1), Input::Persisted(persist.expect("the decision is written"))).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(entries(&out), [(1, 1)], "{out:?}");
+}
+
+#[test]
+fn an_empty_catch_up_page_is_retried_only_on_the_timer() {
+    let mut r = replica();
+    let mut out = Vec::new();
+    let from_peer = |commit_index, body| {
+        let env =
+            Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index };
+        Input::Message(Message { env, body }.encode())
+    };
+    // A peer advertises ten slots; the catch-up request comes back empty.
+    r.handle(Timestamp(1), from_peer(10, Body::CatchUp { from: Slot(0) })).unwrap();
+    r.poll_actions(&mut out);
+    r.handle(Timestamp(2), from_peer(10, Body::Entries { first: Slot(0), proposals: Vec::new() })).unwrap();
+    r.poll_actions(&mut out);
+    let retry = r.next_deadline().expect("a retry is scheduled");
+    assert!(retry >= Timestamp(2).after(r.cfg.retransmit_interval), "{retry:?}");
+}

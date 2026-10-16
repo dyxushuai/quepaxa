@@ -104,7 +104,8 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// 0.4: `qpx_config.leader_order` (appended; older layouts keep the default order).
 /// 0.5: membership changes: `qpx_propose_reconfiguration`, `QPX_ACTION_RECONFIGURED`,
 /// `qpx_action_member`, `QPX_ERR_RECONFIGURATION_PENDING`.
-pub const QPX_ABI_VERSION_MINOR: u32 = 5;
+/// 0.6: `QPX_ACTION_RETIRED`.
+pub const QPX_ABI_VERSION_MINOR: u32 = 6;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -159,6 +160,10 @@ pub const QPX_ACTION_DROPPED: u32 = 7;
 /// A membership change was applied: from slot `slot`, the `count` members (read them with
 /// `qpx_action_member`, preferred leaders first) form epoch `id` (ABI 0.5).
 pub const QPX_ACTION_RECONFIGURED: u32 = 8;
+/// This replica is not a member of epoch `id`, and a majority of that epoch's members
+/// durably know every slot before it: it may shut down, unless a later change added it
+/// back (ABI 0.6).
+pub const QPX_ACTION_RETIRED: u32 = 9;
 
 /// `flags` bit of `QPX_ACTION_PERSIST`: replace all earlier records.
 pub const QPX_PERSIST_REPLACE: u32 = 1;
@@ -944,6 +949,10 @@ pub unsafe extern "C" fn qpx_poll(h: *mut qpx_replica, out: *mut qpx_action) -> 
                 v.id = *epoch;
                 v.slot = from.0;
                 v.count = members.len();
+            }
+            Action::Retired { epoch } => {
+                v.kind = QPX_ACTION_RETIRED;
+                v.id = *epoch;
             }
             Action::Dropped { id, reason } => {
                 v.kind = QPX_ACTION_DROPPED;

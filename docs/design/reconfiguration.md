@@ -39,7 +39,7 @@ proposers of a slot agree on its recorders.
 - A joining replica starts as a non-voting learner: it catches up (bulk catch-up or a
   snapshot) before its first epoch slot; it can be proposed only after it has caught up to
   within a window, so the new epoch does not start with a majority still catching up.
-- A removed replica keeps serving old-epoch slots until `s + 63` is decided, then stops
+- A removed replica keeps serving old-epoch slots until `s + 63` is decided, then stops (as built, it waits for more: see Retirement below)
   (it still answers catch-up so laggards can finish).
 - Cost: up to 64 slots of latency between deciding a change and its effect; fine for
   membership, which changes rarely.
@@ -78,9 +78,31 @@ restriction buys nothing.
 - **Joining**: a new replica runs with the original `Config` (its id need not be a
   member). Once the change is decided, members also send it their decisions, so it catches
   up (bulk catch-up or a snapshot) during the window.
-- **Leaving**: a removed replica keeps serving until it has applied the slot before
-  `from`; then the operator may stop it. Its messages are still accepted while it appears
-  in the schedule.
+- **Leaving**: a removed replica keeps serving until it reports `Action::Retired
+  { epoch }`; then the operator may stop it. Its messages are still accepted while it
+  appears in the schedule (and always, if it is one of the configured members).
+- **Retirement**. The slots before `from` are decided by the old members, and only
+  their recorders and the replicas that learned the decisions know them. Stopping removed
+  replicas as soon as they applied `from - 1` stalled the cluster for good when they were
+  a majority of the old members and the new members had not learned those slots yet
+  (simulator seed 1534). So a removed replica waits for evidence that a majority of the
+  new members *durably* know every slot before `from`:
+  - Catch-up replies (`Entries`) are sent through the durability gate, and even when
+    empty. A gated message leaves after every earlier write is durable, and `committed`
+    only advances past slots whose `Decided` record (or a checkpoint) was written first,
+    so the envelope's `commit_index` of an `Entries` reply is durable progress. Other
+    messages carry the in-memory value, which may run ahead of the disk (decisions are
+    applied before their record is durable).
+  - The removed replica sends `CatchUp` from its own `committed` to the new members
+    that have not reported `commit_index >= from`, and to those ahead of it, on the
+    retransmit timer, and records their progress from `Entries` replies.
+  - It reports `Retired` once a majority report `>= from` and none reports more than
+    it has committed: it must not retire on a stale view, since a later change may have
+    added it back. That last check cannot be complete (a change may be decided after the
+    replies were sent), so an operator who added a replica back keeps it running whatever
+    it reports for the older epoch.
+  - No wire change: an empty `Entries` was always valid. A requester re-asks after an
+    empty page only on its timer, so empty replies cannot ping-pong.
 - **State**: `core_state` version 4 carries the epoch, its first slot, and the applied
   change ids with the schedule; versions 2 and 3 are still read.
 - **Mixed versions**: a replica that predates membership changes cannot decode the change
@@ -97,12 +119,17 @@ restriction buys nothing.
   commits without the removed replica).
 - Simulator: `membership_changes_under_faults_stay_safe_and_converge` adds random changes
   over members and two spare replicas to the hostile profile (loss, duplication,
-  partitions, crashes, snapshots); a removed replica is shut down once a majority of the
-  new members applied every slot of its last epoch (seed 1534 stalled when two of three old
-  members left as soon as they had applied it themselves), and restarted if added back.
-  G1/G3/G4/G5 and linearizability are checked as everywhere else (6,000 seeds pass).
+  partitions, crashes, snapshots); a removed replica is shut down when it reports
+  `Retired` (unless a later epoch added it back) and restarted if added back. Seed 1534
+  (two of three old members leave) is also a per-PR regression test; seed 470 found a
+  replica retiring on a stale view after it was added back. G1/G3/G4/G5 and
+  linearizability are checked as everywhere else (6,000 seeds pass; 120 per PR, 2,000
+  nightly).
+- Unit tests for retirement: a removed majority retires only after the joiners caught up;
+  a catch-up reply waits for the write of the decisions it reports, and is sent when empty.
 - Canaries: a change taking effect early (caught by G5), a duplicate applied twice (unit
-  test), proposers using the configured members instead of the slot's (the cluster stalls).
+  test), proposers using the configured members instead of the slot's (the cluster stalls),
+  retiring without a majority of the new members (unit test; the simulator stalls too).
 - Not done: model checking (a change needs a 64-slot window, beyond the checker's budget).
 
 ## Decisions taken (defaults, revisitable)

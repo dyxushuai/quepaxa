@@ -247,7 +247,7 @@ impl Replica {
             && self.catch_up.or(self.ahead_peer.map(|p| (p, self.now))).is_some();
         let catch_up =
             behind.then(|| self.catch_up.map_or(self.now, |(_, t)| t.after(self.cfg.retransmit_interval)));
-        resend.chain(stall).chain(hedge).chain(catch_up).min()
+        resend.chain(stall).chain(hedge).chain(catch_up).chain(self.retire_probe).min()
     }
 
     pub(super) fn fire_timers(&mut self) {

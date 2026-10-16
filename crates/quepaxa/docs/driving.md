@@ -40,6 +40,7 @@ slightly stale reading is harmless.
 | [`ReadReady { id, slot }`](crate::Action::ReadReady) | Read barrier `id`: once `slot` is applied, serve the read. |
 | [`SnapshotNeeded { peer, through }`](crate::Action::SnapshotNeeded) | Fetch `peer`'s application snapshot and install it. |
 | [`Reconfigured { epoch, from, members }`](crate::Action::Reconfigured) | Membership changes at slot `from`. |
+| [`Retired { epoch }`](crate::Action::Retired) | A removed replica is no longer needed and may shut down. |
 | [`Dropped { id, reason }`](crate::Action::Dropped) | Proposal `id` will not be reported again. |
 
 `Action` is `#[non_exhaustive]`: keep a `_ => {}` arm so new actions in minor versions do

@@ -74,6 +74,7 @@ unsafe fn drain(r: &[*mut qpx_replica], i: usize, net: &mut Vec<(u32, Vec<u8>)>,
                 assert_eq!(unsafe { qpx_action_member(r[i], a.count, &mut m) }, QPX_ERR_INVALID_ARGUMENT);
                 out.push(format!("epoch {} from {} {members:?}", a.id, a.slot).into_bytes());
             }
+            QPX_ACTION_RETIRED => out.push(format!("retired {}", a.id).into_bytes()),
             _ => {}
         }
     }
@@ -271,10 +272,10 @@ fn membership_changes_through_the_c_abi() {
     for (i, c) in seen.iter_mut().enumerate() {
         unsafe { drain(&r, i, &mut net, c) };
     }
-    // Same members, replica 2 preferred as leader.
-    let order = [2u32, 0, 1];
+    // Replica 2 leaves; replica 1 becomes the preferred leader.
+    let (next, order) = ([0u32, 1], [1u32, 0]);
     let mut id = 0;
-    let rc = unsafe { qpx_propose_reconfiguration(r[0], 0, members.as_ptr(), 3, order.as_ptr(), 3, &mut id) };
+    let rc = unsafe { qpx_propose_reconfiguration(r[0], 0, next.as_ptr(), 2, order.as_ptr(), 2, &mut id) };
     assert_eq!(rc, QPX_OK);
     unsafe { drain(&r, 0, &mut net, &mut seen[0]) };
     let again = unsafe { qpx_propose_reconfiguration(r[0], 0, members.as_ptr(), 3, ptr::null(), 0, &mut id) };
@@ -294,8 +295,19 @@ fn membership_changes_through_the_c_abi() {
             .filter(|e| e.starts_with(b"epoch"))
             .map(|e| String::from_utf8_lossy(e).into_owned())
             .collect();
-        assert_eq!(changes, ["epoch 1 from 64 [2, 0, 1]"], "replica {i}");
+        assert_eq!(changes, ["epoch 1 from 64 [1, 0]"], "replica {i}");
     }
+    // The removed replica learns on its timer that the new members have the old slots.
+    for (i, s) in seen.iter_mut().enumerate() {
+        assert_eq!(unsafe { qpx_handle_timeout(r[i], 1_000_000_000) }, QPX_OK);
+        unsafe { drain(&r, i, &mut net, s) };
+    }
+    run(&mut net, &mut seen);
+    for (i, s) in seen.iter().enumerate() {
+        let retired = s.iter().filter(|e| e.starts_with(b"retired")).count();
+        assert_eq!((i, retired), (i, usize::from(i == 2)));
+    }
+    assert!(seen[2].iter().any(|e| e == b"retired 1"));
     for h in r {
         unsafe { qpx_replica_free(h) };
     }

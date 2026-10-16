@@ -157,11 +157,11 @@ fn metrics_count_what_happened() {
 #[test]
 fn membership_changes_under_faults_stay_safe_and_converge() {
     // About 50x slower per seed than the other tests (two spares, 64-slot windows), so it
-    // runs 1/50 of QPX_SIM_SEEDS (nightly: 2,000) unless QPX_SIM_MEMBERSHIP_SEEDS says how
-    // many exactly (the canaries do).
+    // runs 1/50 of QPX_SIM_SEEDS (nightly: 2,000; per PR: 120) unless
+    // QPX_SIM_MEMBERSHIP_SEEDS says how many exactly (the canaries do).
     let env = |name: &str| std::env::var(name).ok().and_then(|s| s.parse::<u64>().ok());
     let seeds = env("QPX_SIM_MEMBERSHIP_SEEDS")
-        .unwrap_or_else(|| env("QPX_SIM_SEEDS").map_or(40, |s| (s / 50).max(40)));
+        .unwrap_or_else(|| env("QPX_SIM_SEEDS").map_or(120, |s| (s / 50).max(120)));
     let applied = AtomicU64::new(0);
     let ran = for_seeds(seeds, |seed| {
         let n = [3, 5][(seed % 2) as usize];

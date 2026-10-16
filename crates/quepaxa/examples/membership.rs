@@ -38,11 +38,15 @@ fn main() {
     }
     let (epoch, from, ref members) = cluster.nodes[3].reconfigured[0];
     assert_eq!((epoch, members.as_slice()), (1, &[NodeId(3), NodeId(1), NodeId(2)][..]));
-    // Replica 0 may leave once a majority of the new members have decided every slot of
-    // the old epoch; until then they may still need it to recover one.
-    let ready = [1, 2, 3].iter().filter(|&&i| cluster.replica(i).commit_index() >= from.0).count();
-    assert!(ready >= 2);
-    println!("epoch {epoch} starts at slot {}; {ready} of 3 new members are past it", from.0);
+    println!("epoch {epoch} starts at slot {}", from.0);
+
+    // Replica 0 may leave once it reports `Retired`: a majority of the new members durably
+    // know every slot of the old epoch, so they no longer need it. It asks them on its
+    // retransmit timer.
+    cluster.run_for(1_000_000_000);
+    assert_eq!(cluster.nodes[0].retired, Some(1));
+    assert!(cluster.nodes[1..].iter().all(|n| n.retired.is_none()));
+    println!("replica 0 retired from epoch 1");
 
     // Replica 0 leaves; the new members carry on, replica 3 leading.
     cluster.crash(0);

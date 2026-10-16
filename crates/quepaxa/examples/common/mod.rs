@@ -41,6 +41,8 @@ pub struct Node {
     pub ready: Vec<(ProposalId, Slot)>,
     /// Membership changes as reported, in log order.
     pub reconfigured: Vec<(u64, Slot, Vec<NodeId>)>,
+    /// The epoch this replica reported it may retire from (it is not a member).
+    pub retired: Option<u64>,
 }
 
 /// A cluster connected by an in-memory network, with a virtual clock in nanoseconds.
@@ -91,6 +93,7 @@ impl Cluster {
             committed: Vec::new(),
             ready: Vec::new(),
             reconfigured: Vec::new(),
+            retired: None,
         });
         let i = self.nodes.len() - 1;
         self.drain(i);
@@ -253,6 +256,7 @@ impl Cluster {
                 Action::Reconfigured { epoch, from, members } => {
                     self.nodes[i].reconfigured.push((epoch, from, members))
                 }
+                Action::Retired { epoch } => self.nodes[i].retired = Some(epoch),
                 Action::SnapshotNeeded { peer, through } => self.install_from(i, peer.0 as usize, through),
                 Action::Dropped { .. } => {} // only after a storage failure
                 _ => {}                      // `Action` is non-exhaustive

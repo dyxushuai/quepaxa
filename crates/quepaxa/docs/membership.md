@@ -41,13 +41,16 @@ in log order.
   own id need not be a member. Once the change is decided, members also send it their
   decisions, so it catches up (in bulk, or from a snapshot) during the window and votes
   from slot `s + 64`.
-- **Removing a replica.** It keeps serving until a majority of the *new* members have
-  decided every slot before `from`: their
-  [`commit_index`](crate::Replica::commit_index) (`qpx_commit_index` in C) is at least
-  `from`. Then it may shut down. Its own progress is not enough: the slots before `from`
-  were decided by the old members, and if a majority of them leave before the new members
-  learn those slots, nobody can recover them and the cluster stalls. Removing a minority
-  of the old members is safe sooner, but the rule above covers every case.
+- **Removing a replica.** Keep it running until it reports
+  [`Retired { epoch }`](crate::Action::Retired) (`QPX_ACTION_RETIRED` in C); then it may
+  shut down. Applying the slots before `from` itself is not enough: those slots were
+  decided by the old members, and if a majority of them leave before the new members know
+  those slots durably, nobody can recover them and the cluster stalls. So a removed
+  replica asks the new members for their progress and reports `Retired` once a majority
+  of them durably know every slot before `from`, and it knows everything they reported.
+  If a later change has added it back (it is in a newer epoch's `members`), keep it
+  running even if it reports `Retired` for the older epoch: it reported that before it
+  caught up with the change.
 - **Replacing the leader.** Put the new leader first in the new order.
 
 ```no_run
@@ -58,7 +61,8 @@ let mut replica: Replica = get_replica();
 let members = vec![NodeId(1), NodeId(2), NodeId(3)];
 let order = vec![NodeId(3), NodeId(1), NodeId(2)];
 let id = replica.propose_reconfiguration(Timestamp(0), members, order)?;
-// ... drain and execute actions as usual; watch for `Action::Reconfigured`.
+// ... drain and execute actions as usual; watch for `Action::Reconfigured` everywhere,
+// and on replica 0 for `Action::Retired { epoch: 1 }` before shutting it down.
 # let _ = id;
 # Ok::<(), quepaxa::Error>(())
 ```
