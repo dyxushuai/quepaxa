@@ -121,3 +121,8 @@ pub use api::{Action, Config, DropReason, Error, Input, Metrics, Outbound};
 pub use batch::Entry;
 pub use replica::Replica;
 pub use types::{NodeId, PersistId, ProposalId, Slot, Timestamp};
+
+// Compiles and runs the README's code blocks as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;
