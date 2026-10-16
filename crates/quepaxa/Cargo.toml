@@ -1,14 +1,15 @@
 [package]
 name = "quepaxa"
-description = "QuePaxa consensus as a sans-IO, no_std replicated log"
+description = "QuePaxa consensus for state machine replication: a sans-IO, no_std replicated log that, unlike Raft or Multi-Paxos, never stalls on election timeouts"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 readme = "../../README.md"
-categories = ["algorithms", "no-std"]
-keywords = ["consensus", "paxos", "quepaxa", "replication", "sans-io"]
+documentation = "https://docs.rs/quepaxa"
+categories = ["algorithms", "database-implementations", "no-std"]
+keywords = ["consensus", "paxos", "raft", "replication", "distributed"]
 
 [lints]
 workspace = true

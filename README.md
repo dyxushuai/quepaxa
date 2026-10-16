@@ -1,9 +1,16 @@
 # quepaxa
 
+[![crates.io](https://img.shields.io/crates/v/quepaxa.svg)](https://crates.io/crates/quepaxa)
+[![docs.rs](https://img.shields.io/docsrs/quepaxa)](https://docs.rs/quepaxa)
+[![CI](https://github.com/dyxushuai/quepaxa/actions/workflows/ci.yml/badge.svg)](https://github.com/dyxushuai/quepaxa/actions/workflows/ci.yml)
+[![license](https://img.shields.io/crates/l/quepaxa.svg)](#license)
+
 An open-source Rust implementation of [QuePaxa](https://bford.info/pub/os/quepaxa/quepaxa.pdf)
-(SOSP'23): crash-fault-tolerant consensus whose liveness never depends on timeouts. Any
-replica can drive any slot; a leader is only a fast path (one round trip), and hedged,
-randomized proposers keep the log moving when the leader is slow, partitioned or gone.
+(SOSP'23), a consensus algorithm for state machine replication whose liveness never depends
+on timeouts. Any replica can drive any slot; a leader is only a fast path (one round trip),
+and hedged, randomized proposers keep the replicated log moving when the leader is slow,
+partitioned or gone. QuePaxa is the algorithm behind Cloudflare Research's
+[Meerkat](https://blog.cloudflare.com/meerkat-introduction/) global consensus service.
 
 - **`quepaxa`** — sans-IO, `no_std + alloc` core exposing a replicated log of opaque
   batches. It never touches the network, disk or clock: you feed it events and execute the
@@ -12,6 +19,20 @@ randomized proposers keep the log moving when the leader is slow, partitioned or
   [`crates/quepaxa-ffi/include/quepaxa.h`](https://github.com/dyxushuai/quepaxa/blob/main/crates/quepaxa-ffi/include/quepaxa.h)).
 - **`examples/kv-tokio`** — reference runtime: a replicated key-value store over TCP with
   fsync'd storage, snapshots and a load generator.
+
+## QuePaxa compared to Raft and Multi-Paxos
+
+All three replicate a log across `2f + 1` replicas and tolerate `f` crashes. In Raft and
+Multi-Paxos, progress depends on one leader: when it crashes, the cluster waits for an
+election timeout; when it is merely slow or badly placed, it is not replaced at all, and
+every write pays for it. Timeouts short enough to recover quickly cause spurious elections
+on a jittery wide-area network, so they are a tuning problem with no right answer.
+
+QuePaxa keeps the leader's one-round-trip fast path in the common case, but never waits
+for it: if a slot is not decided in time, other replicas hedge and propose too, and the
+protocol still decides exactly one value. A timeout set too short costs extra messages,
+not availability; a slow leader costs latency, not a stall. The price is a more involved
+protocol (four phases per round when the fast path fails) and slightly more state per slot.
 
 ## Using the core
 

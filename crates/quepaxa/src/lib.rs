@@ -1,5 +1,6 @@
-//! [QuePaxa](https://bford.info/pub/os/quepaxa/quepaxa.pdf) consensus as a sans-IO,
-//! `no_std` replicated log.
+//! [QuePaxa](https://bford.info/pub/os/quepaxa/quepaxa.pdf) consensus for state machine
+//! replication: a sans-IO, `no_std` replicated log, and an alternative to Raft and
+//! Multi-Paxos that never stalls waiting for an election timeout.
 //!
 //! A cluster of replicas agrees on one ordered log of opaque entries, tolerating the crash
 //! (and recovery) of any minority. QuePaxa's distinguishing property is that **liveness
