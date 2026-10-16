@@ -51,6 +51,7 @@ crates/quepaxa/src/replica/proposing.rs: replace + with * in Replica::fire_timer
 crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::fire_timers
 crates/quepaxa/src/replica/snapshot.rs: replace > with < in Replica::install_snapshot
 crates/quepaxa/src/replica/snapshot.rs: replace > with == in Replica::install_snapshot
+crates/quepaxa/src/replica/snapshot.rs: replace > with >= in Replica::install_snapshot
 
 # Leader-side flow control: bounds memory under a flood of forwards; a larger or smaller
 # cap changes only when followers hedge instead.

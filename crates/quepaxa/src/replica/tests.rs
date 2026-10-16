@@ -287,3 +287,26 @@ fn membership_changes_are_bounded_in_size() {
     r.poll_actions(&mut out);
     assert!(r.propose_reconfiguration(Timestamp(1), many(crate::schedule::MAX_MEMBERS), Vec::new()).is_ok());
 }
+
+#[test]
+fn a_snapshot_is_asked_for_again_only_after_the_hedge_cap() {
+    let mut r = replica();
+    let hedge_max = r.cfg.hedge_max;
+    let asks = |r: &mut Replica, at: u64| {
+        let env = Envelope {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            from: NodeId(1),
+            to: NodeId(0),
+            commit_index: 0,
+        };
+        let body = Body::Compacted { through: Slot(9) };
+        r.handle(Timestamp(at), Input::Message(Message { env, body }.encode())).unwrap();
+        let mut out = Vec::new();
+        r.poll_actions(&mut out);
+        out.iter().filter(|a| matches!(a, Action::SnapshotNeeded { through: Slot(9), .. })).count()
+    };
+    assert_eq!(asks(&mut r, 1), 1);
+    assert_eq!(asks(&mut r, 2), 0, "the first ask may still be answered");
+    assert_eq!(asks(&mut r, 1 + hedge_max), 1, "a lost snapshot is asked for again");
+}
