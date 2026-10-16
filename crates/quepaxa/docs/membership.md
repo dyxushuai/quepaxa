@@ -41,8 +41,13 @@ in log order.
   own id need not be a member. Once the change is decided, members also send it their
   decisions, so it catches up (in bulk, or from a snapshot) during the window and votes
   from slot `s + 64`.
-- **Removing a replica.** It keeps serving until it has applied slot `from - 1`; then it may
-  shut down.
+- **Removing a replica.** It keeps serving until a majority of the *new* members have
+  decided every slot before `from`: their
+  [`commit_index`](crate::Replica::commit_index) (`qpx_commit_index` in C) is at least
+  `from`. Then it may shut down. Its own progress is not enough: the slots before `from`
+  were decided by the old members, and if a majority of them leave before the new members
+  learn those slots, nobody can recover them and the cluster stalls. Removing a minority
+  of the old members is safe sooner, but the rule above covers every case.
 - **Replacing the leader.** Put the new leader first in the new order.
 
 ```no_run

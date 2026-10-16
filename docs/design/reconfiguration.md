@@ -97,9 +97,10 @@ restriction buys nothing.
   commits without the removed replica).
 - Simulator: `membership_changes_under_faults_stay_safe_and_converge` adds random changes
   over members and two spare replicas to the hostile profile (loss, duplication,
-  partitions, crashes, snapshots); removed replicas are shut down once their last epoch is
-  applied and restarted if added back. G1/G3/G4/G5 and linearizability are checked as
-  everywhere else (1,000 seeds pass).
+  partitions, crashes, snapshots); a removed replica is shut down once a majority of the
+  new members applied every slot of its last epoch (seed 1534 stalled when two of three old
+  members left as soon as they had applied it themselves), and restarted if added back.
+  G1/G3/G4/G5 and linearizability are checked as everywhere else (6,000 seeds pass).
 - Canaries: a change taking effect early (caught by G5), a duplicate applied twice (unit
   test), proposers using the configured members instead of the slot's (the cluster stalls).
 - Not done: model checking (a change needs a 64-slot window, beyond the checker's budget).

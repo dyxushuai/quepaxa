@@ -260,7 +260,9 @@ pub enum Action {
     },
     /// A membership change was applied (in the log order of `Commit`): from slot `from`,
     /// `members` (preferred leaders first) are the replicas and majorities are theirs.
-    /// A replica not in `members` may shut down once it has applied the slot before `from`.
+    /// A replica not in `members` may shut down once a majority of `members` have a
+    /// [`commit_index`](crate::Replica::commit_index) of at least `from`; see
+    /// [`guide::membership`](crate::guide::membership).
     Reconfigured {
         /// The new epoch (the configured members are epoch 0).
         epoch: u64,

@@ -172,3 +172,12 @@ fn membership_changes_under_faults_stay_safe_and_converge() {
     let applied = applied.into_inner();
     assert!(applied >= ran, "reconfigurations actually happened: {applied}");
 }
+
+#[test]
+fn removed_majority_waits_for_the_new_members() {
+    // Seed 1534 removes two of three members; when they shut down as soon as they had
+    // applied the old epoch themselves, the new members could never learn its last slots.
+    let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(3, 1534) };
+    let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.reconfigurations > 0, "{report:?}");
+}
