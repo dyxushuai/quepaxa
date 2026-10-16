@@ -1,12 +1,13 @@
 diff --git a/crates/quepaxa/src/replica/retire.rs b/crates/quepaxa/src/replica/retire.rs
+index e43463b..9af2eb8 100644
 --- a/crates/quepaxa/src/replica/retire.rs
 +++ b/crates/quepaxa/src/replica/retire.rs
-@@ -45,7 +45,7 @@
+@@ -45,7 +45,7 @@ impl Replica {
          let progress = |m: &NodeId| self.member_progress.get(m).copied().unwrap_or(0);
          let caught_up = members.iter().filter(|m| progress(m) >= from).count();
          let ahead = members.iter().any(|m| progress(m) > self.committed);
 -        if caught_up > members.len() / 2 && !ahead {
-+        if !ahead {
++        if (caught_up > members.len() / 2 || self.committed >= from) && !ahead {
              self.retired = Some(epoch);
              self.member_progress.clear();
              self.retire_probe = None;
