@@ -188,6 +188,25 @@ mod tests {
         }
     }
 
+    proptest::proptest! {
+        // Any register round-trips, whatever its fields share: equal priority alone, or
+        // equal key alone, must not turn a field into a reference to another.
+        #[test]
+        fn every_register_round_trips(
+            fields in proptest::collection::vec(proptest::option::of((1u64..3, 1u32..3, 0u8..2)), 3),
+            step in 0u32..100,
+        ) {
+            let p = |f: Option<(u64, u32, u8)>| f.map(|(prio, origin, v)| Proposal {
+                priority: prio,
+                key: crate::proposal::ValueKey { origin: crate::types::NodeId(origin), incarnation: 1, seq: 0 },
+                value: Bytes::from(alloc::vec![v]),
+            });
+            let reg = Register { step, first: p(fields[0]), agg: p(fields[1]), prev_agg: p(fields[2]) };
+            let rec = Record::Recorder { slot: Slot(1), reg };
+            proptest::prop_assert_eq!(Record::decode(&rec.encode()), Ok(rec));
+        }
+    }
+
     #[test]
     fn fast_path_registers_store_their_value_once() {
         let v = prop(9, 1, 0);
