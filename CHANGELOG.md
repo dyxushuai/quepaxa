@@ -5,10 +5,15 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
-- Docs: a removed replica may shut down only once a majority of the new members have a
-  `commit_index` of at least the new epoch's `from` (not as soon as it applied `from - 1`
-  itself): if a majority of the old members leave before the new members learn the old
-  epoch's last slots, the cluster stalls. Found by the nightly simulator (seed 1534).
+- `quepaxa`: `Action::Retired { epoch }` tells a replica removed by a membership change
+  when it may shut down: once a majority of the new members durably know every slot of
+  the old epoch. Shutting down as soon as it had applied the old epoch, as the docs said,
+  stalled the cluster for good when a majority of the old members left before the new
+  ones learned those slots (found by the nightly simulator, seed 1534). Keep removed
+  replicas running until they report `Retired`.
+- `quepaxa`: catch-up replies are sent once the decisions they report are durable, and
+  even when empty (no wire change).
+- `quepaxa-ffi` (ABI 0.6): `QPX_ACTION_RETIRED` (epoch in `id`).
 
 ## 0.3.1 — 2026-10-16
 

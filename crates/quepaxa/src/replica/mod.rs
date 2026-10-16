@@ -7,6 +7,7 @@
 mod gate;
 mod log;
 mod proposing;
+mod retire;
 mod snapshot;
 
 use alloc::collections::{BTreeMap, VecDeque};
@@ -127,6 +128,14 @@ pub struct Replica {
     /// Core state of the latest snapshot, carried into checkpoints.
     snapshot_state: Option<Bytes>,
     snapshot_asked: Option<Timestamp>,
+
+    // Retirement, while this replica is removed from the latest epoch.
+    /// Durable progress each member of that epoch reported in catch-up replies.
+    member_progress: BTreeMap<NodeId, u64>,
+    /// When to ask the members still behind again.
+    retire_probe: Option<Timestamp>,
+    /// The epoch `Action::Retired` was reported for.
+    retired: Option<u64>,
     /// Steps at which this replica's proposers decided, for verification only.
     #[cfg(feature = "model")]
     decided_steps: BTreeMap<Slot, (Proposal, u32)>,
@@ -251,6 +260,9 @@ impl Replica {
             floor,
             snapshot_state: snapshot.map(|(_, b)| b),
             snapshot_asked: None,
+            member_progress: BTreeMap::new(),
+            retire_probe: None,
+            retired: None,
             #[cfg(feature = "model")]
             decided_steps: BTreeMap::new(),
         };
@@ -552,6 +564,9 @@ impl Replica {
         if msg.env.commit_index > self.committed + 1 && self.catch_up_due() {
             self.request_catch_up(from);
         }
+        if let Body::Entries { .. } = msg.body {
+            self.note_progress(from, msg.env.commit_index);
+        }
         self.inbox.push_back((from, msg.body));
     }
 
@@ -579,6 +594,7 @@ impl Replica {
                     Body::Decided { slot, proposal } => self.learn(slot, proposal, false),
                     Body::CatchUp { from: start } => self.on_catch_up(from, start),
                     Body::Entries { first, proposals } => {
+                        let page = !proposals.is_empty();
                         for (i, p) in proposals.into_iter().enumerate() {
                             let Some(slot) = first.0.checked_add(i as u64) else { break };
                             self.learn(Slot(slot), p, false);
@@ -587,8 +603,9 @@ impl Replica {
                         // the active request's answer moves the catch-up along.
                         if self.catch_up.is_some_and(|(peer, _)| peer == from) {
                             self.catch_up = None;
-                            // Still behind after one page: ask the same peer for the next one.
-                            if self.peer_committed > self.committed + 1 {
+                            // Still behind after a page: ask the same peer for the next one
+                            // (after an empty reply, only on the timer).
+                            if page && self.peer_committed > self.committed + 1 {
                                 self.request_catch_up(from);
                             }
                         }
@@ -598,6 +615,7 @@ impl Replica {
                 }
             }
             self.drive();
+            self.check_retired();
             if self.inbox.is_empty() {
                 break;
             }

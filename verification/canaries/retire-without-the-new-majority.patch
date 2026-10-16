@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/retire.rs b/crates/quepaxa/src/replica/retire.rs
+--- a/crates/quepaxa/src/replica/retire.rs
++++ b/crates/quepaxa/src/replica/retire.rs
+@@ -45,7 +45,7 @@
+         let progress = |m: &NodeId| self.member_progress.get(m).copied().unwrap_or(0);
+         let caught_up = members.iter().filter(|m| progress(m) >= from).count();
+         let ahead = members.iter().any(|m| progress(m) > self.committed);
+-        if caught_up > members.len() / 2 && !ahead {
++        if !ahead {
+             self.retired = Some(epoch);
+             self.member_progress.clear();
+             self.retire_probe = None;

@@ -55,7 +55,9 @@ impl Replica {
         }
     }
 
-    /// Serves contiguous decided slots from `start`, within half a message budget.
+    /// Serves contiguous decided slots from `start`, within half a message budget. The reply
+    /// leaves once everything written so far is durable, and is sent even when empty, so its
+    /// envelope's `commit_index` is durable progress (a removed replica retires on it).
     pub(super) fn on_catch_up(&mut self, to: NodeId, start: Slot) {
         if start.0 < self.floor {
             self.send(to, Body::Compacted { through: Slot(self.floor - 1) });
@@ -75,9 +77,7 @@ impl Replica {
             }
             proposals.push(d.proposal.clone());
         }
-        if !proposals.is_empty() {
-            self.send(to, Body::Entries { first: start, proposals });
-        }
+        self.send_gated(to, Body::Entries { first: start, proposals });
     }
 
     pub(super) fn learn(&mut self, slot: Slot, proposal: Proposal, broadcast: bool) {

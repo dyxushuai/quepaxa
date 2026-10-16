@@ -260,9 +260,7 @@ pub enum Action {
     },
     /// A membership change was applied (in the log order of `Commit`): from slot `from`,
     /// `members` (preferred leaders first) are the replicas and majorities are theirs.
-    /// A replica not in `members` may shut down once a majority of `members` have a
-    /// [`commit_index`](crate::Replica::commit_index) of at least `from`; see
-    /// [`guide::membership`](crate::guide::membership).
+    /// A replica not in `members` keeps running until it reports [`Action::Retired`].
     Reconfigured {
         /// The new epoch (the configured members are epoch 0).
         epoch: u64,
@@ -270,6 +268,15 @@ pub enum Action {
         from: Slot,
         /// The members, preferred leaders first.
         members: Vec<NodeId>,
+    },
+    /// This replica is not a member of `epoch`, and a majority of that epoch's members
+    /// durably know every slot before it: the cluster no longer needs this replica, which
+    /// may shut down. Reported once per start. If a later change added this replica back,
+    /// keep it running: it reported this before catching up with that change. See
+    /// [`guide::membership`](crate::guide::membership).
+    Retired {
+        /// The epoch this replica is not a member of.
+        epoch: u64,
     },
     /// A local proposal will not be reported again (see [`DropReason`] for whether it may
     /// still commit).

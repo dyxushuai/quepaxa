@@ -198,9 +198,8 @@ struct Node {
     proposed_at: HashMap<ProposalId, u64>,
     /// Membership changes proposed here (they appear in no `Commit`).
     changes: BTreeSet<ProposalId>,
-    /// Removed from the cluster: shut down once a majority of the new members applied every
-    /// slot before this one.
-    retire_from: Option<u64>,
+    /// Reported `Retired`: shut down once nothing is being written here.
+    retiring: bool,
     /// Shut down after removal (restarted only if a later change adds it back).
     retired: bool,
 }
@@ -256,7 +255,7 @@ impl Sim {
                 incarnation_payloads: HashMap::new(),
                 proposed_at: HashMap::new(),
                 changes: BTreeSet::new(),
-                retire_from: None,
+                retiring: false,
                 retired: false,
             })
             .collect();
@@ -336,14 +335,6 @@ impl Sim {
             }
         }
         Err(self.fail("did not converge after faults stopped"))
-    }
-
-    /// Whether a majority of the members of the epoch starting at slot `from` applied every
-    /// slot before it.
-    fn new_majority_applied(&self, from: u64) -> bool {
-        self.epochs.values().find(|(f, _)| *f == from).is_some_and(|(_, members)| {
-            members.iter().filter(|&&m| self.nodes[m].next_commit >= from).count() > members.len() / 2
-        })
     }
 
     fn fail(&self, what: &str) -> String {
@@ -712,16 +703,13 @@ impl Sim {
         for a in actions {
             self.on_action(i, a);
         }
-        // An operator shuts a removed replica down once it is no longer needed: when a
-        // majority of the new members applied every slot of its last epoch (before that, the
-        // old epoch's recorders may be the only ones that know those slots) and nothing is
-        // being written here.
-        let n = &self.nodes[i];
-        if n.retire_from.is_some_and(|f| self.new_majority_applied(f)) && n.pending.is_empty() {
-            let n = &mut self.nodes[i];
+        // An operator shuts a removed replica down once it reports `Retired` (the new members
+        // no longer need it) and nothing is being written here.
+        let n = &mut self.nodes[i];
+        if n.retiring && n.pending.is_empty() {
             n.replica = None;
             n.retired = true;
-            n.retire_from = None;
+            n.retiring = false;
             n.generation += 1;
             let _ = writeln!(self.trace, "{} n{i} retires", self.now);
             return;
@@ -805,19 +793,24 @@ impl Sim {
                 }
                 self.report.reconfigurations += 1;
                 self.epochs.insert(epoch, (from.0, next.clone()));
-                // Removed replicas serve until the epoch starts; returning ones start now
-                // so they catch up during the window.
-                for gone in self.members.clone().into_iter().filter(|m| !next.contains(m)) {
-                    self.nodes[gone].retire_from = Some(from.0);
-                }
+                // Removed replicas serve until they report `Retired`; returning ones start
+                // now so they catch up during the window.
                 for &back in &next {
                     let n = &mut self.nodes[back];
-                    n.retire_from = None;
+                    n.retiring = false;
                     if std::mem::take(&mut n.retired) {
                         let _ = writeln!(self.trace, "{} n{back} rejoins", self.now);
                         self.push(self.now, Event::Restart { node: back });
                     }
                 }
+            }
+            Action::Retired { epoch } => {
+                let _ = writeln!(self.trace, "{} n{i} retired from epoch {epoch}", self.now);
+                // A replica that has not caught up with a later change adding it back may
+                // still report the older epoch; the operator knows better and keeps it.
+                let back =
+                    self.epochs.range(epoch + 1..).next_back().is_some_and(|(_, (_, m))| m.contains(&i));
+                self.nodes[i].retiring = !back;
             }
             Action::ReadReady { id, .. } => self.kv.read_ready(i, id),
             Action::SnapshotNeeded { peer, through } => {

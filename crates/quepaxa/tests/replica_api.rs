@@ -428,6 +428,14 @@ fn a_member_is_replaced_and_the_new_majority_commits_without_it() {
         })
         .collect();
     assert_eq!(reconfigured, [0, 1, 2, 3], "every replica, the joiner included, applies the change once");
+    // The removed replica asks the new members for their progress on its retransmit timer.
+    for r in &mut rs {
+        r.handle_timeout(Timestamp(1_000_000_000)).unwrap();
+    }
+    seen.extend(run_without(&mut rs, &[]));
+    let retired: Vec<usize> =
+        seen.iter().filter(|(_, a)| matches!(a, Action::Retired { epoch: 1 })).map(|(i, _)| *i).collect();
+    assert_eq!(retired, [0], "only the removed replica retires, once");
     let before = rs[1].commit_index();
     assert!(rs.iter().all(|r| r.commit_index() == before), "the joiner caught up");
     // Without replica 0 the new members still form a majority, on the fast path.
@@ -437,6 +445,57 @@ fn a_member_is_replaced_and_the_new_majority_commits_without_it() {
     assert_eq!(rs[1].commit_index(), before + 1);
     assert_eq!(rs[3].commit_index(), before + 1);
     assert_eq!(rs[1].metrics().fast_path_decisions, fast + 1, "replica 1 now leads");
+}
+
+#[test]
+fn removed_majority_retires_only_after_the_new_members_caught_up() {
+    // Replicas 0 and 1 leave, 3 and 4 join: once the window has passed, only replica 2 of
+    // the old members remains, so 0 and 1 must wait for the joiners to learn the old slots.
+    let mut rs: Vec<Replica> = (0..5).map(|i| ordered(i, &[])).collect();
+    run_without(&mut rs, &[3, 4]);
+    let joiners = vec![NodeId(2), NodeId(3), NodeId(4)];
+    rs[0].propose_reconfiguration(T0, joiners, vec![]).unwrap();
+    let mut seen = run_without(&mut rs, &[3, 4]);
+    for k in 0..70u32 {
+        rs[0].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+        seen.extend(run_without(&mut rs, &[3, 4]));
+    }
+    let from = seen
+        .iter()
+        .find_map(|(_, a)| match a {
+            Action::Reconfigured { epoch: 1, from, .. } => Some(from.0),
+            _ => None,
+        })
+        .expect("the change was applied");
+    assert!(rs[0].commit_index() >= from, "the old members decided the whole window");
+    assert_eq!(rs[3].commit_index(), 0);
+    let retired = |seen: &[(usize, Action)]| {
+        seen.iter()
+            .filter(|(_, a)| matches!(a, Action::Retired { epoch: 1 }))
+            .map(|(i, _)| *i)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(retired(&seen), [0usize; 0], "the joiners know none of the old slots yet");
+    // The joiners come back; the removed replicas' probes tell them how far the log goes,
+    // they catch up, and the next probes report their durable progress.
+    let mut t = 0;
+    while retired(&seen).len() < 2 {
+        t += 1;
+        assert!(
+            t < 20,
+            "retirement never reported: {:?}",
+            rs.iter().map(Replica::commit_index).collect::<Vec<_>>()
+        );
+        let now = Timestamp(t * 1_000_000_000);
+        for r in &mut rs {
+            r.handle_timeout(now).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[]));
+    }
+    let mut both = retired(&seen);
+    both.sort_unstable();
+    assert_eq!(both, [0, 1]);
+    assert!(rs[3].commit_index() >= from && rs[4].commit_index() >= from, "joiners caught up first");
 }
 
 #[test]

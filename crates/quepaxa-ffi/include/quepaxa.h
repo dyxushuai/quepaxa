@@ -28,7 +28,8 @@
 // 0.4: `qpx_config.leader_order` (appended; older layouts keep the default order).
 // 0.5: membership changes: `qpx_propose_reconfiguration`, `QPX_ACTION_RECONFIGURED`,
 // `qpx_action_member`, `QPX_ERR_RECONFIGURATION_PENDING`.
-#define QPX_ABI_VERSION_MINOR 5
+// 0.6: `QPX_ACTION_RETIRED`.
+#define QPX_ABI_VERSION_MINOR 6
 
 // Success.
 #define QPX_OK 0
@@ -105,6 +106,11 @@
 // A membership change was applied: from slot `slot`, the `count` members (read them with
 // `qpx_action_member`, preferred leaders first) form epoch `id` (ABI 0.5).
 #define QPX_ACTION_RECONFIGURED 8
+
+// This replica is not a member of epoch `id`, and a majority of that epoch's members
+// durably know every slot before it: it may shut down, unless a later change added it
+// back (ABI 0.6).
+#define QPX_ACTION_RETIRED 9
 
 // `flags` bit of `QPX_ACTION_PERSIST`: replace all earlier records.
 #define QPX_PERSIST_REPLACE 1
