@@ -119,7 +119,12 @@ fn metrics_count_what_happened() {
 
 #[test]
 fn membership_changes_under_faults_stay_safe_and_converge() {
-    let seeds: u64 = std::env::var("QPX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
+    // About 50x slower per seed than the other tests (two spares, 64-slot windows):
+    // nightly's 100,000 seeds become 2,000 here.
+    let seeds: u64 = std::env::var("QPX_SIM_SEEDS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map_or(40, |s| (s / 50).max(40));
     let mut applied = 0;
     for seed in 0..seeds {
         let n = [3, 5][(seed % 2) as usize];

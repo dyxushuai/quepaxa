@@ -330,3 +330,20 @@ impl fmt::Display for Error {
 }
 
 impl core::error::Error for Error {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_wire_identity_is_stable_across_versions() {
+        let members = alloc::vec![NodeId(0), NodeId(1), NodeId(2)];
+        let mut cfg = Config::new([7; 16], NodeId(0), members, [1; 32]);
+        assert_eq!(cfg.wire_cluster_id(), [7; 16], "the default order leaves the id as configured");
+        cfg.leader_order = alloc::vec![NodeId(2), NodeId(0), NodeId(1)];
+        // Replicas of different versions must agree on this mix, so it is pinned.
+        let mut expected = [7u8; 16];
+        expected[8..].copy_from_slice(&[0x61, 0x1e, 0x70, 0x7b, 0x15, 0x0b, 0xf3, 0x99]);
+        assert_eq!(cfg.wire_cluster_id(), expected);
+    }
+}
