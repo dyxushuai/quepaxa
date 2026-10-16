@@ -38,8 +38,22 @@ for action in actions {
 }
 ```
 
-The crate docs and [`examples/kv-tokio`](https://github.com/dyxushuai/quepaxa/tree/main/examples/kv-tokio) show the complete driving loop,
-restart, compaction and snapshot installation. The C ABI follows the same model; see
+Documentation: [docs.rs/quepaxa](https://docs.rs/quepaxa), with a guide in chapters — [driving the
+replica](https://docs.rs/quepaxa/latest/quepaxa/guide/driving/index.html), [durability and
+restart](https://docs.rs/quepaxa/latest/quepaxa/guide/durability/index.html),
+[snapshots](https://docs.rs/quepaxa/latest/quepaxa/guide/snapshots/index.html), [linearizable
+reads](https://docs.rs/quepaxa/latest/quepaxa/guide/reads/index.html), [membership and
+leaders](https://docs.rs/quepaxa/latest/quepaxa/guide/membership/index.html),
+[tuning](https://docs.rs/quepaxa/latest/quepaxa/guide/tuning/index.html) and [how the protocol
+works](https://docs.rs/quepaxa/latest/quepaxa/guide/protocol/index.html) (also readable in
+[`crates/quepaxa/docs`](https://github.com/dyxushuai/quepaxa/tree/main/crates/quepaxa/docs)).
+
+Runnable examples: `cargo run -p quepaxa --example cluster` (three replicas, writes and a
+linearizable read), `restart` (crash recovery, compaction, catching up from a snapshot) and
+`membership` (replacing a member and the leader), all on the in-memory driver in
+[`crates/quepaxa/examples/common`](https://github.com/dyxushuai/quepaxa/tree/main/crates/quepaxa/examples/common).
+[`examples/kv-tokio`](https://github.com/dyxushuai/quepaxa/tree/main/examples/kv-tokio) is a complete networked, fsync'd key-value store. The C ABI
+follows the same model: [docs.rs/quepaxa-ffi](https://docs.rs/quepaxa-ffi) and
 [`crates/quepaxa-ffi/examples/smoke.c`](https://github.com/dyxushuai/quepaxa/blob/main/crates/quepaxa-ffi/examples/smoke.c).
 
 ## Guarantees and testing

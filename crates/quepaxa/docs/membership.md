@@ -1,0 +1,69 @@
+# Membership and leaders
+
+## Members and majorities
+
+A cluster of `n` members tolerates `⌊(n - 1) / 2⌋` crashed or partitioned members: three
+tolerate one, five tolerate two. Every slot needs a majority of its members to make
+progress; any member (in fact any replica) can drive any slot.
+
+## The leader
+
+One member at a time is the **leader**: the only one allowed the reserved top priority in
+a slot's first step, which lets it decide in one round trip when a majority answers
+(the fast path). Other replicas forward their clients' entries to it. The leader is an
+optimization, not a requirement — if it is slow or gone, the others decide slots on their
+own with randomized priorities, and after eight consecutive slots not led by the leader it
+moves to the back of the order. Every replica computes the leader of every slot from the
+decided log, so they agree without any election.
+
+[`Config::leader_order`](crate::Config::leader_order) sets the preferred order (default: by
+id). Put first the member with the fastest path to a majority: on a wide-area deployment
+the leader's placement alone changes client latency about twofold. Every member must use the
+same order; members configured differently ignore each other's messages rather than
+disagree on the leader. The order is part of the cluster's identity for as long as its
+state lives; change it with a membership change.
+
+## Changing membership
+
+[`Replica::propose_reconfiguration`](crate::Replica::propose_reconfiguration) proposes a new set of
+members (and leader order) as an entry in the log. If it is decided in slot `s`, slots up
+to `s + 63` keep the old members and slot `s + 64` onward use the new ones. The window is
+the bound on how far ahead any replica drives slots, so every replica knows the members of
+every slot it touches from the decided log alone — no joint quorums, no second protocol.
+Each replica reports the change with [`Reconfigured { epoch, from, members }`](crate::Action::Reconfigured)
+in log order.
+
+- **One change at a time.** Proposing while a change has not taken effect returns
+  [`ReconfigurationPending`](crate::Error::ReconfigurationPending). Of two changes proposed
+  concurrently on different replicas, the one decided first wins; every replica ignores the
+  other (its proposer still sees `Committed`, but no `Reconfigured` follows).
+- **Adding a replica.** Start it with the cluster's *original* [`Config`](crate::Config) — its
+  own id need not be a member. Once the change is decided, members also send it their
+  decisions, so it catches up (in bulk, or from a snapshot) during the window and votes
+  from slot `s + 64`.
+- **Removing a replica.** It keeps serving until it has applied slot `from - 1`; then it may
+  shut down.
+- **Replacing the leader.** Put the new leader first in the new order.
+
+```no_run
+use quepaxa::{NodeId, Replica, Timestamp};
+# fn get_replica() -> Replica { unimplemented!() }
+let mut replica: Replica = get_replica();
+// Replace member 0 with member 3, which becomes the preferred leader.
+let members = vec![NodeId(1), NodeId(2), NodeId(3)];
+let order = vec![NodeId(3), NodeId(1), NodeId(2)];
+let id = replica.propose_reconfiguration(Timestamp(0), members, order)?;
+// ... drain and execute actions as usual; watch for `Action::Reconfigured`.
+# let _ = id;
+# Ok::<(), quepaxa::Error>(())
+```
+
+`examples/membership.rs` runs this end to end: replica 3 joins, replica 0 leaves, and the
+new majority commits on the fast path led by replica 3.
+
+**Upgrades:** a replica running a version without membership changes cannot decode a
+change entry and would keep the old majorities. Propose changes only once every replica
+runs 0.3 or later.
+
+Not supported: witnesses (members that vote but keep no log) and automatic, latency-based
+leader tuning.

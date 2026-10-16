@@ -1,8 +1,9 @@
-/// Identity of one replica in the cluster.
+/// Identity of one replica in the cluster. Ids are chosen by the operator and must be
+/// unique; they never change for a replica's lifetime (its durable state is tied to it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId(pub u32);
 
-/// Position in the replicated log.
+/// Position in the replicated log, from 0. Each slot holds one decided batch of entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Slot(pub u64);
 
@@ -18,7 +19,9 @@ pub(crate) const MAX_STEP: Step = u32::MAX - 16;
 /// Slots past this are rejected so slot arithmetic (window, reservations) cannot overflow.
 pub(crate) const MAX_SLOT: u64 = u64::MAX - (1 << 32);
 
-/// Monotonic time in nanoseconds, supplied by the caller; the epoch is the caller's choice.
+/// Monotonic time in nanoseconds, supplied by the caller with every call; the epoch is the
+/// caller's choice (process start is typical). Only differences matter, and the replica
+/// never lets its clock move backwards, so a slightly stale reading is harmless.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct Timestamp(pub u64);
 
@@ -29,7 +32,10 @@ impl Timestamp {
     }
 }
 
-/// Identifier of a local proposal, unique within one incarnation of a replica.
+/// Identifier of a local proposal, returned by [`crate::Replica::propose`] (and
+/// `read_barrier`, `propose_reconfiguration`), unique within one incarnation of a
+/// replica. Entries in [`crate::Action::Commit`] carry it with their origin and
+/// incarnation, which together identify an entry cluster-wide.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProposalId(pub u64);
 

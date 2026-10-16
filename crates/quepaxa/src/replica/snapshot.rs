@@ -35,7 +35,19 @@ impl Replica {
 
     /// Discards log state up to and including `through`, which the application has
     /// durably snapshotted together with `core_state` (taken right after applying slot
-    /// `through`). Older or repeated compactions are ignored.
+    /// `through`).
+    ///
+    /// The replica then emits a checkpoint: an [`Action::Persist`] with `replace: true`
+    /// that rewrites its durable records without the covered slots. Older or repeated
+    /// compactions are ignored. See [`guide::snapshots`](crate::guide::snapshots).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidCoreState`] if `core_state` is malformed, does not cover exactly
+    ///   the slots through `through`, covers slots not yet emitted, or was built under
+    ///   another leader order.
+    /// - [`Error::Fenced`] after a storage failure; [`Error::NotDrained`] if the previous
+    ///   call's actions were not taken.
     pub fn compact(&mut self, now: Timestamp, through: Slot, core_state: Bytes) -> Result<(), Error> {
         self.begin(now)?;
         if self.fenced {
@@ -63,7 +75,15 @@ impl Replica {
     /// On `Ok(true)` the replica queues a checkpoint `Persist` that discards the log below
     /// the snapshot. Store the application snapshot durably before executing that persist
     /// (and fail it with [`crate::Input::StorageFailed`] if you cannot): otherwise a crash
-    /// in between leaves neither the log nor a snapshot covering those slots.
+    /// in between leaves neither the log nor a snapshot covering those slots. See
+    /// [`guide::snapshots`](crate::guide::snapshots).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidCoreState`] if `core_state` is malformed, does not cover exactly
+    ///   the slots through `through`, or was built under another leader order.
+    /// - [`Error::Fenced`] after a storage failure; [`Error::NotDrained`] if the previous
+    ///   call's actions were not taken.
     pub fn install_snapshot(
         &mut self,
         now: Timestamp,

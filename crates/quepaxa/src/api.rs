@@ -12,10 +12,26 @@ const MILLI: u64 = 1_000_000;
 /// Envelope and proposal framing budget on top of the values a message carries.
 const MESSAGE_OVERHEAD: u64 = 1024;
 
-/// Static configuration of one replica. Every member must use the same `cluster_id`,
-/// `members`, `leader_order` and `max_batch_bytes` (receivers reject values larger than
-/// their own limit);
-/// `seed` must be fresh CSPRNG output on every start, including restarts.
+/// Configuration of one replica, checked by [`crate::Replica::new`].
+///
+/// Every member must use the same `cluster_id`, `members` (the initial membership),
+/// `leader_order` and `max_batch_bytes`; `seed` must be fresh CSPRNG output on every start,
+/// including restarts. [`Config::new`] fills the limits and timers with defaults for a LAN;
+/// [`guide::tuning`](crate::guide::tuning) explains each field and when to change it.
+///
+/// # Examples
+///
+/// ```
+/// use quepaxa::{Config, NodeId};
+///
+/// const MILLI: u64 = 1_000_000;
+/// let members = vec![NodeId(0), NodeId(1), NodeId(2)];
+/// let mut cfg = Config::new(*b"orders-cluster-1", NodeId(1), members, [3; 32]);
+/// // A cluster spread over regions with ~150 ms round trips:
+/// cfg.retransmit_interval = 400 * MILLI;
+/// cfg.hedge_max = 3_000 * MILLI;
+/// cfg.leader_order = vec![NodeId(1), NodeId(0), NodeId(2)];
+/// ```
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "model", derive(Hash))]
 #[non_exhaustive]
@@ -29,8 +45,8 @@ pub struct Config {
     /// Randomness for proposal priorities. Liveness relies on the network being unable to
     /// predict it, so never reuse a seed across starts.
     pub seed: [u8; 32],
-    /// Upper bound on the encoded entries of one batch (one slot). Cluster-wide: every
-    /// member must use the same value.
+    /// Upper bound on the encoded entries of one batch (one slot), at least 64. Cluster-wide:
+    /// every member must use the same value.
     pub max_batch_bytes: u32,
     /// Upper bound on one encoded network message; larger inputs are dropped unread. Must be
     /// at least `2 * max_batch_bytes + 1024` (a reply can carry two full values).
@@ -62,7 +78,10 @@ pub struct Config {
 }
 
 impl Config {
-    /// A configuration with default limits and timers.
+    /// A configuration with default limits and timers (see the table in
+    /// [`guide::tuning`](crate::guide::tuning)): 1 MiB batches, 16 MiB messages, 8 slots in
+    /// flight, 4096 outstanding proposals, 50 ms retransmission, hedging between 1 ms and
+    /// 1 s, leaders by id.
     pub fn new(cluster_id: [u8; 16], id: NodeId, members: Vec<NodeId>, seed: [u8; 32]) -> Self {
         Self {
             cluster_id,
@@ -118,7 +137,8 @@ impl Config {
             (!self.members.is_empty(), "members must not be empty"),
             (self.members.len() <= crate::schedule::MAX_MEMBERS, "at most 1024 members"),
             (sorted.len() == self.members.len(), "members must be unique"),
-            (self.max_batch_bytes > 0, "max_batch_bytes must be positive"),
+            // Room for at least one entry's framing (an empty read barrier is 29 bytes).
+            (self.max_batch_bytes >= 64, "max_batch_bytes must be at least 64"),
             (
                 u64::from(self.max_message_bytes) >= 2 * u64::from(self.max_batch_bytes) + MESSAGE_OVERHEAD,
                 "max_message_bytes must hold two full batches plus 1 KiB of framing",
@@ -150,7 +170,7 @@ impl Config {
     }
 }
 
-/// Something that happened outside the replica.
+/// Something that happened outside the replica, fed with [`crate::Replica::handle`].
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum Input {
@@ -158,7 +178,9 @@ pub enum Input {
     Message(Bytes),
     /// Every [`Action::Persist`] with an id up to and including `id` is durable.
     Persisted(PersistId),
-    /// Persisting `id` failed; the replica fences itself until restarted.
+    /// Persisting `id` failed. The replica fences itself: it reports outstanding proposals
+    /// as [`Action::Dropped`], ignores further events and refuses requests with
+    /// [`Error::Fenced`]. Restart it from its durable records.
     StorageFailed(PersistId),
 }
 
@@ -257,7 +279,9 @@ pub enum Action {
     },
 }
 
-/// Counters for observability.
+/// Counters for observability, from [`crate::Replica::metrics`]. Counters only grow
+/// within one incarnation; gauges (marked) go up and down.
+/// [`guide::tuning`](crate::guide::tuning) says what unusual values indicate.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "model", derive(Hash))]
 #[non_exhaustive]
@@ -272,7 +296,8 @@ pub struct Metrics {
     pub slots_decided: u64,
     /// Decisions this replica's proposers reached on the leader fast path.
     pub fast_path_decisions: u64,
-    /// Decided batches whose entries could not be decoded.
+    /// Decided batches whose entries could not be decoded (committed as empty). Always 0
+    /// unless replicas run incompatible versions.
     pub corrupt_batches: u64,
     /// Batches of entries forwarded to the leader.
     pub forwarded: u64,
@@ -284,24 +309,34 @@ pub struct Metrics {
     pub live_registers: u64,
 }
 
-/// A caller contract violation or a refused request.
+/// Why a call was refused. A refused call changes nothing in the replica.
+///
+/// | Kind | Variants | What to do |
+/// |---|---|---|
+/// | Backpressure | [`Busy`](Error::Busy), [`ReconfigurationPending`](Error::ReconfigurationPending) | Retry later. |
+/// | Bad input | [`InvalidConfig`](Error::InvalidConfig), [`PayloadTooLarge`](Error::PayloadTooLarge), [`InvalidCoreState`](Error::InvalidCoreState) | Fix the argument. |
+/// | Storage | [`CorruptRecord`](Error::CorruptRecord), [`Fenced`](Error::Fenced) | Repair or restore the data; restart. |
+/// | Driver bug | [`NotDrained`](Error::NotDrained), [`UnknownPersistId`](Error::UnknownPersistId) | Fix the event loop ([`guide::driving`](crate::guide::driving)). |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-    /// The configuration is invalid.
+    /// The configuration (or a proposed membership) breaks a documented rule; the message
+    /// names it.
     InvalidConfig(&'static str),
     /// A durable record handed to [`crate::Replica::new`] is corrupt; `index` is its position.
     CorruptRecord {
         /// Position in the records passed in.
         index: usize,
     },
-    /// Too many outstanding proposals; retry after some commit.
+    /// [`Config::max_outstanding_proposals`] local proposals are already waiting; retry after
+    /// some commit.
     Busy,
-    /// The payload does not fit in one batch.
+    /// The payload alone does not fit in one batch ([`Config::max_batch_bytes`]).
     PayloadTooLarge,
-    /// The replica is fenced after a storage failure.
+    /// The replica fenced itself after [`Input::StorageFailed`]; restart it.
     Fenced,
-    /// Actions from the previous call were not drained with `poll_actions`.
+    /// Actions from the previous call were not taken with
+    /// [`poll_actions`](crate::Replica::poll_actions); this call did nothing.
     NotDrained,
     /// `Persisted` named an id that was never issued or was already reported.
     UnknownPersistId,

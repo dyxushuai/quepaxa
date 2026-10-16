@@ -1,18 +1,87 @@
-//! Stable C ABI over the `quepaxa` core.
+//! Stable C ABI over the [`quepaxa`] consensus core, for C, C++, Go, Swift, Kotlin/JNI,
+//! Python (ctypes/cffi) or any language that can call C.
 //!
-//! Contract (also in `include/quepaxa.h`):
+//! The ABI exposes the same sans-IO [`quepaxa::Replica`]: your program feeds it events and
+//! carries out the actions it returns. Read [`quepaxa::guide::driving`] for the model; this
+//! page covers what is specific to C.
+//!
+//! # Getting the library
+//!
+//! - **Prebuilt:** every GitHub release attaches `quepaxa-ffi-<version>-<target>` archives
+//!   with `include/quepaxa.h` and the static and shared libraries for Linux (x86_64,
+//!   aarch64; glibc 2.28+), macOS (x86_64, arm64), Windows (x64, arm64, MSVC), Android
+//!   (`jniLibs` for four ABIs, 16 KB pages) and iOS (an XCFramework).
+//! - **From source:** `cargo build --release -p quepaxa-ffi` produces
+//!   `libquepaxa_ffi.a` / `.so` / `.dylib` (or `quepaxa_ffi.lib` / `.dll`) in
+//!   `target/release`; the header is `crates/quepaxa-ffi/include/quepaxa.h`.
+//! - **Linking statically** on Linux also needs `-lpthread -ldl -lm`.
+//!
+//! # The loop in C
+//!
+//! ```c
+//! #include "quepaxa.h"
+//!
+//! qpx_config cfg;
+//! qpx_config_init(&cfg, sizeof cfg);          /* defaults; sets cfg.struct_size */
+//! memcpy(cfg.cluster_id, "my-cluster-0001!", 16);
+//! cfg.id = 0;
+//! cfg.members = members;  cfg.members_len = 3; /* uint32_t members[3] = {0, 1, 2} */
+//! fill_with_csprng(cfg.seed, sizeof cfg.seed); /* fresh on every start */
+//!
+//! qpx_replica *r;
+//! check(qpx_replica_new(&cfg, records, n_records, now_ns(), &r)); /* durable records, in order */
+//!
+//! for (;;) {                                   /* after every call: drain */
+//!   qpx_action a;
+//!   int32_t rc = qpx_poll(r, &a);
+//!   if (rc == QPX_EMPTY) break;
+//!   switch (a.kind) {
+//!   case QPX_ACTION_PERSIST:   /* qpx_action_record(r, k, ...) for k < a.count: append + fsync,  */
+//!                              /* then send qpx_action_then(r, k, ...) for k < a.then_count,     */
+//!                              /* then, after draining, qpx_persisted(r, now, a.id)              */
+//!   case QPX_ACTION_SEND:      /* send a.bytes to a.peer                                         */
+//!   case QPX_ACTION_COMMIT:    /* apply qpx_action_entry(r, k, ...) for k < a.count, slot a.slot */
+//!   case QPX_ACTION_COMMITTED: /* answer the client of proposal a.id                             */
+//!   default: break;            /* new kinds may appear in minor versions                         */
+//!   }
+//! }
+//! uint64_t deadline;
+//! if (qpx_next_deadline(r, &deadline) == QPX_OK) { /* arm a timer; then qpx_handle_timeout */ }
+//! ```
+//!
+//! `examples/smoke.c` in the crate is a complete three-replica program; CI runs it on Linux,
+//! macOS, Windows, an Android emulator and an iOS simulator.
+//!
+//! # Contract
+//!
+//! (Also stated in `include/quepaxa.h`.)
+//!
 //! - Every function returns a `QPX_*` status (`0` = ok, positive = informational,
-//!   negative = error) unless stated otherwise.
-//! - A handle may move between threads, but calls on one handle must not overlap.
-//! - Pointers returned by `qpx_poll` and the `qpx_action_*` accessors borrow from the
-//!   handle and stay valid until the next call on that handle.
-//! - After any mutating call, drain actions with `qpx_poll` until it returns `QPX_EMPTY`
-//!   before the next mutating call (`QPX_ERR_NOT_DRAINED` otherwise).
-//! - Versioned structs (`qpx_config`, `qpx_metrics`) carry `struct_size`, the size the
-//!   caller compiled against; the library reads and writes only that many bytes.
-//! - `qpx_last_error` describes the most recent failing call on the calling thread.
-//! - A panic inside the library returns `QPX_ERR_PANIC` and poisons the handle; every
-//!   later call on it returns `QPX_ERR_POISONED`.
+//!   negative = error) unless stated otherwise. [`qpx_status_str`] names it and
+//!   [`qpx_last_error`] describes the most recent failing call on the calling thread.
+//! - **Draining:** after any mutating call, call [`qpx_poll`] until it returns
+//!   `QPX_EMPTY` before the next mutating call (`QPX_ERR_NOT_DRAINED` otherwise).
+//!   `qpx_persisted` is itself a mutating call: collect persist ids while draining and
+//!   acknowledge the highest one afterwards (it covers every earlier persist).
+//! - **Persist before send:** never send a persist's `then` messages before its records
+//!   are durable.
+//! - **Borrowed memory:** `qpx_bytes` returned by [`qpx_poll`] and the `qpx_action_*`
+//!   accessors borrow from the handle and stay valid until the next call on that handle;
+//!   copy what you keep. Inputs are copied by the library; you keep ownership.
+//! - **Threads:** a handle may move between threads, but calls on one handle must not
+//!   overlap. Different handles are independent.
+//! - **Panics** never cross the boundary: a panic inside the library returns
+//!   `QPX_ERR_PANIC` and poisons the handle; every later call on it returns
+//!   `QPX_ERR_POISONED`. Free it with [`qpx_replica_free`].
+//!
+//! # Versioning
+//!
+//! [`qpx_abi_version`] returns `(major << 16) | minor`; compare it with
+//! `QPX_ABI_VERSION_MAJOR`/`MINOR` from the header you compiled against. Versioned structs
+//! (`qpx_config`, `qpx_metrics`) start with `struct_size`, the size the caller compiled
+//! against: the library reads and writes only that many bytes, so a program built against
+//! an older header keeps working (new fields take their defaults). Before 1.0 a minor ABI
+//! bump may still be incompatible; the changelog says when.
 #![expect(non_camel_case_types)]
 // C naming for exported types
 // Panics across the C ABI are caught, but production code should not rely on that.
