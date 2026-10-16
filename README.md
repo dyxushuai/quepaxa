@@ -22,17 +22,19 @@ partitioned or gone. QuePaxa is the algorithm behind Cloudflare Research's
 
 ## QuePaxa compared to Raft and Multi-Paxos
 
-All three replicate a log across `2f + 1` replicas and tolerate `f` crashes. In Raft and
-Multi-Paxos, progress depends on one leader: when it crashes, the cluster waits for an
-election timeout; when it is merely slow or badly placed, it is not replaced at all, and
-every write pays for it. Timeouts short enough to recover quickly cause spurious elections
-on a jittery wide-area network, so they are a tuning problem with no right answer.
+All three replicate a log across `n` replicas and stay available while a majority is up
+(`2f + 1` replicas tolerate `f` crashes). In Raft and Multi-Paxos, progress depends on one
+leader: when it crashes, the cluster waits for an election timeout; when it is slow but
+still answers heartbeats, it stays leader and every write pays for it. Timeouts short
+enough to recover quickly cause spurious elections on a jittery wide-area network, so they
+are a tuning problem with no right answer.
 
 QuePaxa keeps the leader's one-round-trip fast path in the common case, but never waits
 for it: if a slot is not decided in time, other replicas hedge and propose too, and the
 protocol still decides exactly one value. A timeout set too short costs extra messages,
 not availability; a slow leader costs latency, not a stall. The price is a more involved
-protocol (four phases per round when the fast path fails) and slightly more state per slot.
+protocol (without the fast path, a round takes up to four phases, and a decision usually
+three) and slightly more state per slot.
 
 ## Using the core
 
