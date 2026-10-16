@@ -34,6 +34,7 @@ jobs:
               - 'examples/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - 'README.md' # its code blocks are doctests
               - 'deny.toml'
               - 'verification/**'
               - '.github/workflows/ci.yml'

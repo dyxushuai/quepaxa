@@ -30,14 +30,17 @@ partitioned or gone. QuePaxa is the algorithm behind Cloudflare Research's
 cargo add quepaxa bytes
 ```
 
+On `no_std` targets, use `cargo add bytes --no-default-features` for `bytes`.
+
 From C, C++, Go, Swift or another FFI language: download the prebuilt library for your
 platform from the [releases](https://github.com/dyxushuai/quepaxa/releases) and read
 [docs.rs/quepaxa-ffi](https://docs.rs/quepaxa-ffi).
 
 ## Quick start
 
-A single-member cluster commits on its own. With more members, `Action::Send` messages go
-to peers and their replies come back through `Replica::handle`; the loop is the same.
+A single-member cluster commits on its own. With more members, messages go to peers
+(`Action::Send`, and each `Action::Persist`'s `then` once its records are durable) and
+their replies come back through `Replica::handle`; the loop is the same.
 
 ```rust
 use bytes::Bytes;
@@ -150,8 +153,8 @@ and seeded-bug canaries that must keep failing. See [VERIFICATION.md](https://gi
 ## Performance
 
 `examples/kv-tokio`, three replicas on one VM over loopback, every write `fsync`ed to a
-virtual disk before it is acknowledged: 250,000 writes/s with p50 7.2 ms and p99 14 ms; at
-5,000 writes/s, p50 5.9 ms. Latency is a few `fsync`s and barely depends on load. Setup, in-memory numbers and
+virtual disk before it is acknowledged, half writes and half linearizable reads: 250,000
+operations/s with p50 7.2 ms and p99 14 ms; at 5,000 operations/s, p50 5.9 ms. Latency is a few `fsync`s and barely depends on load. Setup, in-memory numbers and
 simulated WAN placements: [docs/benchmarks.md](https://github.com/dyxushuai/quepaxa/blob/main/docs/benchmarks.md).
 
 ## Platforms

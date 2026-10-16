@@ -865,3 +865,9 @@ impl Sim {
 fn fnv(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, &b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
+
+// Compiles and runs the README's code blocks as doctests. It lives here because this crate
+// is never published: in the packaged `quepaxa` the README's path would not resolve.
+#[cfg(doctest)]
+#[doc = include_str!("../../../README.md")]
+struct ReadmeDoctests;
