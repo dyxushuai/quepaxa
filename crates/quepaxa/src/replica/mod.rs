@@ -602,11 +602,15 @@ impl Replica {
                         // A late or duplicate page from another peer is still useful, but only
                         // the active request's answer moves the catch-up along.
                         if self.catch_up.is_some_and(|(peer, _)| peer == from) {
-                            self.catch_up = None;
-                            // Still behind after a page: ask the same peer for the next one
-                            // (after an empty reply, only on the timer).
-                            if page && self.peer_committed > self.committed + 1 {
-                                self.request_catch_up(from);
+                            if page {
+                                self.catch_up = None;
+                                // Still behind after a page: ask the same peer for the next one.
+                                if self.peer_committed > self.committed + 1 {
+                                    self.request_catch_up(from);
+                                }
+                            } else {
+                                // Nothing new there: ask again only on the timer.
+                                self.catch_up = Some((from, self.now));
                             }
                         }
                     }

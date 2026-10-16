@@ -361,3 +361,21 @@ fn catch_up_replies_wait_for_durability_and_are_sent_even_when_empty() {
     r.poll_actions(&mut out);
     assert_eq!(entries(&out), [(1, 1)], "{out:?}");
 }
+
+#[test]
+fn an_empty_catch_up_page_is_retried_only_on_the_timer() {
+    let mut r = replica();
+    let mut out = Vec::new();
+    let from_peer = |commit_index, body| {
+        let env =
+            Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index };
+        Input::Message(Message { env, body }.encode())
+    };
+    // A peer advertises ten slots; the catch-up request comes back empty.
+    r.handle(Timestamp(1), from_peer(10, Body::CatchUp { from: Slot(0) })).unwrap();
+    r.poll_actions(&mut out);
+    r.handle(Timestamp(2), from_peer(10, Body::Entries { first: Slot(0), proposals: Vec::new() })).unwrap();
+    r.poll_actions(&mut out);
+    let retry = r.next_deadline().expect("a retry is scheduled");
+    assert!(retry >= Timestamp(2).after(r.cfg.retransmit_interval), "{retry:?}");
+}
