@@ -154,6 +154,9 @@ jobs:
         run: |
           # Exit 0: all caught, 2: some missed, 3: some timed out — findings, reported below.
           # Anything else (baseline failure, usage error, crash) means no valid run.
+          # A mutant can allocate without bound (an emit loop that never advances); a 4 GiB
+          # address-space cap per process makes its test crash instead of OOM-killing the runner.
+          ulimit -v 4194304
           status=0
           cargo mutants -p quepaxa --test-tool nextest --shard ${{ matrix.shard }}/8 --no-shuffle || status=$?
           case $status in 0|2|3) ;; *) echo "::error::cargo-mutants failed (exit $status)"; exit 1 ;; esac
