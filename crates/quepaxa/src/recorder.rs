@@ -57,37 +57,71 @@ mod proofs {
     use crate::proposal::ValueKey;
     use crate::types::NodeId;
 
+    /// Payloads are distinct per proposal: equality ignores them, so the proof compares
+    /// them separately to catch a value recorded with the wrong bytes.
     fn any_proposal() -> Proposal {
         let key = ValueKey { origin: NodeId(kani::any()), incarnation: kani::any(), seq: kani::any() };
-        Proposal { priority: kani::any(), key, value: bytes::Bytes::new() }
+        let value: &'static [u8] = match kani::any::<u8>() % 3 {
+            0 => b"",
+            1 => b"a",
+            _ => b"b",
+        };
+        Proposal { priority: kani::any(), key, value: bytes::Bytes::from_static(value) }
     }
 
     fn any_option() -> Option<Proposal> {
         if kani::any() { Some(any_proposal()) } else { None }
     }
 
+    /// Equal, and with the same bytes (the payloads are distinct static slices and clones
+    /// share them, so the same slice means the same bytes).
+    fn same(a: &Option<Proposal>, b: &Option<Proposal>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                a == b && a.value.as_ptr() == b.value.as_ptr() && a.value.len() == b.value.len()
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
     /// Paper invariants R1–R6 for one `record` from any register state.
     #[kani::proof]
     fn record_upholds_recorder_invariants() {
-        let mut r = Register { step: kani::any(), first: any_option(), agg: any_option(), prev_agg: any_option() };
+        let mut r =
+            Register { step: kani::any(), first: any_option(), agg: any_option(), prev_agg: any_option() };
         let before = r.clone();
         let (s, v): (Step, Proposal) = (kani::any(), any_proposal());
         let changed = r.record(s, v.clone());
+        let new = Some(v.clone());
         assert!(r.step >= before.step, "R1 step monotonic");
-        assert!(changed == (r != before), "changed exactly when it must be persisted");
+        assert!(
+            changed
+                == !(r.step == before.step
+                    && same(&r.first, &before.first)
+                    && same(&r.agg, &before.agg)
+                    && same(&r.prev_agg, &before.prev_agg)),
+            "changed exactly when it must be persisted"
+        );
         if s < before.step {
-            assert!(r == before, "R5 stale discard");
+            assert!(
+                same(&r.first, &before.first)
+                    && same(&r.agg, &before.agg)
+                    && same(&r.prev_agg, &before.prev_agg),
+                "R5 stale discard"
+            );
         } else if s == before.step {
-            assert!(r.first == before.first, "R2 first write-once");
-            assert!(r.agg == core::cmp::max(before.agg.clone(), Some(v)), "R3 aggregate is the maximum");
-            assert!(r.prev_agg == before.prev_agg);
+            assert!(same(&r.first, &before.first), "R2 first write-once");
+            let raised = before.agg.as_ref().is_none_or(|a| v > *a);
+            assert!(same(&r.agg, if raised { &new } else { &before.agg }), "R3 aggregate is the maximum");
+            assert!(same(&r.prev_agg, &before.prev_agg));
         } else {
             let expect = if before.step.checked_add(1) == Some(s) { before.agg.clone() } else { None };
-            assert!(r.prev_agg == expect, "R4 prior aggregate");
-            assert!(r.step == s && r.first == Some(v.clone()) && r.agg == Some(v), "new step");
+            assert!(same(&r.prev_agg, &expect), "R4 prior aggregate");
+            assert!(r.step == s && same(&r.first, &new) && same(&r.agg, &new), "new step");
         }
         let sum = r.summary();
-        assert!(sum.step == r.step && sum.first == r.first && sum.prev_agg == r.prev_agg, "R6");
+        assert!(sum.step == r.step && same(&sum.first, &r.first) && same(&sum.prev_agg, &r.prev_agg), "R6");
     }
 }
 
