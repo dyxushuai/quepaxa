@@ -34,7 +34,7 @@ volatile state showed (its replies wait for durability, so that state never had 
 ```sh
 cargo nextest run --workspace                                   # everything per-PR
 cargo nextest run --release -p quepaxa-sim --test model_check   # model checking (release)
-QPX_SIM_SEEDS=100000 cargo nextest run --release -p quepaxa-sim --test replica_sim
+QPX_SIM_SEEDS=100000 cargo nextest run --release -p quepaxa-sim --test replica_sim   # all cores; QPX_SIM_SHARD=i/n for a slice
 QPX_MODEL_EXTRA_DEVIATIONS=1 cargo nextest run --release -p quepaxa-sim --test model_check
 verification/canaries.sh [name]                                 # seeded bugs
 TLA_SECONDS=120 verification/tla/run.sh                          # TLA+ model (Java or Docker)

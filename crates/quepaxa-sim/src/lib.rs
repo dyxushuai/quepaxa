@@ -198,7 +198,8 @@ struct Node {
     proposed_at: HashMap<ProposalId, u64>,
     /// Membership changes proposed here (they appear in no `Commit`).
     changes: BTreeSet<ProposalId>,
-    /// Removed from the cluster: shut down once it applied every slot before this one.
+    /// Removed from the cluster: shut down once a majority of the new members applied every
+    /// slot before this one.
     retire_from: Option<u64>,
     /// Shut down after removal (restarted only if a later change adds it back).
     retired: bool,
@@ -335,6 +336,14 @@ impl Sim {
             }
         }
         Err(self.fail("did not converge after faults stopped"))
+    }
+
+    /// Whether a majority of the members of the epoch starting at slot `from` applied every
+    /// slot before it.
+    fn new_majority_applied(&self, from: u64) -> bool {
+        self.epochs.values().find(|(f, _)| *f == from).is_some_and(|(_, members)| {
+            members.iter().filter(|&&m| self.nodes[m].next_commit >= from).count() > members.len() / 2
+        })
     }
 
     fn fail(&self, what: &str) -> String {
@@ -703,10 +712,12 @@ impl Sim {
         for a in actions {
             self.on_action(i, a);
         }
-        // An operator shuts a removed replica down once it is no longer needed: when it has
-        // applied every slot of its last epoch and nothing is being written.
+        // An operator shuts a removed replica down once it is no longer needed: when a
+        // majority of the new members applied every slot of its last epoch (before that, the
+        // old epoch's recorders may be the only ones that know those slots) and nothing is
+        // being written here.
         let n = &self.nodes[i];
-        if n.retire_from.is_some_and(|f| n.next_commit >= f) && n.pending.is_empty() {
+        if n.retire_from.is_some_and(|f| self.new_majority_applied(f)) && n.pending.is_empty() {
             let n = &mut self.nodes[i];
             n.replica = None;
             n.retired = true;

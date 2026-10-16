@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- Docs: a removed replica may shut down only once a majority of the new members have a
+  `commit_index` of at least the new epoch's `from` (not as soon as it applied `from - 1`
+  itself): if a majority of the old members leave before the new members learn the old
+  epoch's last slots, the cluster stalls. Found by the nightly simulator (seed 1534).
+
 ## 0.3.1 — 2026-10-16
 
 - Documentation: a `quepaxa::guide` in seven chapters (driving the replica, durability and

@@ -1,6 +1,45 @@
 //! Replica-level deterministic simulation runs.
 
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
+
 use quepaxa_sim::{Sim, SimConfig};
+
+/// `QPX_SIM_SEEDS`, or `default`.
+fn seed_count(default: u64) -> u64 {
+    std::env::var("QPX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+}
+
+/// Runs `run(seed)` for seeds `0..count` on every core and returns how many it ran. With
+/// `QPX_SIM_SHARD=i/n`, runs only the seeds equal to `i` modulo `n` (the nightly splits
+/// the seeds across machines). The first failure stops the other threads and is re-raised.
+fn for_seeds(count: u64, run: impl Fn(u64) + Sync) -> u64 {
+    let (shard, shards) = std::env::var("QPX_SIM_SHARD").ok().map_or((0, 1), |s| {
+        let (i, n) = s.split_once('/').expect("QPX_SIM_SHARD is i/n");
+        (i.parse().expect("shard index"), n.parse().expect("shard count"))
+    });
+    assert!(shard < shards, "QPX_SIM_SHARD index must be below the count");
+    let (next, ran, failed) = (AtomicU64::new(shard), AtomicU64::new(0), AtomicBool::new(false));
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                while !failed.load(Relaxed) {
+                    let seed = next.fetch_add(shards, Relaxed);
+                    if seed >= count {
+                        break;
+                    }
+                    if let Err(panic) = catch_unwind(AssertUnwindSafe(|| run(seed))) {
+                        failed.store(true, Relaxed);
+                        resume_unwind(panic);
+                    }
+                    ran.fetch_add(1, Relaxed);
+                }
+            });
+        }
+    });
+    ran.into_inner()
+}
 
 fn calm(nodes: usize, seed: u64) -> SimConfig {
     SimConfig { drop: 0, dup: 0, partition: 0, crash: 0, ..SimConfig::hostile(nodes, seed) }
@@ -19,23 +58,21 @@ fn fault_free_cluster_commits_every_proposal() {
 
 #[test]
 fn hostile_runs_stay_safe_and_converge() {
-    let seeds: u64 = std::env::var("QPX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
-    for seed in 0..seeds {
+    for_seeds(seed_count(40), |seed| {
         let n = [3, 5][(seed % 2) as usize];
         if let Err(e) = Sim::new(SimConfig::hostile(n, seed)).run() {
             panic!("{e}");
         }
-    }
+    });
 }
 
 #[test]
 fn crash_heavy_runs_never_lose_acknowledged_state() {
-    let seeds: u64 = std::env::var("QPX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(40);
-    for seed in 0..seeds {
+    for_seeds(seed_count(40), |seed| {
         if let Err(e) = Sim::new(SimConfig::durability_stress(3, seed)).run() {
             panic!("{e}");
         }
-    }
+    });
 }
 
 #[test]
@@ -125,12 +162,22 @@ fn membership_changes_under_faults_stay_safe_and_converge() {
     let env = |name: &str| std::env::var(name).ok().and_then(|s| s.parse::<u64>().ok());
     let seeds = env("QPX_SIM_MEMBERSHIP_SEEDS")
         .unwrap_or_else(|| env("QPX_SIM_SEEDS").map_or(40, |s| (s / 50).max(40)));
-    let mut applied = 0;
-    for seed in 0..seeds {
+    let applied = AtomicU64::new(0);
+    let ran = for_seeds(seeds, |seed| {
         let n = [3, 5][(seed % 2) as usize];
         let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(n, seed) };
         let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
-        applied += report.reconfigurations;
-    }
-    assert!(applied >= seeds, "reconfigurations actually happened: {applied}");
+        applied.fetch_add(report.reconfigurations, Relaxed);
+    });
+    let applied = applied.into_inner();
+    assert!(applied >= ran, "reconfigurations actually happened: {applied}");
+}
+
+#[test]
+fn removed_majority_waits_for_the_new_members() {
+    // Seed 1534 removes two of three members; when they shut down as soon as they had
+    // applied the old epoch themselves, the new members could never learn its last slots.
+    let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(3, 1534) };
+    let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
+    assert!(report.reconfigurations > 0, "{report:?}");
 }
