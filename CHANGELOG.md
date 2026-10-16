@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- Documentation: a `quepaxa::guide` in seven chapters (driving the replica, durability and
+  restart, snapshots, linearizable reads, membership and leaders, tuning, how the protocol
+  works), every public method documented with its errors, runnable examples
+  (`cargo run -p quepaxa --example cluster | restart | membership`), and C-specific docs
+  for `quepaxa-ffi`. CI builds the docs with warnings denied and runs the examples.
+
 - `quepaxa`: `Commit` is emitted as soon as a slot is decided, without waiting for its
   local `Decided` record (a decision is durable at a majority of recorders); on disk this
   takes one fsync off every replica's commit path.

@@ -58,7 +58,15 @@ enum Effect {
     LocalReply(Body),
 }
 
-/// One member of a QuePaxa cluster. See the crate docs for the driving contract.
+/// One replica of a QuePaxa cluster: a recorder and a proposer for every slot of the log,
+/// with the decided log, leader schedule and durability bookkeeping around them.
+///
+/// A `Replica` is a state machine without I/O. Each call takes the current time and may
+/// queue [`Action`]s; take them with [`Replica::poll_actions`] before the next call and
+/// carry them out in order. [`guide::driving`](crate::guide::driving) is the full contract;
+/// the [crate docs](crate) have a runnable example.
+///
+/// `Replica` is `Send + Sync` and is driven from one place at a time.
 #[cfg_attr(feature = "model", derive(Clone, Hash))]
 pub struct Replica {
     cfg: Config,
@@ -125,8 +133,36 @@ pub struct Replica {
 }
 
 impl Replica {
-    /// Starts a replica from the durable records of its previous incarnations (in the
-    /// order they were persisted; empty for a fresh replica).
+    /// Starts a replica from the durable records of its previous incarnations, in the
+    /// order they were persisted (empty for a fresh replica).
+    ///
+    /// `cfg.seed` must be fresh CSPRNG output on every start. The first action is always a
+    /// [`Action::Persist`] of the new incarnation; nothing is sent before it is durable.
+    /// Slots recovered from `durable` are emitted again as [`Action::Commit`]. See
+    /// [`guide::durability`](crate::guide::durability).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidConfig`] if `cfg` breaks a rule documented on [`Config`]; the
+    ///   message says which.
+    /// - [`Error::CorruptRecord`] if a record fails its checksum or does not decode;
+    ///   `index` is its position in `durable`. Records are never skipped.
+    /// - [`Error::InvalidConfig`] also if the durable state was built under another
+    ///   [`Config::leader_order`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use quepaxa::{Action, Config, NodeId, Replica, Timestamp};
+    ///
+    /// let members = vec![NodeId(0), NodeId(1), NodeId(2)];
+    /// let cfg = Config::new([1; 16], NodeId(0), members, [7; 32]);
+    /// let mut replica = Replica::new(cfg, [], Timestamp(0))?;
+    /// let mut actions = Vec::new();
+    /// replica.poll_actions(&mut actions);
+    /// assert!(matches!(actions[..], [Action::Persist { .. }]));
+    /// # Ok::<(), quepaxa::Error>(())
+    /// ```
     pub fn new(cfg: Config, durable: impl IntoIterator<Item = Bytes>, now: Timestamp) -> Result<Self, Error> {
         cfg.validate()?;
         let mut last_incarnation = 0;
@@ -235,37 +271,68 @@ impl Replica {
         self.me
     }
 
-    /// Number of contiguous decided slots from the start of the log.
+    /// Number of contiguous decided slots from the start of the log (including slots
+    /// covered by a snapshot): the next slot to be decided in order.
     pub fn commit_index(&self) -> u64 {
         self.committed
     }
 
-    /// Counters for observability.
+    /// Counters for observability; see [`Metrics`] and
+    /// [`guide::tuning`](crate::guide::tuning) for what they indicate.
     pub fn metrics(&self) -> &Metrics {
         &self.metrics
     }
 
-    /// Queues `payload` for the log. The returned id later appears in exactly one of
-    /// [`Action::Committed`] or [`Action::Dropped`], unless the replica crashes first.
+    /// Queues `payload` to be appended to the log.
+    ///
+    /// The returned id later appears in exactly one of [`Action::Committed`] (the entry is
+    /// in the log) or [`Action::Dropped`] — unless the replica crashes first, in which case
+    /// the outcome is unknown. Entries are batched: concurrent proposals share slots. A
+    /// replica that is not the leader forwards the entry to the leader, and proposes it
+    /// itself if the leader does not commit it in time; it is committed at most once.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::Busy`] when [`Config::max_outstanding_proposals`] entries are already
+    ///   waiting: back off and retry after some commit.
+    /// - [`Error::PayloadTooLarge`] if the entry alone exceeds [`Config::max_batch_bytes`].
+    /// - [`Error::Fenced`] after a storage failure; [`Error::NotDrained`] if the previous
+    ///   call's actions were not taken.
     pub fn propose(&mut self, now: Timestamp, payload: Bytes) -> Result<ProposalId, Error> {
         self.enqueue(now, payload, Kind::App)
     }
 
-    /// Requests a linearizable read point. The returned id later appears in exactly one of
-    /// [`Action::ReadReady`] or [`Action::Dropped`]: once the application has applied every
-    /// commit up to the reported slot, a read of its state is linearizable.
+    /// Requests a linearizable read point.
+    ///
+    /// The returned id later appears in exactly one of [`Action::ReadReady`] or
+    /// [`Action::Dropped`]: once the application has applied every commit up to the
+    /// reported slot, reading its state reflects every write that completed before this
+    /// call, on any replica. See [`guide::reads`](crate::guide::reads).
+    ///
+    /// # Errors
+    ///
+    /// As [`Replica::propose`] ([`Error::Busy`], [`Error::Fenced`], [`Error::NotDrained`]).
     pub fn read_barrier(&mut self, now: Timestamp) -> Result<ProposalId, Error> {
         self.enqueue(now, Bytes::new(), Kind::Barrier)
     }
 
     /// Proposes new membership: `members`, with `leader_order` as the preferred leaders
-    /// (empty: by id). Once decided in slot `s` it takes effect at slot `s + 64`, reported by
-    /// [`Action::Reconfigured`] in log order; the id is reported like a proposal's. One
-    /// change at a time: [`Error::ReconfigurationPending`] until the previous one took
-    /// effect (a concurrent one decided later than another is ignored by every replica).
+    /// (empty: by id).
     ///
-    /// A replica joining the cluster runs with the original `Config` (its own id need not
-    /// be a member) and catches up before its first slot.
+    /// Once decided in slot `s` it takes effect at slot `s + 64`, reported by
+    /// [`Action::Reconfigured`] in log order; the id is reported like a proposal's. A
+    /// replica joining the cluster runs with the original [`Config`] (its own id need not
+    /// be a member) and catches up before its first slot. See
+    /// [`guide::membership`](crate::guide::membership).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::ReconfigurationPending`] while a change (decided, or proposed here) has
+    ///   not taken effect. A concurrent change proposed elsewhere and decided after another
+    ///   is ignored by every replica.
+    /// - [`Error::InvalidConfig`] if `members` is empty, has duplicates or more than 1024
+    ///   ids, or `leader_order` is not a permutation of `members`.
+    /// - As [`Replica::propose`] otherwise.
     pub fn propose_reconfiguration(
         &mut self,
         now: Timestamp,
@@ -314,7 +381,19 @@ impl Replica {
         Ok(id)
     }
 
-    /// Feeds one external event.
+    /// Feeds one external event: a message from a peer, or the completion or failure of
+    /// a [`Action::Persist`].
+    ///
+    /// Malformed messages and messages from other clusters or non-members are counted in
+    /// [`Metrics::messages_rejected`] and otherwise ignored. After a storage failure the
+    /// replica is fenced: it reports outstanding proposals as [`Action::Dropped`] and
+    /// ignores further events.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::UnknownPersistId`] if `Persisted` names an id never issued or already
+    ///   acknowledged.
+    /// - [`Error::NotDrained`] if the previous call's actions were not taken.
     pub fn handle(&mut self, now: Timestamp, input: Input) -> Result<(), Error> {
         self.begin(now)?;
         if self.fenced {
@@ -330,7 +409,14 @@ impl Replica {
         Ok(())
     }
 
-    /// Fires timers due at `now`; call it at or after [`Replica::next_deadline`].
+    /// Fires the timers due at `now`: retransmission, hedging, slot takeover, catch-up.
+    ///
+    /// Call it when the clock reaches [`Replica::next_deadline`]. Calling it early is
+    /// harmless (nothing that is not due happens); late only delays recovery.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NotDrained`] if the previous call's actions were not taken.
     pub fn handle_timeout(&mut self, now: Timestamp) -> Result<(), Error> {
         self.begin(now)?;
         if self.fenced {
@@ -342,13 +428,16 @@ impl Replica {
         Ok(())
     }
 
-    /// When [`Replica::handle_timeout`] next needs to run, if at all.
+    /// When [`Replica::handle_timeout`] next needs to run; `None` if no timer is needed
+    /// until the next call (and always after fencing). Re-read it after every call.
     pub fn next_deadline(&self) -> Option<Timestamp> {
         if self.fenced { None } else { self.earliest_timer() }
     }
 
-    /// Moves every pending action into `out`. Must be called after each other method
-    /// before the next one.
+    /// Moves every pending action into `out` (appending), in the order to carry them out.
+    ///
+    /// Call it after every other method and before the next one: a call made while actions
+    /// are pending fails with [`Error::NotDrained`], so none is ever lost.
     pub fn poll_actions(&mut self, out: &mut Vec<Action>) {
         out.append(&mut self.actions);
     }
