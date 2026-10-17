@@ -20,11 +20,16 @@
 (*   majority of the new members durably know every slot before the       *)
 (*   epoch, and it has caught up with what they know.                     *)
 (*   Recoverable: every decided slot is durably known by a live replica,  *)
-(*   or recoverable from a live majority of its members.                  *)
+(*   or recoverable from a live majority of its members, even with a      *)
+(*   minority of the current members down as well (so one durable copy   *)
+(*   on a new member is not enough).                                      *)
 (*                                                                         *)
 (* Not modelled: what happens inside a slot (QuePaxa.tla), leader         *)
-(* rotation, snapshots, liveness. run.sh checks that seeded bugs in each  *)
-(* rule are still found.                                                  *)
+(* rotation, snapshots, liveness. Nor a replica retiring from an epoch    *)
+(* after a later change added it back: it may learn of that change only   *)
+(* after it retired (the change may be in no member's durable state yet), *)
+(* so no implementation can rule it out; the operator keeps a replica it  *)
+(* added back. run.sh checks that seeded bugs in each rule are found.     *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -150,11 +155,22 @@ ViewAgree ==
     \A r \in Replicas, s \in Slots :
         CanDrive(r, s) => MembersAt(s, Known(r)) = MembersAt(s, Truth)
 
-\* No decided slot is lost.
+\* The members in force after the last slot, and those of a change still pending.
+Current == Fold(0, N - 1, Start, Truth)
+
+\* Replicas the cluster may lose on top of the retired ones: a minority of the members in
+\* force and of any pending ones (during a change, the weaker epoch bounds it).
+Tolerable(D) ==
+    /\ 2 * Cardinality(D \cap Current.cur) < Cardinality(Current.cur)
+    /\ 2 * Cardinality(D \cap Current.nxt) < Cardinality(Current.nxt)
+
+\* No decided slot is lost, even with a tolerable set of members down as well.
 Recoverable ==
-    \A s \in Slots : decided[s] # None =>
-        \/ \E r \in Replicas \ retired : s \in dlog[r]
-        \/ \E Q \in Maj(MembersAt(s, Truth)) : Q \cap retired = {}
+    \A s \in Slots, D \in SUBSET (Current.cur \cup Current.nxt) :
+        (decided[s] # None /\ Tolerable(D)) =>
+            LET gone == retired \cup D
+            IN \/ \E r \in Replicas \ gone : s \in dlog[r]
+               \/ \E Q \in Maj(MembersAt(s, Truth)) : Q \cap gone = {}
 
 TypeOK ==
     /\ \A s \in Slots : decided[s] \in Values \cup {None}

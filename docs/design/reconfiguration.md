@@ -133,9 +133,11 @@ restriction buys nothing.
 - TLA+: `verification/tla/Membership.tla` abstracts each slot to one atomic decision and
   checks, exhaustively for 4 replicas, 3 slots and `LAG = 2`, that every replica that may
   drive a slot computes its true members, and that no decided slot is lost when removed
-  replicas retire (with crashes losing what is not durable). Seeded bugs: a window one slot
-  too wide, a change taking effect early, the old retirement rule, and retiring on progress
-  that is not durable.
+  replicas retire, with crashes losing what is not durable and a further minority of the
+  members down. Seeded bugs: a window one slot too wide, a change taking effect early, the
+  old retirement rule, retiring on one durable copy, and retiring on progress that is not
+  durable. A replica retiring from an epoch after a later change added it back is outside
+  the model: it can learn of that change only after it retired, so the operator handles it.
 - Not done: model checking the real replica through a change (a 64-slot window is beyond
   its budget); the TLA+ model covers the rule at `LAG = 2`.
 

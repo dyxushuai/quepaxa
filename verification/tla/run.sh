@@ -82,6 +82,7 @@ bugs=(
   Membership "window-one-slot-too-wide" ViewAgree 's/    \/\\ s < Prefix\(log\[r\]\) \+ LAG$/    \/\\ s < Prefix(log[r]) + LAG + 1/'
   Membership "change-takes-effect-early" ViewAgree 's/!\.from = t \+ LAG\]/!.from = t + LAG - 1]/'
   Membership "retire-on-own-progress" Recoverable 's/       \/\\ 2 \* Cardinality\(caught\) > Cardinality\(st\.nxt\)/       \/\\ Prefix(log[r]) >= st.from/'
+  Membership "retire-on-one-durable-copy" Recoverable 's/       \/\\ 2 \* Cardinality\(caught\) > Cardinality\(st\.nxt\)/       \/\\ Cardinality(caught) > 0/'
   Membership "retire-on-progress-in-memory" Recoverable 's/caught == \{m \\in st\.nxt : Prefix\(dlog\[m\]\) >= st\.from\}/caught == {m \\in st.nxt : Prefix(log[m]) >= st.from}/'
 )
 for ((i = 0; i < ${#bugs[@]}; i += 4)); do
