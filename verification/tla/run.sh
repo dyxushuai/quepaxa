@@ -6,43 +6,17 @@
 # Then every seeded bug must be found (within TLA_BUG_SECONDS), so the check cannot
 # silently stop checking anything.
 #
-# Needs Java 11+ (or Docker). Usage: verification/tla/run.sh
+# Finally, trace validation (traces.sh) checks the Rust implementation against
+# QuePaxa.tla.
+#
+# Needs Java 11+ (or Docker) and cargo. Usage: verification/tla/run.sh
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 seconds=${TLA_SECONDS:-120}
 bug_seconds=${TLA_BUG_SECONDS:-120}
 membership_seconds=${TLA_MEMBERSHIP_SECONDS:-1800}
-version=v1.7.4
-sha256=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
-tools=$root/target/tla
-jar=$tools/tla2tools-$version.jar
-
-mkdir -p "$tools"
-if [[ ! -f "$jar" ]]; then
-  curl -fsSL -o "$jar.part" "https://github.com/tlaplus/tlaplus/releases/download/$version/tla2tools.jar" || exit 1
-  echo "$sha256  $jar.part" | sha256sum -c --quiet - || { rm -f "$jar.part"; exit 1; }
-  mv "$jar.part" "$jar"
-fi
-
-# tlc <spec dir> <seconds> <spec> [mode args]: prints TLC's output and returns its status:
-# 0 when an exhaustive check finished, 124 when the time ran out (no violation found in
-# simulation), 12 for an invariant violation; anything else is a failure.
-tlc() {
-  local args=(-cp tla2tools.jar tlc2.TLC "${@:4}" -workers auto -deadlock -metadir /tmp/tlc-$$ "$3.tla")
-  cp "$jar" "$1/tla2tools.jar"
-  local status
-  if command -v java >/dev/null; then
-    (cd "$1" && timeout "$2" java -XX:+UseParallelGC "${args[@]}")
-    status=$?
-  else
-    # The time limit runs inside the container: killing the client would leave it running.
-    docker run --rm -v "$1:/spec" -w /spec eclipse-temurin:21.0.4_7-jre timeout "$2" java "${args[@]}"
-    status=$?
-  fi
-  rm -f "$1/tla2tools.jar"
-  return $status
-}
+source "$here/lib.sh"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -106,4 +80,5 @@ for ((i = 0; i < ${#bugs[@]}; i += 5)); do
     failed=1
   fi
 done
+"$here/traces.sh" || failed=1
 exit $failed

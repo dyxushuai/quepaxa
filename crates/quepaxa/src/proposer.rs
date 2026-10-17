@@ -77,6 +77,12 @@ impl SlotProposer {
         self.decided.as_ref()
     }
 
+    /// The working proposal `p` (for trace validation).
+    #[cfg(test)]
+    pub fn working(&self) -> &Proposal {
+        &self.p
+    }
+
     /// The request for recorder `j` at the current step.
     pub fn request_for(&self, j: NodeId) -> Option<&Proposal> {
         self.sent.get(&j)

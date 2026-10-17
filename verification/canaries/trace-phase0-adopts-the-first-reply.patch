@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/proposer.rs b/crates/quepaxa/src/proposer.rs
+index 96ff8b1..a587246 100644
+--- a/crates/quepaxa/src/proposer.rs
++++ b/crates/quepaxa/src/proposer.rs
+@@ -148,7 +148,7 @@ impl SlotProposer {
+                     let v = firsts().flatten().next().cloned();
+                     return self.decide(v);
+                 }
+-                if let Some(best) = firsts().flatten().max().cloned() {
++                if let Some(best) = firsts().flatten().next().cloned() {
+                     self.p = best;
+                 }
+             }
