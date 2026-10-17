@@ -12,3 +12,4 @@ reconfiguration-takes-effect-early	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest ru
 reconfiguration-applied-twice	-	cargo nextest run -p quepaxa schedule	late duplicate
 proposer-uses-configured-members	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	did not converge|G[1345] |agreement
 retire-without-the-new-majority	-	cargo nextest run -p quepaxa --test replica_api retire	the joiners know none
+retire-on-a-stale-view	-	cargo nextest run -p quepaxa --test replica_api stale_view	retired from epoch 1 although
