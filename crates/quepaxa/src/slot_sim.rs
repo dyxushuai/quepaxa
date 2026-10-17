@@ -116,7 +116,8 @@ impl Sim {
 
     /// The log as a TLA+ module `TraceData` for `verification/tla/QuePaxaTrace.tla`.
     /// Priorities are replaced by their rank (the protocol only compares them), the leader
-    /// priority by the spec's `H`, and proposer `i` by `i + 1` (0 is the spec's nil).
+    /// priority by the spec's `H`, and proposer `i` by `i + 1` (0 is the spec's nil). The
+    /// reserved priority 0 stays 0, so the spec rejects it.
     pub fn tla_trace(&self) -> String {
         let tag = |p: &Proposal| (p.priority, p.key.origin.0);
         let mut prios = BTreeSet::new();
@@ -138,14 +139,15 @@ impl Sim {
             }
         }
         prios.remove(&LEADER_PRIORITY);
+        prios.remove(&0);
         let ranks: Vec<u64> = prios.into_iter().collect();
         let render = |t: Option<Tag>| match t {
             None => String::from("[prio |-> 0, key |-> 0]"),
             Some((prio, origin)) => {
-                let prio = if prio == LEADER_PRIORITY {
-                    1000
-                } else {
-                    ranks.binary_search(&prio).expect("ranked") + 1
+                let prio = match prio {
+                    LEADER_PRIORITY => 1000,
+                    0 => 0,
+                    _ => ranks.binary_search(&prio).expect("ranked") + 1,
                 };
                 format!("[prio |-> {prio}, key |-> {}]", origin + 1)
             }

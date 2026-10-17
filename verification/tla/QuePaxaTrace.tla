@@ -10,7 +10,8 @@
 (* must be in the spec's network (a request the spec lets the proposer    *)
 (* send, a reply a spec recorder produced), and must lead to the logged   *)
 (* state. One exception: the spec delivers a reply at most once, while    *)
-(* the implementation may deliver a duplicate; that must change nothing.  *)
+(* the implementation may deliver a duplicate: a reply the spec already   *)
+(* delivered may arrive again, and must change nothing.                   *)
 (* Random priorities are the logged ones, checked against the spec's draw *)
 (* rule (MayDraw) instead of enumerating every possible draw.             *)
 (*                                                                         *)
@@ -20,7 +21,8 @@
 (***************************************************************************)
 EXTENDS QuePaxa, TraceData, Sequences
 
-VARIABLE i   \* index of the last matched trace entry
+VARIABLES i,         \* index of the last matched trace entry
+          delivered  \* replies the spec has delivered (and so consumed)
 
 View == [reg |-> reg,
          pst |-> [p \in Proposers |-> [step |-> pst[p].step, p |-> pst[p].p,
@@ -39,6 +41,7 @@ TraceInit ==
                 decided |-> Nil]]
     /\ \A p \in Proposers : MayDraw(p, FirstStep, [prio |-> H, key |-> p], pst[p].sent)
     /\ msgs = UNION {RequestsOf(p, pst[p]) : p \in Proposers}
+    /\ delivered = {}
     /\ View = Trace[1].state
 
 TraceNext ==
@@ -46,10 +49,13 @@ TraceNext ==
     /\ i' = i + 1
     /\ LET e == Trace[i + 1].event
        IN IF e.kind = "req"
-          THEN Record([type |-> "req", from |-> e.from, to |-> e.to, step |-> e.step, prop |-> e.prop])
+          THEN /\ Record([type |-> "req", from |-> e.from, to |-> e.to, step |-> e.step, prop |-> e.prop])
+               /\ UNCHANGED delivered
           ELSE LET m == [type |-> "rep", from |-> e.from, to |-> e.to, req |-> e.req,
                          step |-> e.step, first |-> e.first, prev |-> e.prev]
-               IN IF m \in msgs THEN Deliver(m) ELSE UNCHANGED vars
+               IN IF m \in msgs
+                  THEN Deliver(m) /\ delivered' = delivered \cup {m}
+                  ELSE m \in delivered /\ UNCHANGED <<vars, delivered>>
     /\ View' = Trace[i + 1].state
 
 \* Violated once the whole trace is matched.
