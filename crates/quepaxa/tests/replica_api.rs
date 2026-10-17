@@ -499,6 +499,53 @@ fn removed_majority_retires_only_after_the_new_members_caught_up() {
 }
 
 #[test]
+fn a_removed_replica_added_back_while_away_does_not_retire_on_a_stale_view() {
+    // Small messages, so catching up takes many pages of a few slots each.
+    let small = |id: u32| {
+        let mut cfg = config(&[0, 1, 2]);
+        cfg.id = NodeId(id);
+        (cfg.max_batch_bytes, cfg.max_message_bytes) = (64, 1152);
+        Replica::new(cfg, [], T0).unwrap()
+    };
+    let mut rs: Vec<Replica> = (0..4).map(small).collect();
+    run_without(&mut rs, &[]);
+    // Replica 2 learns that it is removed, then goes away before the new members caught up.
+    rs[0].propose_reconfiguration(T0, vec![NodeId(0), NodeId(1), NodeId(3)], vec![]).unwrap();
+    let mut seen = run_without(&mut rs, &[]);
+    let retired =
+        |seen: &[(usize, Action)]| seen.iter().any(|(i, a)| *i == 2 && matches!(a, Action::Retired { .. }));
+    assert!(!retired(&seen));
+    // Meanwhile the window passes and a second change adds replica 2 back.
+    let write = |rs: &mut Vec<Replica>, k: u32| {
+        rs[0].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+        run_without(rs, &[2])
+    };
+    for k in 0..70 {
+        seen.extend(write(&mut rs, k));
+    }
+    rs[0].propose_reconfiguration(T0, vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)], vec![]).unwrap();
+    seen.extend(run_without(&mut rs, &[2]));
+    for k in 70..140 {
+        seen.extend(write(&mut rs, k));
+    }
+    assert!(seen.iter().any(|(i, a)| *i == 0 && matches!(a, Action::Reconfigured { epoch: 2, .. })));
+    // Replica 2 comes back far behind. Members report progress past the epoch it was removed
+    // from, but also past what it knows: it must catch up (and find itself added back)
+    // instead of retiring.
+    let target = rs[0].commit_index();
+    let mut t = 0;
+    while rs[2].commit_index() < target {
+        t += 1;
+        assert!(t < 200, "replica 2 did not catch up: {} of {target}", rs[2].commit_index());
+        for r in &mut rs {
+            r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[]));
+    }
+    assert!(!retired(&seen), "replica 2 retired from epoch 1 although epoch 2 added it back");
+}
+
+#[test]
 fn membership_changes_are_validated() {
     let mut r = ordered(0, &[]);
     drain(&mut r);
