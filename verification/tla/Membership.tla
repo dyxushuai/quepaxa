@@ -39,6 +39,9 @@ CONSTANTS Replicas,     \* e.g. 1..4
           N,            \* slots 0..N-1
           LAG           \* slots between deciding a change and its effect
 
+\* Recoverable tries at most one member down, which is all a minority of three allows.
+ASSUME \A S \in Changes \cup {InitMembers} : Cardinality(S) <= 3
+
 Slots == 0..N-1
 \* A slot's value: nothing decided yet, a write, or a change to members m.
 None == [k |-> "none", m |-> {}]
@@ -164,13 +167,17 @@ Tolerable(D) ==
     /\ 2 * Cardinality(D \cap Current.cur) < Cardinality(Current.cur)
     /\ 2 * Cardinality(D \cap Current.nxt) < Cardinality(Current.nxt)
 
-\* No decided slot is lost, even with a tolerable set of members down as well.
+\* No decided slot is lost, even with a tolerable set of members down as well. Recovery
+\* only gets harder as more are down, and every epoch of the configuration has at most
+\* three members, so it is enough to try no member and each single member down.
 Recoverable ==
-    \A s \in Slots, D \in SUBSET (Current.cur \cup Current.nxt) :
-        (decided[s] # None /\ Tolerable(D)) =>
+    LET downs == {D \in {{}} \cup {{x} : x \in Current.cur \cup Current.nxt} : Tolerable(D)}
+    IN \A s \in Slots : decided[s] # None =>
+        LET M == MembersAt(s, Truth)
+        IN \A D \in downs :
             LET gone == retired \cup D
             IN \/ \E r \in Replicas \ gone : s \in dlog[r]
-               \/ \E Q \in Maj(MembersAt(s, Truth)) : Q \cap gone = {}
+               \/ 2 * Cardinality(M \ gone) > Cardinality(M)
 
 TypeOK ==
     /\ \A s \in Slots : decided[s] \in Values \cup {None}

@@ -131,7 +131,8 @@ restriction buys nothing.
   test), proposers using the configured members instead of the slot's (the cluster stalls),
   retiring without a majority of the new members (unit test; the simulator stalls too).
 - TLA+: `verification/tla/Membership.tla` abstracts each slot to one atomic decision and
-  checks, exhaustively for 4 replicas, 3 slots and `LAG = 2`, that every replica that may
+  checks, exhaustively for 4 replicas, 3 slots, `LAG = 2` and two changes (removing two of
+  three members; moving to three members), that every replica that may
   drive a slot computes its true members, and that no decided slot is lost when removed
   replicas retire, with crashes losing what is not durable and a further minority of the
   members down. Seeded bugs: a window one slot too wide, a change taking effect early, the
