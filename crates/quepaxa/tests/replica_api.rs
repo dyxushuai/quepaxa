@@ -403,9 +403,9 @@ fn run_without(rs: &mut [Replica], down: &[usize]) -> Vec<(usize, Action)> {
 fn a_member_is_replaced_and_the_new_majority_commits_without_it() {
     // Replica 3 joins with the original configuration; replica 0 leaves.
     let mut rs = [ordered(0, &[]), ordered(1, &[]), ordered(2, &[]), ordered(3, &[])];
-    run_without(&mut rs, &[]);
-    let id = rs[0].propose_reconfiguration(T0, vec![NodeId(1), NodeId(2), NodeId(3)], vec![]).unwrap();
     let mut seen = run_without(&mut rs, &[]);
+    let id = rs[0].propose_reconfiguration(T0, vec![NodeId(1), NodeId(2), NodeId(3)], vec![]).unwrap();
+    seen.extend(run_without(&mut rs, &[]));
     assert!(seen.iter().any(|(i, a)| *i == 0 && matches!(a, Action::Committed { id: c, .. } if *c == id)));
     assert_eq!(
         rs[1].propose_reconfiguration(T0, vec![NodeId(0), NodeId(1), NodeId(2)], vec![]),
@@ -433,9 +433,15 @@ fn a_member_is_replaced_and_the_new_majority_commits_without_it() {
         r.handle_timeout(Timestamp(1_000_000_000)).unwrap();
     }
     seen.extend(run_without(&mut rs, &[]));
-    let retired: Vec<usize> =
-        seen.iter().filter(|(_, a)| matches!(a, Action::Retired { epoch: 1 })).map(|(i, _)| *i).collect();
-    assert_eq!(retired, [0], "only the removed replica retires, once");
+    let retired: Vec<(usize, u64)> = seen
+        .iter()
+        .filter_map(|(i, a)| match a {
+            Action::Retired { epoch } => Some((*i, *epoch)),
+            _ => None,
+        })
+        .collect();
+    // The joiner is not a configured member either, but epoch 0 removes nobody.
+    assert_eq!(retired, [(0, 1)], "only the removed replica retires, once, from the epoch that removed it");
     let before = rs[1].commit_index();
     assert!(rs.iter().all(|r| r.commit_index() == before), "the joiner caught up");
     // Without replica 0 the new members still form a majority, on the fast path.
@@ -496,6 +502,49 @@ fn removed_majority_retires_only_after_the_new_members_caught_up() {
     both.sort_unstable();
     assert_eq!(both, [0, 1]);
     assert!(rs[3].commit_index() >= from && rs[4].commit_index() >= from, "joiners caught up first");
+}
+
+#[test]
+fn half_of_an_even_new_membership_is_not_a_majority() {
+    // Replica 0 leaves; the new members are 1 and 2 (old, up to date) and 3 and 4 (joining,
+    // away). Two of four caught up is half, not a majority: replica 0 must keep waiting,
+    // however often it asks.
+    let mut rs: Vec<Replica> = (0..5).map(|i| ordered(i, &[])).collect();
+    run_without(&mut rs, &[3, 4]);
+    rs[0].propose_reconfiguration(T0, vec![NodeId(1), NodeId(2), NodeId(3), NodeId(4)], vec![]).unwrap();
+    let mut seen = run_without(&mut rs, &[3, 4]);
+    for k in 0..70u32 {
+        rs[1].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+        seen.extend(run_without(&mut rs, &[3, 4]));
+    }
+    let retired = |seen: &[(usize, Action)]| seen.iter().any(|(_, a)| matches!(a, Action::Retired { .. }));
+    for t in 1..20 {
+        for r in &mut rs[..3] {
+            r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[3, 4]));
+    }
+    let from = seen
+        .iter()
+        .find_map(|(_, a)| match a {
+            Action::Reconfigured { epoch: 1, from, .. } => Some(from.0),
+            _ => None,
+        })
+        .expect("the change was applied");
+    // The new epoch needs three of four, so the old members stop at its first slot.
+    assert!(
+        rs[1].commit_index() >= from && rs[2].commit_index() >= from,
+        "the old members finished the window"
+    );
+    assert!(!retired(&seen), "replica 0 retired with only two of four new members caught up");
+    // A third catching up is a majority.
+    for t in 20..60 {
+        for r in &mut rs[..4] {
+            r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[4]));
+    }
+    assert!(seen.iter().any(|(i, a)| *i == 0 && matches!(a, Action::Retired { epoch: 1 })));
 }
 
 #[test]
