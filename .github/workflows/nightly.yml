@@ -87,14 +87,14 @@ jobs:
 
   tla:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
-      - name: TLC simulation of the independent model, then its seeded bugs
+      - name: TLC on the independent models (one slot simulated, membership exhaustive), then their seeded bugs
         env:
           TLA_SECONDS: "1200"
           TLA_BUG_SECONDS: "300"

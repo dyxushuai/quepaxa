@@ -17,7 +17,8 @@
 (*                                                                         *)
 (* Not modelled (covered by the Rust simulator and model checker):         *)
 (* crash-recovery and durability, multiple slots and pipelining, leader    *)
-(* rotation, membership changes. Too large to exhaust: run.sh uses TLC's  *)
+(* rotation, membership changes (Membership.tla checks those across       *)
+(* slots). Too large to exhaust: run.sh uses TLC's                        *)
 (* simulation mode and checks that two seeded bugs are still found.        *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets, TLC

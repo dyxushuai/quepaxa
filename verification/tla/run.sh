@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Checks the independent TLA+ model of one QuePaxa slot (QuePaxa.tla) with TLC.
-#
-# The model is too large to exhaust, so TLC runs random behaviours (simulation mode) for
-# TLA_SECONDS and must find no violation. Then two seeded protocol bugs must each be found
-# within TLA_BUG_SECONDS, so the check cannot silently stop checking anything.
+# Checks the independent TLA+ models with TLC:
+# - QuePaxa.tla, one slot: too large to exhaust, so TLC runs random behaviours (simulation
+#   mode) for TLA_SECONDS and must find no violation.
+# - Membership.tla, changes across slots, durability and retirement: checked exhaustively.
+# Then every seeded bug must be found (within TLA_BUG_SECONDS), so the check cannot
+# silently stop checking anything.
 #
 # Needs Java 11+ (or Docker). Usage: verification/tla/run.sh
 set -uo pipefail
@@ -11,6 +12,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 seconds=${TLA_SECONDS:-120}
 bug_seconds=${TLA_BUG_SECONDS:-120}
+membership_seconds=${TLA_MEMBERSHIP_SECONDS:-1800}
 version=v1.7.4
 sha256=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 tools=$root/target/tla
@@ -23,10 +25,11 @@ if [[ ! -f "$jar" ]]; then
   mv "$jar.part" "$jar"
 fi
 
-# tlc <spec dir> <seconds>: prints TLC's output and returns its status: 124 when the time
-# ran out (no violation found), 12 for an invariant violation, anything else is a failure.
+# tlc <spec dir> <seconds> <spec> [mode args]: prints TLC's output and returns its status:
+# 0 when an exhaustive check finished, 124 when the time ran out (no violation found in
+# simulation), 12 for an invariant violation; anything else is a failure.
 tlc() {
-  local args=(-cp tla2tools.jar tlc2.TLC -simulate -depth 300 -workers auto -deadlock -metadir /tmp/tlc-$$ QuePaxa.tla)
+  local args=(-cp tla2tools.jar tlc2.TLC "${@:4}" -workers auto -deadlock -metadir /tmp/tlc-$$ "$3.tla")
   cp "$jar" "$1/tla2tools.jar"
   local status
   if command -v java >/dev/null; then
@@ -45,12 +48,14 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 failed=0
 
+simulate=(-simulate -depth 300)
+
 mkdir "$work/model"
 cp "$here/QuePaxa.tla" "$here/QuePaxa.cfg" "$work/model/"
-out=$(tlc "$work/model" "$seconds" 2>&1)
+out=$(tlc "$work/model" "$seconds" QuePaxa "${simulate[@]}" 2>&1)
 status=$?
 if [[ $status -ne 124 ]] || ! grep -q "Running Random Simulation" <<< "$out"; then
-  echo "FAIL    TLC ended with status $status instead of running out of time:"; tail -40 <<< "$out"
+  echo "FAIL    QuePaxa.tla: TLC ended with status $status instead of running out of time:"; tail -40 <<< "$out"
   failed=1
 elif grep -qE "violated|^Error" <<< "$out"; then
   echo "FAIL    QuePaxa.tla:"; grep -E -A30 "violated|^Error" <<< "$out" | head -60
@@ -59,23 +64,45 @@ else
   echo "OK      QuePaxa.tla: no violation in ${seconds}s ($(grep -oE '[0-9,]+ states checked' <<< "$out" | tail -1 || echo 'progress is printed every minute'))"
 fi
 
-# name, then a sed expression planting the bug.
-bugs=(
-  "decide-on-any-aggregate" 's/IF best = s\.p$/IF best # Nil/'
-  "skip-phase3-adoption" 's/next\(IF best = Nil THEN s\.p ELSE best\)/next(s.p)/'
-)
-for ((i = 0; i < ${#bugs[@]}; i += 2)); do
-  name=${bugs[i]}
-  mkdir "$work/$name"
-  sed -E "${bugs[i + 1]}" "$here/QuePaxa.tla" > "$work/$name/QuePaxa.tla"
-  cp "$here/QuePaxa.cfg" "$work/$name/"
-  if cmp -s "$here/QuePaxa.tla" "$work/$name/QuePaxa.tla"; then
-    echo "STALE   $name: the sed expression no longer matches QuePaxa.tla"
+for cfg in Membership MembershipQuorum; do
+  mkdir "$work/$cfg"
+  cp "$here/Membership.tla" "$here/$cfg.cfg" "$work/$cfg/"
+  out=$(tlc "$work/$cfg" "$membership_seconds" Membership -config "$cfg.cfg" 2>&1)
+  status=$?
+  if [[ $status -ne 0 ]] || ! grep -q "0 states left on queue" <<< "$out"; then
+    echo "FAIL    Membership.tla ($cfg.cfg): TLC ended with status $status:"
+    grep -E -A30 "violated|^Error" <<< "$out" | head -60; tail -5 <<< "$out"
     failed=1
-  elif tlc "$work/$name" "$bug_seconds" > "$work/$name.log" 2>&1; [[ $? -eq 12 ]] && grep -q "Invariant Agreement is violated" "$work/$name.log"; then
+  else
+    echo "OK      Membership.tla ($cfg.cfg): exhaustive, $(grep -oE '[0-9,]+ distinct states found' <<< "$out" | tail -1)"
+  fi
+done
+
+# spec, its configuration, name, invariant it must violate, then a sed expression
+# planting the bug.
+bugs=(
+  QuePaxa QuePaxa "decide-on-any-aggregate" Agreement 's/IF best = s\.p$/IF best # Nil/'
+  QuePaxa QuePaxa "skip-phase3-adoption" Agreement 's/next\(IF best = Nil THEN s\.p ELSE best\)/next(s.p)/'
+  Membership Membership "window-one-slot-too-wide" ViewAgree 's/    \/\\ s < Prefix\(log\[r\]\) \+ LAG$/    \/\\ s < Prefix(log[r]) + LAG + 1/'
+  Membership Membership "change-takes-effect-early" ViewAgree 's/!\.from = t \+ LAG\]/!.from = t + LAG - 1]/'
+  Membership Membership "retire-on-own-progress" Recoverable 's/       \/\\ 2 \* Cardinality\(caught\) > Cardinality\(st\.nxt\)/       \/\\ Prefix(log[r]) >= st.from/'
+  Membership MembershipQuorum "retire-on-one-durable-copy" Recoverable 's/       \/\\ 2 \* Cardinality\(caught\) > Cardinality\(st\.nxt\)/       \/\\ Cardinality(caught) > 0/'
+  Membership Membership "retire-on-progress-in-memory" Recoverable 's/caught == \{m \\in st\.nxt : Prefix\(dlog\[m\]\) >= st\.from\}/caught == {m \\in st.nxt : Prefix(log[m]) >= st.from}/'
+)
+for ((i = 0; i < ${#bugs[@]}; i += 5)); do
+  spec=${bugs[i]} cfg=${bugs[i + 1]} name=${bugs[i + 2]} invariant=${bugs[i + 3]}
+  mode=(-config "$cfg.cfg")
+  [[ $spec == QuePaxa ]] && mode+=("${simulate[@]}")
+  mkdir "$work/$name"
+  sed -E "${bugs[i + 4]}" "$here/$spec.tla" > "$work/$name/$spec.tla"
+  cp "$here/$cfg.cfg" "$work/$name/"
+  if cmp -s "$here/$spec.tla" "$work/$name/$spec.tla"; then
+    echo "STALE   $name: the sed expression no longer matches $spec.tla"
+    failed=1
+  elif tlc "$work/$name" "$bug_seconds" "$spec" "${mode[@]}" > "$work/$name.log" 2>&1; [[ $? -eq 12 ]] && grep -q "Invariant $invariant is violated" "$work/$name.log"; then
     echo "CAUGHT  $name"
   else
-    echo "MISSED  $name: no Agreement violation within ${bug_seconds}s"; tail -5 "$work/$name.log"
+    echo "MISSED  $name: no $invariant violation within ${bug_seconds}s"; tail -5 "$work/$name.log"
     failed=1
   fi
 done
