@@ -41,6 +41,28 @@ pub(crate) struct Sim {
     /// Decided value and the step it was decided at, per proposer.
     decisions: BTreeMap<usize, (Proposal, Step)>,
     pub trace: String,
+    /// Every delivered message and the abstract state after it (the first entry is the
+    /// initial state), for trace validation against `verification/tla/QuePaxa.tla`.
+    log: Vec<(Option<Delivery>, Snapshot)>,
+}
+
+/// What `QuePaxa.tla` models of one moment: every register, and every proposer's step,
+/// working value, per-recorder requests and decision.
+struct Snapshot {
+    regs: Vec<Register>,
+    props: Vec<ProposerView>,
+}
+
+/// A proposer's step, working value, request to each recorder, and decision.
+type ProposerView = (Step, Proposal, Vec<Option<Proposal>>, Option<Proposal>);
+
+/// A proposal as the spec sees it: priority and the proposing node.
+type Tag = (u64, u32);
+
+/// A delivered message, as `QuePaxa.tla` models it.
+enum Delivery {
+    Request { from: usize, to: usize, step: Step, prop: Tag },
+    Reply { from: usize, to: usize, req: Step, step: Step, first: Option<Tag>, prev: Option<Tag> },
 }
 
 fn ids(n: usize) -> Vec<NodeId> {
@@ -69,11 +91,143 @@ impl Sim {
             cut: BTreeSet::new(),
             decisions: BTreeMap::new(),
             trace: String::new(),
+            log: Vec::new(),
         };
         for i in 0..k {
             sim.send_requests(i);
         }
+        let state = sim.snapshot();
+        sim.log.push((None, state));
         sim
+    }
+
+    fn snapshot(&self) -> Snapshot {
+        let n = self.regs.len();
+        let props = self
+            .props
+            .values()
+            .map(|p| {
+                let sent = (0..n as u32).map(|j| p.request_for(NodeId(j)).cloned()).collect();
+                (p.step(), p.working().clone(), sent, p.decided().cloned())
+            })
+            .collect();
+        Snapshot { regs: self.regs.clone(), props }
+    }
+
+    /// The log as a TLA+ module `TraceData` for `verification/tla/QuePaxaTrace.tla`.
+    /// Priorities are replaced by their rank (the protocol only compares them), the leader
+    /// priority by the spec's `H`, and proposer `i` by `i + 1` (0 is the spec's nil). The
+    /// reserved priority 0 stays 0, so the spec rejects it.
+    pub fn tla_trace(&self) -> String {
+        let tag = |p: &Proposal| (p.priority, p.key.origin.0);
+        let mut prios = BTreeSet::new();
+        for (delivery, state) in &self.log {
+            let regs = state.regs.iter().flat_map(|r| [&r.first, &r.agg, &r.prev_agg]).flatten();
+            let props = state
+                .props
+                .iter()
+                .flat_map(|(_, p, sent, d)| core::iter::once(p).chain(sent.iter().flatten()).chain(d.iter()));
+            prios.extend(regs.chain(props).map(|p| p.priority));
+            match delivery {
+                Some(Delivery::Request { prop, .. }) => {
+                    prios.insert(prop.0);
+                }
+                Some(Delivery::Reply { first, prev, .. }) => {
+                    prios.extend(first.iter().chain(prev).map(|t| t.0))
+                }
+                None => {}
+            }
+        }
+        prios.remove(&LEADER_PRIORITY);
+        prios.remove(&0);
+        let ranks: Vec<u64> = prios.into_iter().collect();
+        let render = |t: Option<Tag>| match t {
+            None => String::from("[prio |-> 0, key |-> 0]"),
+            Some((prio, origin)) => {
+                let prio = match prio {
+                    LEADER_PRIORITY => 1000,
+                    0 => 0,
+                    _ => ranks.binary_search(&prio).expect("ranked") + 1,
+                };
+                format!("[prio |-> {prio}, key |-> {}]", origin + 1)
+            }
+        };
+        let prop = |p: &Option<Proposal>| render(p.as_ref().map(tag));
+        let fun = |items: Vec<String>, base: usize| {
+            items
+                .iter()
+                .enumerate()
+                .map(|(i, x)| format!("{} :> {x}", i + base))
+                .collect::<Vec<_>>()
+                .join(" @@ ")
+        };
+        let entries: Vec<String> = self
+            .log
+            .iter()
+            .map(|(delivery, snap)| {
+                let event = match delivery {
+                    None => String::from("[kind |-> \"init\"]"),
+                    Some(Delivery::Request { from, to, step, prop }) => format!(
+                        "[kind |-> \"req\", from |-> {}, to |-> {to}, step |-> {step}, prop |-> {}]",
+                        from + 1,
+                        render(Some(*prop))
+                    ),
+                    Some(Delivery::Reply { from, to, req, step, first, prev }) => format!(
+                        "[kind |-> \"rep\", from |-> {from}, to |-> {}, req |-> {req}, step |-> {step}, \
+                         first |-> {}, prev |-> {}]",
+                        to + 1,
+                        render(*first),
+                        render(*prev)
+                    ),
+                };
+                let regs = snap
+                    .regs
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "[step |-> {}, first |-> {}, agg |-> {}, prev |-> {}]",
+                            r.step,
+                            prop(&r.first),
+                            prop(&r.agg),
+                            prop(&r.prev_agg)
+                        )
+                    })
+                    .collect();
+                let props = snap
+                    .props
+                    .iter()
+                    .map(|(step, p, sent, decided)| {
+                        let sent = fun(sent.iter().map(&prop).collect(), 0);
+                        format!(
+                            "[step |-> {step}, p |-> {}, sent |-> ({sent}), decided |-> {}]",
+                            prop(&Some(p.clone())),
+                            prop(decided)
+                        )
+                    })
+                    .collect();
+                format!(
+                    "[event |-> {event}, state |-> [reg |-> ({}), pst |-> ({})]]",
+                    fun(regs, 0),
+                    fun(props, 1)
+                )
+            })
+            .collect();
+        let max_step = self.log.iter().flat_map(|(_, s)| s.props.iter().map(|p| p.0)).max().unwrap_or(4);
+        format!(
+            "---- MODULE TraceData ----\n\
+             \\* Generated by slot_sim; see QuePaxaTrace.tla.\n\
+             EXTENDS Integers, TLC\n\
+             TRecorders == 0..{}\n\
+             TProposers == 1..{}\n\
+             TPrios == 1..{}\n\
+             TMaxStep == {max_step}\n\
+             Trace == <<\n  {}\n>>\n\
+             ====\n",
+            self.regs.len() - 1,
+            self.props.len(),
+            ranks.len().max(1),
+            entries.join(",\n  ")
+        )
     }
 
     fn chance(&mut self, per_mille: u32) -> bool {
@@ -153,8 +307,25 @@ impl Sim {
             self.net.push(bytes); // held until heal
             return true;
         }
+        let tag = |w: &crate::codec::WireProposal| (w.priority, w.key.origin.0);
+        let delivery = match &msg.body {
+            Body::RecordRequest { step, proposal, .. } => {
+                Delivery::Request { from, to, step: *step, prop: (proposal.priority, proposal.key.origin.0) }
+            }
+            Body::RecordReply { req_step, step, first, prev_agg, .. } => Delivery::Reply {
+                from,
+                to,
+                req: *req_step,
+                step: *step,
+                first: first.as_ref().map(tag),
+                prev: prev_agg.as_ref().map(tag),
+            },
+            _ => unreachable!("the single-slot sim only sends record messages"),
+        };
         self.deliver(from, to, msg.body);
         self.check_invariants();
+        let state = self.snapshot();
+        self.log.push((Some(delivery), state));
         true
     }
 
@@ -298,6 +469,23 @@ mod tests {
         for i in 0..1000 {
             let (n, k) = [(3, 1), (3, 2), (3, 3), (5, 2), (5, 5)][(i % 5) as usize];
             run(seed(i), n, k, HOSTILE);
+        }
+    }
+
+    /// Writes `trace-<seed>.tla` files (each a `TraceData` module) into
+    /// `QPX_TLA_TRACE_DIR` for `verification/tla/run.sh`.
+    #[test]
+    #[ignore = "run by verification/tla/run.sh"]
+    fn export_tla_traces() {
+        extern crate std;
+        let dir = std::env::var("QPX_TLA_TRACE_DIR").expect("QPX_TLA_TRACE_DIR");
+        let count: u64 = std::env::var("QPX_TLA_TRACES").ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+        for i in 0..count {
+            // Contention, more recorders, and the hostile network: several rounds, catch-up
+            // to a recorder ahead, and phase-3 adoption all occur.
+            let (n, k) = [(3, 2), (3, 3), (5, 3)][(i % 3) as usize];
+            let sim = run(seed(i), n, k, HOSTILE);
+            std::fs::write(std::format!("{dir}/trace-{i}.tla"), sim.tla_trace()).expect("write trace");
         }
     }
 

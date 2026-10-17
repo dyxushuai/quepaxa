@@ -15,6 +15,8 @@
 (* delivery arbitrary, sending them one by one adds only interleavings.    *)
 (* Random priorities are a nondeterministic choice per recorder.           *)
 (*                                                                         *)
+(* QuePaxaTrace.tla checks logs of the Rust implementation against it.    *)
+(*                                                                         *)
 (* Not modelled (covered by the Rust simulator and model checker):         *)
 (* crash-recovery and durability, multiple slots and pipelining, leader    *)
 (* rotation, membership changes (Membership.tla checks those across       *)
@@ -45,11 +47,19 @@ VARIABLES reg,      \* reg[r] = [step, first, agg, prev]
 vars == <<reg, pst, msgs>>
 
 (* The proposals sent at `step`: drawn per recorder at phase 0 (except the leader at the
-   first step, which keeps H), else the working proposal. *)
-Draws(p, step, cur) ==
+   first step, which keeps H), else the working proposal. MayDraw is the rule; DrawPool
+   only generates candidates (trace validation replaces it with the logged draw). *)
+MayDraw(p, step, cur, d) ==
+    IF step % 4 = 0 /\ (step > FirstStep \/ p # Leader)
+    THEN \A r \in Recorders : d[r].key = cur.key /\ d[r].prio \in Prios
+    ELSE d = [r \in Recorders |-> cur]
+
+DrawPool(p, step, cur) ==
     IF step % 4 = 0 /\ (step > FirstStep \/ p # Leader)
     THEN {[r \in Recorders |-> [prio |-> f[r], key |-> cur.key]] : f \in [Recorders -> Prios]}
     ELSE {[r \in Recorders |-> cur]}
+
+Draws(p, step, cur) == {d \in DrawPool(p, step, cur) : MayDraw(p, step, cur, d)}
 
 RequestsOf(p, s) == {[type |-> "req", from |-> p, to |-> r, step |-> s.step, prop |-> s.sent[r]] :
                        r \in Recorders}

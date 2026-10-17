@@ -94,7 +94,9 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - name: TLC on the independent models (one slot simulated, membership exhaustive), then their seeded bugs
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: TLC on the independent models (one slot simulated, membership exhaustive), their seeded bugs, and trace validation
         env:
           TLA_SECONDS: "1200"
           TLA_BUG_SECONDS: "300"
