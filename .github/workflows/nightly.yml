@@ -146,11 +146,11 @@ jobs:
           fi
           git worktree add -q ../previous "$prev"
           (cd ../previous && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo bench -p quepaxa --bench replica -- --save-baseline previous)
-          cargo bench -p quepaxa --bench replica -- --baseline previous --noise-threshold 0.10 | tee bench.txt
-          # Only the commit paths gate: a ~30 ns benchmark (reject_malformed_message) swings by
-          # 10-40% between runners from code layout alone, and was faster locally when CI
-          # called it a regression.
-          if grep -A3 "propose_to_commit" bench.txt | grep -q "Performance has regressed"; then
+          # Only the commit paths gate (the name filter selects them): a ~30 ns benchmark
+          # (reject_malformed_message) swings by 10-40% between runners from code layout
+          # alone, and was faster locally when CI called it a regression.
+          cargo bench -p quepaxa --bench replica -- propose_to_commit --baseline previous --noise-threshold 0.10 | tee bench.txt
+          if grep -q "Performance has regressed" bench.txt; then
             echo "::error::commit-path benchmark regression above 10% against $prev"
             exit 1
           fi
