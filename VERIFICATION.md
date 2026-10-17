@@ -12,7 +12,7 @@ lemmas, checked on the real code — there is no second model to drift from it.
 | Single-slot simulation | `crates/quepaxa/src/slot_sim.rs` | G1–G5 on proposer/recorder state after every event under loss, duplication, reordering, partitions | every PR |
 | Replica simulation | `crates/quepaxa-sim` (`tests/replica_sim.rs`) | agreement, validity, at-most-once, ordered commits, KV linearizability, convergence after heal, and **G1/G3/G4/G5 on every replica's recorder state after every event**; crash-restart losing unsynced or torn writes; snapshots; membership changes and retirement | every PR (40 seeds; membership 120), nightly (100k seeds, 8 shards) |
 | Model checking | `crates/quepaxa-sim/src/model.rs` (`tests/model_check.rs`) | every schedule within *k* deviations from a fair default (reorder, loss, duplication, early timer, partition) plus crash-restarts losing any suffix of the write in progress, with client retries: the same invariants in every state, liveness after the partition heals | every PR (exhaustive), nightly (+1 deviation, exhaustive) |
-| Independent model | `verification/tla/QuePaxa.tla` (TLA+, TLC) | one slot of the paper's algorithms written apart from the Rust code: Agreement and Validity over random behaviours with loss and reordering; two seeded protocol bugs must be found | nightly (20 min) |
+| Independent models | `verification/tla/` (TLA+, TLC) | `QuePaxa.tla`: one slot of the paper's algorithms written apart from the Rust code, Agreement and Validity over random behaviours with loss and reordering. `Membership.tla`: changes across slots, crash-recovery and retirement, **exhaustively** for 4 replicas and 3 slots: every replica that may drive a slot computes its true members (the window rule), and no decided slot is lost when removed replicas retire. Six seeded bugs (two protocol, four membership) must be found | nightly (~25 min) |
 | Bounded proof | `#[cfg(kani)]` harness in `crates/quepaxa/src/recorder.rs` (Kani) | recorder invariants R1–R6 for one `record` from **every** register state, step and value, payload bytes included (the property test samples steps 4–11 and cannot see payloads, which equality ignores); a seeded bug (`verification/kani-canary.patch`) must fail it | nightly |
 | Fuzzing | bolero targets in `crates/quepaxa/src` | decoding of messages, batches, durable records, core state | corpus replay every PR, 20 min/target nightly |
 | Unsafe code | `crates/quepaxa-ffi` | Miri; ASan/UBSan on the C smoke test | every PR |
@@ -38,7 +38,7 @@ cargo nextest run --release -p quepaxa-sim --test model_check   # model checking
 QPX_SIM_SEEDS=100000 cargo nextest run --release -p quepaxa-sim --test replica_sim   # all cores; QPX_SIM_SHARD=i/n for a slice
 QPX_MODEL_EXTRA_DEVIATIONS=1 cargo nextest run --release -p quepaxa-sim --test model_check
 verification/canaries.sh [name]                                 # seeded bugs
-TLA_SECONDS=120 verification/tla/run.sh                          # TLA+ model (Java or Docker)
+TLA_SECONDS=120 verification/tla/run.sh                          # TLA+ models and their seeded bugs (Java or Docker)
 cargo kani -p quepaxa                                            # bounded proofs (cargo install --locked kani-verifier; cargo kani setup)
 cargo mutants -p quepaxa -f crates/quepaxa/src/dedup.rs          # mutants of one file (whole workspace tested)
 cargo +nightly bolero test -p quepaxa 'codec::tests::decode_never_panics_on_arbitrary_input' --target x86_64-unknown-linux-gnu -T 60s
@@ -79,6 +79,6 @@ durability gate (persist-before-send over 4–7 operations) and the leader sched
 64-slot window rule, by induction over one decided slot) did not finish in 10–20 minutes
 and grew past 40 GB: their state is `Vec`s of `Vec`s, and symbolic copies, drains and
 rotations dominate the formula. Those properties stay with the property tests, the
-simulator and the model checker of the real replica; extending the TLA+ model to them is
-the next step for a proof-level check.
+simulator and the model checker of the real replica; `Membership.tla` checks the schedule's
+window rule and retirement exhaustively at the model level instead.
 
