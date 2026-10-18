@@ -72,8 +72,10 @@ new majority commits on the fast path led by replica 3.
 
 Over real processes, `examples/kv-tokio` in the repository does the same: joining
 replicas get their address from `--peers`, the client command `RECONFIGURE <ids>
-[LEADERS <ids>]` proposes a change, and a removed replica exits with status 0 when it
-reports `Retired` (its `tests/membership.rs` replaces a member end to end).
+[LEADERS <ids>]` proposes a change, and a removed replica that reports `Retired` takes a
+linearizable read barrier and exits with status 0 unless a later change added it back:
+once the barrier is ready it has applied every change decided before it (its
+`tests/membership.rs` replaces a member end to end).
 
 **Upgrades:** a replica running a version without membership changes cannot decode a
 change entry and would keep the old majorities. Propose changes only once every replica

@@ -83,6 +83,16 @@ impl Cluster {
         }
     }
 
+    /// Sends one command to replica `i` once and returns its answer, errors included.
+    pub fn request_once(&self, i: usize, cmd: &str) -> String {
+        let mut s = TcpStream::connect(("127.0.0.1", self.clients[i])).expect("replica is up");
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all(format!("{cmd}\n").as_bytes()).unwrap();
+        let mut line = String::new();
+        BufReader::new(&s).read_line(&mut line).unwrap();
+        line.trim().to_owned()
+    }
+
     /// Sends one command to replica `i`, retrying until it answers (startup, failover).
     pub fn request(&self, i: usize, cmd: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(20);

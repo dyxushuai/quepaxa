@@ -15,8 +15,10 @@
 //! the change is decided. Requests on one connection may be pipelined; replies come back in
 //! order.
 //!
-//! A replica removed by a change keeps serving until the new members no longer need it,
-//! then exits with status 0 (`Action::Retired`); its data directory may then be deleted.
+//! A replica removed by a change keeps serving until the new members no longer need it
+//! (`Action::Retired`). It then takes a linearizable read barrier: if no later change added
+//! it back, it exits with status 0 and its data directory may be deleted. `RECONFIGURE`
+//! only names replicas with a known address.
 //!
 //! Trusted networks only: peer connections are not authenticated or encrypted, and the
 //! peer id is whatever the connecting side claims. Put replicas on a private network or

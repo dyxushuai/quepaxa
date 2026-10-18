@@ -14,6 +14,8 @@ fn a_member_is_replaced_and_the_removed_replica_exits_by_itself() {
     for k in 0..10 {
         assert_eq!(c.request(1, &format!("PUT k{k} v{k}")), "OK");
     }
+    // A replica without an address would be decided all the same and never reached.
+    assert!(c.request_once(1, "RECONFIGURE 1,2,9").starts_with("ERR unknown replica 9"));
     // Replace 0 with 3, which becomes the preferred leader.
     assert_eq!(c.request(1, "RECONFIGURE 1,2,3 LEADERS 3,1,2"), "OK");
     // The change takes effect 64 slots after it is decided.
