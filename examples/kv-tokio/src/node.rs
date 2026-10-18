@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use quepaxa::{Action, Input, PersistId, ProposalId, Replica, Slot, Timestamp};
+use quepaxa::{Action, Input, NodeId, PersistId, ProposalId, Replica, Slot, Timestamp};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
@@ -53,6 +53,8 @@ pub enum Cmd {
     Stale(String),
     /// The replica's counters, on one line.
     Stats,
+    /// New members, preferred leaders first (empty: by id).
+    Reconfigure(Vec<NodeId>, Vec<NodeId>),
 }
 
 pub enum Ev {
@@ -296,6 +298,16 @@ impl Node {
             Cmd::Stats => {
                 let _ = reply.send(format!("STATS {:?}", self.replica.metrics()));
             }
+            Cmd::Reconfigure(members, leaders) => {
+                match self.replica.propose_reconfiguration(now, members, leaders) {
+                    Ok(id) => {
+                        self.writes.insert(id, reply);
+                    }
+                    Err(e) => {
+                        let _ = reply.send(format!("ERR {e}"));
+                    }
+                }
+            }
         }
     }
 
@@ -361,6 +373,14 @@ impl Node {
                 Action::SnapshotNeeded { peer, .. } => {
                     self.snapshot_from = Some(peer.0);
                     self.send(peer.0, PeerFrame::SnapshotRequest);
+                }
+                Action::Reconfigured { epoch, from, members } => {
+                    eprintln!("kv-tokio: epoch {epoch} from slot {}: members {members:?}", from.0);
+                }
+                // The new members durably hold everything this replica was needed for.
+                Action::Retired { epoch } => {
+                    eprintln!("kv-tokio: not a member of epoch {epoch} and no longer needed; exiting");
+                    std::process::exit(0);
                 }
                 Action::Dropped { id, .. } => {
                     if let Some(r) = self.writes.remove(&id) {
