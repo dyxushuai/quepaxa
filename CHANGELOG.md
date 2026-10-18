@@ -3,6 +3,14 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- `examples/kv-tokio`: membership changes. `--peers` lists replicas that may join later,
+  the client command `RECONFIGURE <ids> [LEADERS <ids>]` proposes a change (only naming
+  replicas with an address), and a removed replica exits with status 0 once it reports
+  `Retired` and a read barrier shows no later change added it back; a process-level test
+  replaces a member.
+
 ## 0.3.2 — 2026-10-16
 
 - `quepaxa`: `Action::Retired { epoch }` tells a replica removed by a membership change

@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use quepaxa::{Action, Input, PersistId, ProposalId, Replica, Slot, Timestamp};
+use quepaxa::{Action, Input, NodeId, PersistId, ProposalId, Replica, Slot, Timestamp};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
@@ -53,6 +53,8 @@ pub enum Cmd {
     Stale(String),
     /// The replica's counters, on one line.
     Stats,
+    /// New members, preferred leaders first (empty: by id).
+    Reconfigure(Vec<NodeId>, Vec<NodeId>),
 }
 
 pub enum Ev {
@@ -127,6 +129,11 @@ pub struct Node {
     writes: HashMap<ProposalId, oneshot::Sender<String>>,
     reads: HashMap<ProposalId, (String, oneshot::Sender<String>)>,
     persists: Vec<PendingPersist>,
+    /// The latest membership epoch applied here.
+    epoch: u64,
+    /// Reported `Retired` from this epoch: exits once a read barrier shows that no later
+    /// change added it back (it may report retirement before catching up with one).
+    retiring: Option<(u64, Option<ProposalId>)>,
 }
 
 /// How many queued events are handled before their persists are flushed together.
@@ -158,6 +165,8 @@ impl Node {
             writes: HashMap::new(),
             reads: HashMap::new(),
             persists: Vec::new(),
+            epoch: 0,
+            retiring: None,
         }
     }
 
@@ -296,6 +305,23 @@ impl Node {
             Cmd::Stats => {
                 let _ = reply.send(format!("STATS {:?}", self.replica.metrics()));
             }
+            Cmd::Reconfigure(members, leaders) => {
+                // A member nobody can reach would be decided all the same, and could cost the
+                // new epoch its quorum for good.
+                let me = self.replica.id();
+                if let Some(m) = members.iter().find(|m| **m != me && !self.peers.contains_key(&m.0)) {
+                    let _ = reply.send(format!("ERR unknown replica {} (add it to --peers)", m.0));
+                    return;
+                }
+                match self.replica.propose_reconfiguration(now, members, leaders) {
+                    Ok(id) => {
+                        self.writes.insert(id, reply);
+                    }
+                    Err(e) => {
+                        let _ = reply.send(format!("ERR {e}"));
+                    }
+                }
+            }
         }
     }
 
@@ -357,11 +383,34 @@ impl Node {
                     if let Some((k, r)) = self.reads.remove(&id) {
                         let _ = r.send(self.value(&k));
                     }
+                    if let Some((epoch, Some(barrier))) = self.retiring
+                        && barrier == id
+                    {
+                        // Everything decided before the barrier is applied: a later change
+                        // adding this replica back would have been reported by now.
+                        if self.epoch <= epoch {
+                            eprintln!(
+                                "kv-tokio: not a member of epoch {epoch} and no longer needed; exiting"
+                            );
+                            std::process::exit(0);
+                        }
+                        eprintln!(
+                            "kv-tokio: retired from epoch {epoch}, but epoch {} came after it",
+                            self.epoch
+                        );
+                        self.retiring = None;
+                    }
                 }
                 Action::SnapshotNeeded { peer, .. } => {
                     self.snapshot_from = Some(peer.0);
                     self.send(peer.0, PeerFrame::SnapshotRequest);
                 }
+                Action::Reconfigured { epoch, from, members } => {
+                    eprintln!("kv-tokio: epoch {epoch} from slot {}: members {members:?}", from.0);
+                    self.epoch = epoch;
+                }
+                // The new members durably hold everything this replica was needed for.
+                Action::Retired { epoch } => self.retiring = Some((epoch, None)),
                 Action::Dropped { id, .. } => {
                     if let Some(r) = self.writes.remove(&id) {
                         let _ = r.send("ERR outcome unknown (replica fenced)".to_owned());
@@ -371,6 +420,20 @@ impl Node {
                     }
                 }
                 _ => {}
+            }
+        }
+        // Retired: confirm through a linearizable barrier that no later change added this
+        // replica back before exiting (its actions are taken at once, like any call's).
+        if let Some((epoch, None)) = self.retiring {
+            match self.replica.read_barrier(self.now()) {
+                Ok(id) => {
+                    self.retiring = Some((epoch, Some(id)));
+                    self.drain();
+                }
+                Err(e) => {
+                    eprintln!("kv-tokio: retired from epoch {epoch}, but cannot confirm it ({e}); staying");
+                    self.retiring = None;
+                }
             }
         }
     }

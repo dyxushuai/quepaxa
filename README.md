@@ -125,7 +125,7 @@ readable in [`crates/quepaxa/docs`](https://github.com/dyxushuai/quepaxa/tree/ma
 | `cargo run -p quepaxa --example cluster` | Three replicas, writes and a linearizable read |
 | `cargo run -p quepaxa --example restart` | Crash recovery, compaction, catching up from a snapshot |
 | `cargo run -p quepaxa --example membership` | Replacing a member and the leader |
-| [`examples/kv-tokio`](https://github.com/dyxushuai/quepaxa/tree/main/examples/kv-tokio) | A networked key-value store: TCP, fsync'd storage, snapshots, a load generator |
+| [`examples/kv-tokio`](https://github.com/dyxushuai/quepaxa/tree/main/examples/kv-tokio) | A networked key-value store: TCP, fsync'd storage, snapshots, membership changes, a load generator |
 | [`crates/quepaxa-ffi/examples/smoke.c`](https://github.com/dyxushuai/quepaxa/blob/main/crates/quepaxa-ffi/examples/smoke.c) | The same loop in C |
 
 The first three share a small in-memory driver,

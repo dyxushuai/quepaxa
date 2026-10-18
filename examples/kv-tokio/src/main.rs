@@ -2,12 +2,23 @@
 //!
 //! ```text
 //! kv-tokio --id 0 --members 0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102 \
-//!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1]
+//!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
+//!          [--peers 3=127.0.0.1:7103]
 //! ```
 //!
+//! `--members` are the configured members; `--peers` are replicas that may join later (a
+//! joining replica runs with the same `--members` and finds its own address in `--peers`).
+//!
 //! Clients speak lines: `PUT <key> <value>` → `OK`, `GET <key>` (linearizable, through a
-//! read barrier) → `VALUE <v>` | `NONE`, `STALE <key>` (local, possibly stale), `STATS` → `STATS <counters>`. Requests
-//! on one connection may be pipelined; replies come back in order.
+//! read barrier) → `VALUE <v>` | `NONE`, `STALE <key>` (local, possibly stale), `STATS` →
+//! `STATS <counters>`, `RECONFIGURE <ids> [LEADERS <ids>]` (comma-separated) → `OK` once
+//! the change is decided. Requests on one connection may be pipelined; replies come back in
+//! order.
+//!
+//! A replica removed by a change keeps serving until the new members no longer need it
+//! (`Action::Retired`). It then takes a linearizable read barrier: if no later change added
+//! it back, it exits with status 0 and its data directory may be deleted. `RECONFIGURE`
+//! only names replicas with a known address.
 //!
 //! Trusted networks only: peer connections are not authenticated or encrypted, and the
 //! peer id is whatever the connecting side claims. Put replicas on a private network or
@@ -41,6 +52,8 @@ use storage::Disk;
 struct Args {
     id: u32,
     members: Vec<(u32, SocketAddr)>,
+    /// Replicas that may join later.
+    peers: Vec<(u32, SocketAddr)>,
     client: SocketAddr,
     data: PathBuf,
     snapshot_every: u64,
@@ -50,20 +63,25 @@ struct Args {
 fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
-    let mut leader_order = Vec::new();
+    let (mut leader_order, mut peers) = (Vec::new(), Vec::new());
+    let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
+        value
+            .split(',')
+            .map(|m| {
+                let (i, a) = m.split_once('=').ok_or(format!("{flag}: expected id=addr"))?;
+                Ok((
+                    i.parse().map_err(|e| format!("{flag}: {e}"))?,
+                    a.parse().map_err(|e| format!("{flag}: {e}"))?,
+                ))
+            })
+            .collect()
+    };
     while let Some(flag) = it.next() {
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--id" => id = Some(value.parse().map_err(|e| format!("--id: {e}"))?),
-            "--members" => {
-                for m in value.split(',') {
-                    let (i, a) = m.split_once('=').ok_or("--members: expected id=addr")?;
-                    members.push((
-                        i.parse().map_err(|e| format!("--members: {e}"))?,
-                        a.parse().map_err(|e| format!("--members: {e}"))?,
-                    ));
-                }
-            }
+            "--members" => members = addrs("--members", &value)?,
+            "--peers" => peers = addrs("--peers", &value)?,
             "--client" => client = Some(value.parse().map_err(|e| format!("--client: {e}"))?),
             "--data" => data = Some(PathBuf::from(value)),
             "--snapshot-every" => every = value.parse().map_err(|e| format!("--snapshot-every: {e}"))?,
@@ -80,6 +98,7 @@ fn parse_args() -> Result<Args, String> {
         client: client.ok_or("--client is required")?,
         data: data.ok_or("--data is required")?,
         members,
+        peers,
         snapshot_every: every,
         leader_order,
     })
@@ -164,12 +183,15 @@ async fn inbound(s: TcpStream, events: SyncSender<Ev>) {
 }
 
 fn parse_cmd(line: &str) -> Option<Cmd> {
+    let ids = |s: &str| s.split(',').map(|i| i.parse().map(NodeId)).collect::<Result<Vec<_>, _>>().ok();
     let words: Vec<&str> = line.split_whitespace().collect();
     match words[..] {
         ["PUT", k, v] => Some(Cmd::Put(k.to_owned(), v.to_owned())),
         ["GET", k] => Some(Cmd::Get(k.to_owned())),
         ["STALE", k] => Some(Cmd::Stale(k.to_owned())),
         ["STATS"] => Some(Cmd::Stats),
+        ["RECONFIGURE", members] => Some(Cmd::Reconfigure(ids(members)?, Vec::new())),
+        ["RECONFIGURE", members, "LEADERS", order] => Some(Cmd::Reconfigure(ids(members)?, ids(order)?)),
         _ => None,
     }
 }
@@ -211,7 +233,10 @@ async fn client(s: TcpStream, events: SyncSender<Ev>) {
                 }
             }
             None => {
-                let _ = reply.send("ERR expected PUT <k> <v> | GET <k> | STALE <k> | STATS".to_owned());
+                let _ = reply.send(
+                    "ERR expected PUT <k> <v> | GET <k> | STALE <k> | STATS | RECONFIGURE <ids> [LEADERS <ids>]"
+                        .to_owned(),
+                );
             }
         }
         if tx.send(rx).is_err() {
@@ -247,7 +272,7 @@ async fn main() {
 
     let mut peers = HashMap::new();
     let mut listen = None;
-    for (i, addr) in &args.members {
+    for (i, addr) in args.members.iter().chain(&args.peers) {
         if *i == args.id {
             listen = Some(*addr);
             continue;
@@ -256,7 +281,7 @@ async fn main() {
         peers.insert(*i, tx);
         tokio::spawn(outbound(args.id, *addr, rx));
     }
-    let listen = listen.expect("--members must include --id");
+    let listen = listen.expect("--members or --peers must include --id");
     let (events, rx) = mpsc::sync_channel(65_536);
     let mut node = Node::new(replica, disk, peers, args.snapshot_every, events.clone());
     if let Err(e) = node.restore() {
