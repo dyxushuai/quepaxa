@@ -1,13 +1,12 @@
 diff --git a/crates/quepaxa/src/replica/retire.rs b/crates/quepaxa/src/replica/retire.rs
-index e43463b..9af2eb8 100644
 --- a/crates/quepaxa/src/replica/retire.rs
 +++ b/crates/quepaxa/src/replica/retire.rs
-@@ -45,7 +45,7 @@ impl Replica {
+@@ -49,7 +49,7 @@
+         let members = self.schedule.members(Slot(from));
          let progress = |m: &NodeId| self.member_progress.get(m).copied().unwrap_or(0);
          let caught_up = members.iter().filter(|m| progress(m) >= from).count();
-         let ahead = members.iter().any(|m| progress(m) > self.committed);
--        if caught_up > members.len() / 2 && !ahead {
-+        if (caught_up > members.len() / 2 || self.committed >= from) && !ahead {
-             self.retired = Some(epoch);
-             self.member_progress.clear();
+-        if caught_up > members.len() / 2 {
++        if caught_up > members.len() / 2 || self.committed >= from {
              self.retire_probe = None;
+             // One at a time: an older one confirms nothing for this epoch when it commits, and
+             // a new one follows. Busy or fenced: tried again on the next event.

@@ -269,10 +269,11 @@ pub enum Action {
         /// The members, preferred leaders first.
         members: Vec<NodeId>,
     },
-    /// This replica is not a member of `epoch`, and a majority of that epoch's members
-    /// durably know every slot before it: the cluster no longer needs this replica, which
-    /// may shut down. Reported once per start. If a later change added this replica back,
-    /// keep it running: it reported this before catching up with that change. See
+    /// This replica is not a member of `epoch`, a majority of that epoch's members
+    /// durably know every slot before it, and a read barrier of its own committed with no
+    /// later change adding it back: the cluster no longer needs this replica, which may shut
+    /// down. Reported once per start. A change decided after that barrier can still add it
+    /// back; the operator who proposes one keeps the replica running. See
     /// [`guide::membership`](crate::guide::membership).
     Retired {
         /// The epoch this replica is not a member of.

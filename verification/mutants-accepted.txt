@@ -69,11 +69,3 @@ crates/quepaxa/src/replica/proposing.rs: replace += with -= in Replica::forward_
 crates/quepaxa/src/replica/proposing.rs: replace += with *= in Replica::forward_pending
 crates/quepaxa/src/replica/proposing.rs: replace += with *= in Replica::on_reply
 crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::on_reply
-
-# Which new members a removed replica asks again only changes how many probes it sends:
-# it still learns their progress from the replies, and catches up through regular
-# catch-up, so retirement happens (or not) all the same.
-crates/quepaxa/src/replica/retire.rs: replace < with <= in Replica::check_retired
-crates/quepaxa/src/replica/retire.rs: replace > with == in Replica::check_retired
-crates/quepaxa/src/replica/retire.rs: replace > with < in Replica::check_retired
-crates/quepaxa/src/replica/retire.rs: replace > with >= in Replica::check_retired

@@ -94,13 +94,19 @@ restriction buys nothing.
     messages carry the in-memory value, which may run ahead of the disk (decisions are
     applied before their record is durable).
   - The removed replica sends `CatchUp` from its own `committed` to the new members
-    that have not reported `commit_index >= from`, and to those ahead of it, on the
-    retransmit timer, and records their progress from `Entries` replies.
-  - It reports `Retired` once a majority report `>= from` and none reports more than
-    it has committed: it must not retire on a stale view, since a later change may have
-    added it back. That last check cannot be complete (a change may be decided after the
-    replies were sent), so an operator who added a replica back keeps it running whatever
-    it reports for the older epoch.
+    that have not reported `commit_index >= from`, on the retransmit timer, and records
+    their progress from `Entries` replies.
+  - Once a majority report `>= from`, it must still not retire on a stale view: a later
+    change may already have added it back. It submits a read barrier of its own (never
+    reported to the caller) and reports `Retired` when that commits, if it is still
+    removed from the same epoch; every change decided before the barrier is applied by
+    then. Only a change decided after the barrier can still add it back, which the
+    operator who proposes it handles. (An earlier version instead required that no member
+    report more progress than the replica had; replies sent before the re-adding change was
+    decided passed that check.)
+  - The majority condition is still needed with the barrier: recorders vote up to
+    `4 * max_in_flight_slots` slots past what they know, so a new epoch can commit the
+    barrier with joiners that hold none of the old slots.
   - No wire change: an empty `Entries` was always valid. A requester re-asks after an
     empty page only on its timer, so empty replies cannot ping-pong.
 - **State**: `core_state` version 4 carries the epoch, its first slot, and the applied

@@ -46,11 +46,11 @@ in log order.
   shut down. Applying the slots before `from` itself is not enough: those slots were
   decided by the old members, and if a majority of them leave before the new members know
   those slots durably, nobody can recover them and the cluster stalls. So a removed
-  replica asks the new members for their progress and reports `Retired` once a majority
-  of them durably know every slot before `from`, and it knows everything they reported.
-  If a later change has added it back (it is in a newer epoch's `members`), keep it
-  running even if it reports `Retired` for the older epoch: it reported that before it
-  caught up with the change.
+  replica asks the new members for their progress, and once a majority of them durably
+  know every slot before `from`, takes a read barrier of its own; it reports `Retired`
+  when the barrier commits and no change decided before it has added the replica back.
+  Only a change decided after that can still add it back: whoever proposes one keeps the
+  replica running (or restarts it).
 - **Replacing the leader.** Put the new leader first in the new order.
 
 ```no_run
@@ -72,10 +72,8 @@ new majority commits on the fast path led by replica 3.
 
 Over real processes, `examples/kv-tokio` in the repository does the same: joining
 replicas get their address from `--peers`, the client command `RECONFIGURE <ids>
-[LEADERS <ids>]` proposes a change, and a removed replica that reports `Retired` takes a
-linearizable read barrier and exits with status 0 unless a later change added it back:
-once the barrier is ready it has applied every change decided before it (its
-`tests/membership.rs` replaces a member end to end).
+[LEADERS <ids>]` proposes a change, and a removed replica exits with status 0 when it
+reports `Retired` (its `tests/membership.rs` replaces a member end to end).
 
 **Upgrades:** a replica running a version without membership changes cannot decode a
 change entry and would keep the old majorities. Propose changes only once every replica
