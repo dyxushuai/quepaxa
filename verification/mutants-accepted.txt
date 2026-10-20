@@ -69,3 +69,7 @@ crates/quepaxa/src/replica/proposing.rs: replace += with -= in Replica::forward_
 crates/quepaxa/src/replica/proposing.rs: replace += with *= in Replica::forward_pending
 crates/quepaxa/src/replica/proposing.rs: replace += with *= in Replica::on_reply
 crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::on_reply
+
+# Asking a member that already reported exactly the epoch's first slot again only sends one
+# more probe; retirement waits for the same majority either way.
+crates/quepaxa/src/replica/retire.rs: replace < with <= in Replica::check_retired
