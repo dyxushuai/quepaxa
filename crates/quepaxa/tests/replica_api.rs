@@ -715,6 +715,67 @@ fn a_joiner_removed_again_retires_after_its_epochs_were_pruned() {
 }
 
 #[test]
+fn a_replica_removed_while_down_learns_it_when_restarted() {
+    // Replica 2 is down for its whole removal; the cluster then goes quiet. Nothing would
+    // tell it what happened, so on restart it asks.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let mut disks = vec![Vec::new(); 4];
+    let run = |rs: &mut Vec<Replica>, disks: &mut Vec<Vec<Bytes>>, down: &[usize]| {
+        let mut queue = std::collections::VecDeque::new();
+        let mut seen = Vec::new();
+        loop {
+            for (i, r) in rs.iter_mut().enumerate() {
+                for a in drain(r) {
+                    match a {
+                        Action::Send(o) => queue.push_back((o.to.0 as usize, Input::Message(o.bytes))),
+                        Action::Persist { id, records, then, replace } => {
+                            if replace {
+                                disks[i].clear();
+                            }
+                            disks[i].extend(records);
+                            queue
+                                .extend(then.into_iter().map(|o| (o.to.0 as usize, Input::Message(o.bytes))));
+                            queue.push_back((i, Input::Persisted(id)));
+                        }
+                        other => seen.push((i, other)),
+                    }
+                }
+            }
+            let Some((to, input)) = queue.pop_front() else { return seen };
+            if down.contains(&to) {
+                continue;
+            }
+            rs[to].handle(T0, input).unwrap();
+        }
+    };
+    run(&mut rs, &mut disks, &[]);
+    rs[0].propose(T0, Bytes::from_static(b"before")).unwrap();
+    run(&mut rs, &mut disks, &[]);
+    rs[0].propose_reconfiguration(T0, vec![NodeId(0), NodeId(1), NodeId(3)], vec![]).unwrap();
+    run(&mut rs, &mut disks, &[2]);
+    for k in 0..70u32 {
+        rs[0].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+        run(&mut rs, &mut disks, &[2]);
+    }
+    let behind = rs[2].commit_index();
+    let mut cfg = config(&[0, 1, 2]);
+    cfg.id = NodeId(2);
+    cfg.seed = [9; 32];
+    rs[2] = Replica::new(cfg, disks[2].clone(), T0).unwrap();
+    // Its first requests are lost: it asks again until someone answers.
+    let mut seen = run(&mut rs, &mut disks, &[0, 1, 3]);
+    for t in 1..30 {
+        seen.extend(run(&mut rs, &mut disks, &[]));
+        for r in rs.iter_mut() {
+            r.handle_timeout(Timestamp(t * 1_000_000_000)).unwrap();
+        }
+    }
+    seen.extend(run(&mut rs, &mut disks, &[]));
+    assert!(rs[2].commit_index() > behind, "replica 2 caught up after its restart");
+    assert!(seen.iter().any(|(i, a)| *i == 2 && matches!(a, Action::Retired { epoch: 1 })));
+}
+
+#[test]
 fn membership_changes_are_validated() {
     let mut r = ordered(0, &[]);
     drain(&mut r);

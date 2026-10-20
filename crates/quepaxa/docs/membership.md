@@ -50,7 +50,16 @@ in log order.
   know every slot before `from`, takes a read barrier of its own; it reports `Retired`
   when the barrier commits and no change decided before it has added the replica back.
   Only a change decided after that can still add it back: whoever proposes one keeps the
-  replica running (or restarts it).
+  replica running (or restarts it). A replica that was down for its whole removal learns
+  of it when it restarts (it asks every known replica where the log is, until one
+  answers); one that kept running but was cut off learns only when it hears from a
+  member, so restart it.
+- **Retiring a replica that cannot report it.** What `Retired { epoch }` waits for —
+  a majority of that epoch's members durably holding the slots before it — is the same
+  for every replica the change removed. So once any of them reports it, all replicas
+  removed by that epoch may shut down, unless a later change added one back. This covers
+  a removed replica that is down for good, or one whose known peers were all replaced
+  while it was down (it cannot find the new members on its own).
 - **Replacing the leader.** Put the new leader first in the new order.
 
 ```no_run

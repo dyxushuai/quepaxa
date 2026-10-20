@@ -93,6 +93,9 @@ pub struct Replica {
     seen: BTreeMap<Slot, Timestamp>,
     /// Outstanding bulk catch-up request: peer and when it was sent.
     catch_up: Option<(NodeId, Timestamp)>,
+    /// After a restart: when to ask every known replica where the log is again, until one
+    /// answers.
+    startup_probe: Option<Timestamp>,
     /// A peer that advertised `peer_committed`.
     ahead_peer: Option<NodeId>,
     /// Leader schedule as of the decided prefix (`committed`), used to drive slots.
@@ -151,7 +154,9 @@ impl Replica {
     /// `cfg.seed` must be fresh CSPRNG output on every start. The startup actions are the
     /// [`Action::Commit`]s of the slots recovered from `durable` (emitted again, in order)
     /// followed by an [`Action::Persist`] of the new incarnation; nothing is sent before it
-    /// is durable. See [`guide::durability`](crate::guide::durability).
+    /// is durable. After a restart, that `Persist` also carries a catch-up request to every
+    /// known replica, so one that was away learns what it missed without waiting for a
+    /// write. See [`guide::durability`](crate::guide::durability).
     ///
     /// # Errors
     ///
@@ -245,6 +250,7 @@ impl Replica {
             peer_committed: 0,
             seen: BTreeMap::new(),
             catch_up: None,
+            startup_probe: None,
             ahead_peer: None,
             dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
             proposers: BTreeMap::new(),
@@ -277,6 +283,11 @@ impl Replica {
             r.seen.entry(slot).or_insert(now);
         }
         r.emit_commits();
+        // After a restart, ask every known replica where the log is: one that was away, even
+        // through its own removal, learns what it missed without waiting for someone to write.
+        if last_incarnation > 0 {
+            r.probe_peers();
+        }
         // Nothing leaves this replica until its new incarnation is durable.
         r.flush();
         Ok(r)
@@ -586,6 +597,7 @@ impl Replica {
             self.request_catch_up(from);
         }
         if let Body::Entries { .. } = msg.body {
+            self.startup_probe = None;
             self.note_progress(from, msg.env.commit_index);
         }
         self.inbox.push_back((from, msg.body));
@@ -594,6 +606,23 @@ impl Replica {
     /// Whether a bulk catch-up request may be (re)sent now.
     fn catch_up_due(&self) -> bool {
         self.catch_up.is_none_or(|(_, t)| t.after(self.cfg.retransmit_interval) <= self.now)
+    }
+
+    /// Asks every known replica where the log is (again on the retransmit timer, until a
+    /// catch-up reply arrives).
+    pub(super) fn probe_peers(&mut self) {
+        self.startup_probe = Some(self.now.after(self.cfg.retransmit_interval));
+        let peers: alloc::collections::BTreeSet<NodeId> = self
+            .cfg
+            .members
+            .iter()
+            .copied()
+            .chain(self.schedule.everyone())
+            .filter(|&m| m != self.me)
+            .collect();
+        for peer in peers {
+            self.send(peer, Body::CatchUp { from: Slot(self.committed) });
+        }
     }
 
     /// Fetches the decided prefix from `committed` in bulk.

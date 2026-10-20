@@ -247,11 +247,20 @@ impl Replica {
             && self.catch_up.or(self.ahead_peer.map(|p| (p, self.now))).is_some();
         let catch_up =
             behind.then(|| self.catch_up.map_or(self.now, |(_, t)| t.after(self.cfg.retransmit_interval)));
-        resend.chain(stall).chain(hedge).chain(catch_up).chain(self.retire_probe).min()
+        resend
+            .chain(stall)
+            .chain(hedge)
+            .chain(catch_up)
+            .chain(self.retire_probe)
+            .chain(self.startup_probe)
+            .min()
     }
 
     pub(super) fn fire_timers(&mut self) {
         let now = self.now;
+        if self.startup_probe.is_some_and(|t| t <= now) {
+            self.probe_peers();
+        }
         let due: Vec<Slot> =
             self.proposers.iter().filter(|(_, a)| a.resend_at <= now).map(|(s, _)| *s).collect();
         for slot in due {
