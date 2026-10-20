@@ -151,7 +151,9 @@ impl Replica {
     /// `cfg.seed` must be fresh CSPRNG output on every start. The startup actions are the
     /// [`Action::Commit`]s of the slots recovered from `durable` (emitted again, in order)
     /// followed by an [`Action::Persist`] of the new incarnation; nothing is sent before it
-    /// is durable. See [`guide::durability`](crate::guide::durability).
+    /// is durable. After a restart, that `Persist` also carries a catch-up request to every
+    /// known replica, so one that was away learns what it missed without waiting for a
+    /// write. See [`guide::durability`](crate::guide::durability).
     ///
     /// # Errors
     ///
@@ -277,6 +279,15 @@ impl Replica {
             r.seen.entry(slot).or_insert(now);
         }
         r.emit_commits();
+        // After a restart, ask every known replica where the log is: one that was away, even
+        // through its own removal, learns what it missed without waiting for someone to write.
+        if last_incarnation > 0 {
+            let peers: alloc::collections::BTreeSet<NodeId> =
+                r.cfg.members.iter().copied().chain(r.schedule.everyone()).filter(|&m| m != r.me).collect();
+            for peer in peers {
+                r.send(peer, Body::CatchUp { from: Slot(r.committed) });
+            }
+        }
         // Nothing leaves this replica until its new incarnation is durable.
         r.flush();
         Ok(r)

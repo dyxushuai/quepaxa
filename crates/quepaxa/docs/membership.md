@@ -50,7 +50,9 @@ in log order.
   know every slot before `from`, takes a read barrier of its own; it reports `Retired`
   when the barrier commits and no change decided before it has added the replica back.
   Only a change decided after that can still add it back: whoever proposes one keeps the
-  replica running (or restarts it).
+  replica running (or restarts it). A replica that was down for its whole removal learns
+  of it when it restarts (it asks every known replica where the log is); one that kept
+  running but was cut off learns only when it hears from a member, so restart it.
 - **Replacing the leader.** Put the new leader first in the new order.
 
 ```no_run

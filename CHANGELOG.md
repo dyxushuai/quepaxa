@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: after a restart, a replica asks every known replica where the log is (one
+  catch-up request each, sent with the incarnation's persist). A replica that was down
+  for its own removal, restarted into a quiet cluster, never learned of it and so never
+  reported `Retired`.
+
 - `quepaxa`: `Action::Retired` is reported only after a read barrier of the replica's own
   commits and shows no later change added it back (an internal barrier, never reported as
   `ReadReady`). Before, a replica added back by a change decided after the new members
