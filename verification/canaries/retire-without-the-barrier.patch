@@ -1,0 +1,11 @@
+diff --git a/crates/quepaxa/src/replica/retire.rs b/crates/quepaxa/src/replica/retire.rs
+--- a/crates/quepaxa/src/replica/retire.rs
++++ b/crates/quepaxa/src/replica/retire.rs
+@@ -58,6 +58,7 @@
+             {
+                 self.retire_barrier = Some((epoch, id));
+             }
++            self.confirm_retired();
+             return;
+         }
+         if self.retire_probe.is_none_or(|t| t <= self.now) {

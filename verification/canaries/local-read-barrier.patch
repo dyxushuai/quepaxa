@@ -1,7 +1,7 @@
 diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
 --- a/crates/quepaxa/src/replica/mod.rs
 +++ b/crates/quepaxa/src/replica/mod.rs
-@@ -307,6 +307,10 @@
+@@ -399,6 +399,10 @@
              return Err(Error::PayloadTooLarge);
          }
          self.next_proposal += 1;
@@ -11,4 +11,4 @@ diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.
 +        }
          self.outstanding.insert(id, (self.now, kind));
          self.pending.push_back(item);
-         self.pump();
+         Ok(id)

@@ -594,6 +594,126 @@ fn a_removed_replica_added_back_while_away_does_not_retire_on_a_stale_view() {
     assert!(!retired(&seen), "replica 2 retired from epoch 1 although epoch 2 added it back");
 }
 
+/// Like [`run_without`], but messages to a replica in `hold` are kept in `held` instead of
+/// being delivered.
+fn run_holding(rs: &mut [Replica], hold: &[usize], held: &mut Vec<(usize, Input)>) -> Vec<(usize, Action)> {
+    let mut queue: std::collections::VecDeque<(usize, Input)> = std::mem::take(held).into();
+    held.clear();
+    let mut seen = Vec::new();
+    loop {
+        for (i, r) in rs.iter_mut().enumerate() {
+            for a in drain(r) {
+                match a {
+                    Action::Send(o) => queue.push_back((o.to.0 as usize, Input::Message(o.bytes))),
+                    Action::Persist { id, then, .. } => {
+                        queue.extend(then.into_iter().map(|o| (o.to.0 as usize, Input::Message(o.bytes))));
+                        queue.push_back((i, Input::Persisted(id)));
+                    }
+                    other => seen.push((i, other)),
+                }
+            }
+        }
+        let Some((to, input)) = queue.pop_front() else { return seen };
+        if hold.contains(&to) && !matches!(input, Input::Persisted(_)) {
+            held.push((to, input));
+            continue;
+        }
+        rs[to].handle(T0, input).unwrap();
+    }
+}
+
+#[test]
+fn a_replica_added_back_after_its_probes_were_answered_does_not_retire() {
+    // Replica 2 leaves; it learns every old slot, and the window ends with nothing after it.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let mut seen = run_without(&mut rs, &[]);
+    rs[0].propose_reconfiguration(T0, vec![NodeId(0), NodeId(1), NodeId(3)], vec![]).unwrap();
+    seen.extend(run_without(&mut rs, &[]));
+    let from = seen
+        .iter()
+        .find_map(|(_, a)| match a {
+            Action::Reconfigured { epoch: 1, from, .. } => Some(from.0),
+            _ => None,
+        })
+        .expect("the change was applied");
+    let mut k = 0;
+    while rs[0].commit_index() < from {
+        rs[0].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+        seen.extend(run_without(&mut rs, &[]));
+        k += 1;
+    }
+    assert_eq!(rs.iter().map(Replica::commit_index).collect::<Vec<_>>(), [from; 4]);
+    // Its probes are answered, but the answers are held back...
+    let mut probes = Vec::new();
+    rs[2].handle_timeout(Timestamp(1_000_000_000)).unwrap();
+    seen.extend(run_holding(&mut rs, &[2], &mut probes));
+    assert!(!probes.is_empty(), "replica 2 asked the new members for their progress");
+    // ...while a second change adds it back, before it hears of that.
+    rs[0].propose_reconfiguration(T0, vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)], vec![]).unwrap();
+    let mut later = Vec::new();
+    seen.extend(run_holding(&mut rs, &[2], &mut later));
+    assert!(rs[0].commit_index() > from, "the second change is decided");
+    // The held answers say a majority caught up and nobody knows more than replica 2: only
+    // its own read barrier, ordered after the second change, shows it was added back.
+    seen.extend(run_holding(&mut rs, &[], &mut probes));
+    seen.extend(run_holding(&mut rs, &[], &mut later));
+    for t in 2..20 {
+        for r in &mut rs {
+            r.handle_timeout(Timestamp(t * 1_000_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[]));
+    }
+    assert!(rs[2].commit_index() > from, "replica 2 learned the second change");
+    let retired: Vec<_> = seen.iter().filter(|(_, a)| matches!(a, Action::Retired { .. })).collect();
+    assert!(retired.is_empty(), "replica 2 retired although it was added back: {retired:?}");
+    let ready = seen.iter().filter(|(i, a)| *i == 2 && matches!(a, Action::ReadReady { .. })).count();
+    assert_eq!(ready, 0, "the retirement barrier is never reported to the application");
+}
+
+#[test]
+fn a_joiner_removed_again_retires_after_its_epochs_were_pruned() {
+    // Replica 3 joins (epoch 1) and learns that it leaves again (epoch 2), but is cut off
+    // before the new members catch up; meanwhile a third change also without it takes
+    // effect, and every peer prunes the epochs that knew it. It must still be able to catch
+    // up, confirm and retire.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let mut seen = run_without(&mut rs, &[]);
+    let mut k = 0u32;
+    let mut change = |rs: &mut Vec<Replica>,
+                      seen: &mut Vec<(usize, Action)>,
+                      members: &[u32],
+                      order: &[u32],
+                      cut: &[usize]| {
+        let ids = |v: &[u32]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
+        rs[0].propose_reconfiguration(T0, ids(members), ids(order)).unwrap();
+        // Everyone learns the change; `cut` is away for its window.
+        seen.extend(run_without(rs, &[]));
+        // Through the window.
+        for _ in 0..70 {
+            rs[0].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+            seen.extend(run_without(rs, cut));
+            k += 1;
+        }
+    };
+    change(&mut rs, &mut seen, &[0, 1, 2, 3], &[], &[]);
+    change(&mut rs, &mut seen, &[0, 1, 2], &[], &[3]);
+    change(&mut rs, &mut seen, &[0, 1, 2], &[1, 0, 2], &[3]);
+    assert!(seen.iter().any(|(i, a)| *i == 0 && matches!(a, Action::Reconfigured { epoch: 3, .. })));
+    // Back: every request it sends comes from a replica no peer's schedule knows any more.
+    for t in 1..40 {
+        for r in &mut rs {
+            r.handle_timeout(Timestamp(t * 1_000_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[]));
+    }
+    assert!(
+        seen.iter().any(|(i, a)| *i == 3 && matches!(a, Action::Retired { .. })),
+        "replica 3 never retired (commit index {} of {})",
+        rs[3].commit_index(),
+        rs[0].commit_index()
+    );
+}
+
 #[test]
 fn membership_changes_are_validated() {
     let mut r = ordered(0, &[]);

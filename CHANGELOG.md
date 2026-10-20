@@ -5,11 +5,21 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: `Action::Retired` is reported only after a read barrier of the replica's own
+  commits and shows no later change added it back (an internal barrier, never reported as
+  `ReadReady`). Before, a replica added back by a change decided after the new members
+  answered its progress probes could still report `Retired`; runtimes no longer need their
+  own barrier for this. A change decided after the barrier remains the operator's to
+  handle.
+- `quepaxa`: requests (to record, to catch up, forwarded entries) are served for any
+  replica of the cluster, not only those of a known epoch, so a joiner removed again
+  can still retire after a further change pruned every epoch that listed it. Replies and
+  decisions from unknown replicas are still rejected.
+
 - `examples/kv-tokio`: membership changes. `--peers` lists replicas that may join later,
   the client command `RECONFIGURE <ids> [LEADERS <ids>]` proposes a change (only naming
   replicas with an address), and a removed replica exits with status 0 once it reports
-  `Retired` and a read barrier shows no later change added it back; a process-level test
-  replaces a member.
+  `Retired`; a process-level test replaces a member.
 
 ## 0.3.2 — 2026-10-16
 

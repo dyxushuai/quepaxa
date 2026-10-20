@@ -18,7 +18,8 @@
 (*   always recover its decision.                                         *)
 (* - A replica removed by a change retires (shuts down for good) once a   *)
 (*   majority of the new members durably know every slot before the       *)
-(*   epoch, and it has caught up with what they know.                     *)
+(*   epoch, and its own read barrier committed: it has applied every slot *)
+(*   decided before that point.                                           *)
 (*   Recoverable: every decided slot is durably known by a live replica,  *)
 (*   or recoverable from a live majority of its members, even with a      *)
 (*   minority of the current members down as well (so one durable copy   *)
@@ -133,7 +134,8 @@ Crash(r) ==
     /\ UNCHANGED <<decided, dlog, retired>>
 
 \* Action::Retired: r is not a member of the latest epoch it knows, a majority of that
-\* epoch's members durably know every slot before it, and none knows more than r.
+\* epoch's members durably know every slot before it, and r's read barrier committed: it
+\* knows every slot decided by then (so a change adding it back would be known).
 Retire(r) ==
     LET st == Latest(r)
         caught == {m \in st.nxt : Prefix(dlog[m]) >= st.from}
@@ -141,7 +143,7 @@ Retire(r) ==
        /\ st.from > 0
        /\ r \notin st.nxt
        /\ 2 * Cardinality(caught) > Cardinality(st.nxt)
-       /\ \A m \in st.nxt : Prefix(dlog[m]) <= Prefix(log[r])
+       /\ \A t \in Slots : decided[t] # None => t \in log[r]
        /\ retired' = retired \cup {r}
        /\ UNCHANGED <<decided, log, dlog>>
 

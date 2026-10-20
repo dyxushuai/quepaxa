@@ -136,6 +136,9 @@ pub struct Replica {
     retire_probe: Option<Timestamp>,
     /// The epoch `Action::Retired` was reported for.
     retired: Option<u64>,
+    /// A read barrier of this replica's own, confirming retirement from this epoch once
+    /// committed (a later change may have added it back); never reported to the caller.
+    retire_barrier: Option<(u64, ProposalId)>,
     /// Steps at which this replica's proposers decided, for verification only.
     #[cfg(feature = "model")]
     decided_steps: BTreeMap<Slot, (Proposal, u32)>,
@@ -263,6 +266,7 @@ impl Replica {
             member_progress: BTreeMap::new(),
             retire_probe: None,
             retired: None,
+            retire_barrier: None,
             #[cfg(feature = "model")]
             decided_steps: BTreeMap::new(),
         };
@@ -374,6 +378,14 @@ impl Replica {
 
     fn enqueue(&mut self, now: Timestamp, payload: Bytes, kind: Kind) -> Result<ProposalId, Error> {
         self.begin(now)?;
+        let id = self.submit(payload, kind)?;
+        self.pump();
+        self.flush();
+        Ok(id)
+    }
+
+    /// Queues a local entry; the caller pumps it.
+    fn submit(&mut self, payload: Bytes, kind: Kind) -> Result<ProposalId, Error> {
         if self.fenced {
             return Err(Error::Fenced);
         }
@@ -389,16 +401,17 @@ impl Replica {
         self.next_proposal += 1;
         self.outstanding.insert(id, (self.now, kind));
         self.pending.push_back(item);
-        self.pump();
-        self.flush();
         Ok(id)
     }
 
     /// Feeds one external event: a message from a peer, or the completion or failure of
     /// a [`Action::Persist`].
     ///
-    /// Malformed messages and messages from other clusters or non-members are counted in
-    /// [`Metrics::messages_rejected`] and otherwise ignored. After a storage failure the
+    /// Malformed messages, messages from other clusters, and replies or decisions from
+    /// replicas outside every known epoch are counted in [`Metrics::messages_rejected`] and
+    /// otherwise ignored. Requests (to record, to catch up, forwarded entries) are served for
+    /// any replica of the cluster: a removed replica whose epochs were all pruned still
+    /// needs them to retire. After a storage failure the
     /// replica is fenced: it reports outstanding proposals as [`Action::Dropped`] and
     /// ignores further events.
     ///
@@ -502,7 +515,8 @@ impl Replica {
 
     fn fence(&mut self) {
         self.fenced = true;
-        for id in mem::take(&mut self.outstanding).into_keys() {
+        let internal = self.retire_barrier.take().map(|(_, id)| id);
+        for id in mem::take(&mut self.outstanding).into_keys().filter(|id| Some(*id) != internal) {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }
         self.proposers.clear();
@@ -550,8 +564,15 @@ impl Replica {
         };
         let from = msg.env.from;
         let known = self.cfg.members.contains(&from) || self.schedule.knows(from);
-        if msg.env.to != self.me || from == self.me || !known {
+        let request =
+            matches!(msg.body, Body::RecordRequest { .. } | Body::CatchUp { .. } | Body::Forward { .. });
+        if msg.env.to != self.me || from == self.me || !(known || request) {
             self.metrics.messages_rejected += 1;
+            return;
+        }
+        // Progress hints only from replicas of a known epoch.
+        if !known {
+            self.inbox.push_back((from, msg.body));
             return;
         }
         if msg.env.commit_index > self.peer_committed {
@@ -618,8 +639,9 @@ impl Replica {
                     Body::Compacted { through } => self.on_compacted(from, through),
                 }
             }
-            self.drive();
+            // Before driving: a retirement barrier it submits is proposed in this round.
             self.check_retired();
+            self.drive();
             if self.inbox.is_empty() {
                 break;
             }

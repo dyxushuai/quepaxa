@@ -93,7 +93,11 @@ fn misaddressed_and_out_of_range_messages_are_rejected_at_the_exact_bounds() {
     let cases = [
         (1, 2, Body::CatchUp { from: Slot(0) }, true),
         (0, 0, Body::CatchUp { from: Slot(0) }, true),
-        (7, 0, Body::CatchUp { from: Slot(0) }, true),
+        // A replica outside every known epoch: its requests are served, its replies and
+        // decisions are not.
+        (7, 0, Body::CatchUp { from: Slot(0) }, false),
+        (7, 0, reply(4, 4), true),
+        (7, 0, Body::Decided { slot: Slot(0), proposal: proposal(1, 7, 0) }, true),
         (1, 0, Body::CatchUp { from: Slot(0) }, false),
         (1, 0, req(0, max_step + 1), true),
         (1, 0, req(0, max_step), false),
@@ -378,4 +382,82 @@ fn an_empty_catch_up_page_is_retried_only_on_the_timer() {
     r.poll_actions(&mut out);
     let retry = r.next_deadline().expect("a retry is scheduled");
     assert!(retry >= Timestamp(2).after(r.cfg.retransmit_interval), "{retry:?}");
+}
+
+#[test]
+fn a_barrier_the_new_epoch_commits_does_not_retire_without_a_caught_up_majority() {
+    // Replicas 0 and 1 leave; the new members are 2 (old) and 3 and 4 (joining). The
+    // joiners vote on the new epoch's slots but never learn a decision, so a slot the new
+    // epoch commits (a retirement barrier among them) says nothing about who holds the old
+    // slots: replicas 0 and 1 must not retire on it.
+    let members = alloc::vec![NodeId(0), NodeId(1), NodeId(2)];
+    let mut rs: Vec<Replica> = (0..5u32)
+        .map(|i| {
+            let mut cfg = Config::new([5; 16], NodeId(i), members.clone(), [i as u8 + 1; 32]);
+            // The widest window: recorders vote up to 256 slots past what they know, so the
+            // joiners vote on the new epoch's first slots without holding the old ones.
+            cfg.max_in_flight_slots = 64;
+            Replica::new(cfg, [], Timestamp(0)).unwrap()
+        })
+        .collect();
+    let wire = rs[0].wire;
+    let learns = |b: &Body| matches!(b, Body::Decided { .. } | Body::Entries { .. } | Body::CatchUp { .. });
+    let mut seen = Vec::new();
+    let run = |rs: &mut Vec<Replica>, seen: &mut Vec<(usize, Action)>| {
+        let mut queue = alloc::collections::VecDeque::new();
+        loop {
+            for (i, r) in rs.iter_mut().enumerate() {
+                let mut out = Vec::new();
+                r.poll_actions(&mut out);
+                for a in out {
+                    match a {
+                        Action::Send(o) => queue.push_back((o.to.0 as usize, Input::Message(o.bytes))),
+                        Action::Persist { id, then, .. } => {
+                            queue
+                                .extend(then.into_iter().map(|o| (o.to.0 as usize, Input::Message(o.bytes))));
+                            queue.push_back((i, Input::Persisted(id)));
+                        }
+                        other => seen.push((i, other)),
+                    }
+                }
+            }
+            let Some((to, input)) = queue.pop_front() else { return };
+            if to >= 3
+                && let Input::Message(b) = &input
+                && Message::decode(b, &wire).is_ok_and(|m| learns(&m.body))
+            {
+                continue; // the joiners never learn a decision
+            }
+            rs[to].handle(Timestamp(0), input).unwrap();
+        }
+    };
+    run(&mut rs, &mut seen);
+    rs[0]
+        .propose_reconfiguration(Timestamp(0), alloc::vec![NodeId(2), NodeId(3), NodeId(4)], Vec::new())
+        .unwrap();
+    run(&mut rs, &mut seen);
+    for k in 0..90u32 {
+        rs[2].propose(Timestamp(0), Bytes::from(alloc::format!("w{k}"))).unwrap();
+        run(&mut rs, &mut seen);
+    }
+    for t in 1..30u64 {
+        for r in rs.iter_mut() {
+            r.handle_timeout(Timestamp(t * 1_000_000_000)).unwrap();
+        }
+        run(&mut rs, &mut seen);
+    }
+    let from = seen
+        .iter()
+        .find_map(|(_, a)| match a {
+            Action::Reconfigured { epoch: 1, from, .. } => Some(from.0),
+            _ => None,
+        })
+        .expect("the change was applied");
+    assert!(rs[2].commit_index() > from, "the new epoch commits with the joiners' votes");
+    assert_eq!((rs[3].commit_index(), rs[4].commit_index()), (0, 0), "the joiners learned nothing");
+    let retired: Vec<_> = seen.iter().filter(|(_, a)| matches!(a, Action::Retired { .. })).collect();
+    assert!(
+        retired.is_empty(),
+        "retired with only one of three new members holding the old slots: {retired:?}"
+    );
 }

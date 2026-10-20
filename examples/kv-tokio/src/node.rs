@@ -129,11 +129,6 @@ pub struct Node {
     writes: HashMap<ProposalId, oneshot::Sender<String>>,
     reads: HashMap<ProposalId, (String, oneshot::Sender<String>)>,
     persists: Vec<PendingPersist>,
-    /// The latest membership epoch applied here.
-    epoch: u64,
-    /// Reported `Retired` from this epoch: exits once a read barrier shows that no later
-    /// change added it back (it may report retirement before catching up with one).
-    retiring: Option<(u64, Option<ProposalId>)>,
 }
 
 /// How many queued events are handled before their persists are flushed together.
@@ -165,8 +160,6 @@ impl Node {
             writes: HashMap::new(),
             reads: HashMap::new(),
             persists: Vec::new(),
-            epoch: 0,
-            retiring: None,
         }
     }
 
@@ -383,23 +376,6 @@ impl Node {
                     if let Some((k, r)) = self.reads.remove(&id) {
                         let _ = r.send(self.value(&k));
                     }
-                    if let Some((epoch, Some(barrier))) = self.retiring
-                        && barrier == id
-                    {
-                        // Everything decided before the barrier is applied: a later change
-                        // adding this replica back would have been reported by now.
-                        if self.epoch <= epoch {
-                            eprintln!(
-                                "kv-tokio: not a member of epoch {epoch} and no longer needed; exiting"
-                            );
-                            std::process::exit(0);
-                        }
-                        eprintln!(
-                            "kv-tokio: retired from epoch {epoch}, but epoch {} came after it",
-                            self.epoch
-                        );
-                        self.retiring = None;
-                    }
                 }
                 Action::SnapshotNeeded { peer, .. } => {
                     self.snapshot_from = Some(peer.0);
@@ -407,10 +383,13 @@ impl Node {
                 }
                 Action::Reconfigured { epoch, from, members } => {
                     eprintln!("kv-tokio: epoch {epoch} from slot {}: members {members:?}", from.0);
-                    self.epoch = epoch;
                 }
-                // The new members durably hold everything this replica was needed for.
-                Action::Retired { epoch } => self.retiring = Some((epoch, None)),
+                // The new members durably hold everything this replica was needed for, and no
+                // change decided before the replica's own read barrier added it back.
+                Action::Retired { epoch } => {
+                    eprintln!("kv-tokio: not a member of epoch {epoch} and no longer needed; exiting");
+                    std::process::exit(0);
+                }
                 Action::Dropped { id, .. } => {
                     if let Some(r) = self.writes.remove(&id) {
                         let _ = r.send("ERR outcome unknown (replica fenced)".to_owned());
@@ -420,20 +399,6 @@ impl Node {
                     }
                 }
                 _ => {}
-            }
-        }
-        // Retired: confirm through a linearizable barrier that no later change added this
-        // replica back before exiting (its actions are taken at once, like any call's).
-        if let Some((epoch, None)) = self.retiring {
-            match self.replica.read_barrier(self.now()) {
-                Ok(id) => {
-                    self.retiring = Some((epoch, Some(id)));
-                    self.drain();
-                }
-                Err(e) => {
-                    eprintln!("kv-tokio: retired from epoch {epoch}, but cannot confirm it ({e}); staying");
-                    self.retiring = None;
-                }
             }
         }
     }

@@ -158,6 +158,11 @@ impl Replica {
             self.actions.push(Action::Commit { slot, entries });
             for (id, kind) in mine {
                 self.forwarded.remove(&id);
+                if self.retire_barrier.is_some_and(|(_, b)| b == id) {
+                    self.outstanding.remove(&id);
+                    self.confirm_retired();
+                    continue;
+                }
                 if let Some((at, _)) = self.outstanding.remove(&id) {
                     self.observe_latency(self.now.0.saturating_sub(at.0));
                     self.actions.push(if kind == Kind::Barrier {
