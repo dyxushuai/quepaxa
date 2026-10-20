@@ -93,7 +93,11 @@ fn misaddressed_and_out_of_range_messages_are_rejected_at_the_exact_bounds() {
     let cases = [
         (1, 2, Body::CatchUp { from: Slot(0) }, true),
         (0, 0, Body::CatchUp { from: Slot(0) }, true),
-        (7, 0, Body::CatchUp { from: Slot(0) }, true),
+        // A replica outside every known epoch: its requests are served, its replies and
+        // decisions are not.
+        (7, 0, Body::CatchUp { from: Slot(0) }, false),
+        (7, 0, reply(4, 4), true),
+        (7, 0, Body::Decided { slot: Slot(0), proposal: proposal(1, 7, 0) }, true),
         (1, 0, Body::CatchUp { from: Slot(0) }, false),
         (1, 0, req(0, max_step + 1), true),
         (1, 0, req(0, max_step), false),

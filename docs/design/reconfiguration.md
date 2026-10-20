@@ -79,8 +79,11 @@ restriction buys nothing.
   member). Once the change is decided, members also send it their decisions, so it catches
   up (bulk catch-up or a snapshot) during the window.
 - **Leaving**: a removed replica keeps serving until it reports `Action::Retired
-  { epoch }`; then the operator may stop it. Its messages are still accepted while it
-  appears in the schedule (and always, if it is one of the configured members).
+  { epoch }`; then the operator may stop it. Requests from any replica of the cluster
+  (to record, to catch up, forwarded entries) are served, so it can still catch up and
+  confirm after every epoch that listed it was pruned (a joiner removed again, with a
+  further change decided before it retired); replies and decisions are only taken from
+  replicas of a known epoch.
 - **Retirement**. The slots before `from` are decided by the old members, and only
   their recorders and the replicas that learned the decisions know them. Stopping removed
   replicas as soon as they applied `from - 1` stalled the cluster for good when they were

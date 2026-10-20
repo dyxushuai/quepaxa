@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The project follows
   answered its progress probes could still report `Retired`; runtimes no longer need their
   own barrier for this. A change decided after the barrier remains the operator's to
   handle.
+- `quepaxa`: requests (to record, to catch up, forwarded entries) are served for any
+  replica of the cluster, not only those of a known epoch, so a joiner removed again
+  can still retire after a further change pruned every epoch that listed it. Replies and
+  decisions from unknown replicas are still rejected.
 
 - `examples/kv-tokio`: membership changes. `--peers` lists replicas that may join later,
   the client command `RECONFIGURE <ids> [LEADERS <ids>]` proposes a change (only naming

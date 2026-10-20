@@ -671,6 +671,50 @@ fn a_replica_added_back_after_its_probes_were_answered_does_not_retire() {
 }
 
 #[test]
+fn a_joiner_removed_again_retires_after_its_epochs_were_pruned() {
+    // Replica 3 joins (epoch 1) and learns that it leaves again (epoch 2), but is cut off
+    // before the new members catch up; meanwhile a third change also without it takes
+    // effect, and every peer prunes the epochs that knew it. It must still be able to catch
+    // up, confirm and retire.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let mut seen = run_without(&mut rs, &[]);
+    let mut k = 0u32;
+    let mut change = |rs: &mut Vec<Replica>,
+                      seen: &mut Vec<(usize, Action)>,
+                      members: &[u32],
+                      order: &[u32],
+                      cut: &[usize]| {
+        let ids = |v: &[u32]| v.iter().copied().map(NodeId).collect::<Vec<_>>();
+        rs[0].propose_reconfiguration(T0, ids(members), ids(order)).unwrap();
+        // Everyone learns the change; `cut` is away for its window.
+        seen.extend(run_without(rs, &[]));
+        // Through the window.
+        for _ in 0..70 {
+            rs[0].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+            seen.extend(run_without(rs, cut));
+            k += 1;
+        }
+    };
+    change(&mut rs, &mut seen, &[0, 1, 2, 3], &[], &[]);
+    change(&mut rs, &mut seen, &[0, 1, 2], &[], &[3]);
+    change(&mut rs, &mut seen, &[0, 1, 2], &[1, 0, 2], &[3]);
+    assert!(seen.iter().any(|(i, a)| *i == 0 && matches!(a, Action::Reconfigured { epoch: 3, .. })));
+    // Back: every request it sends comes from a replica no peer's schedule knows any more.
+    for t in 1..40 {
+        for r in &mut rs {
+            r.handle_timeout(Timestamp(t * 1_000_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[]));
+    }
+    assert!(
+        seen.iter().any(|(i, a)| *i == 3 && matches!(a, Action::Retired { .. })),
+        "replica 3 never retired (commit index {} of {})",
+        rs[3].commit_index(),
+        rs[0].commit_index()
+    );
+}
+
+#[test]
 fn membership_changes_are_validated() {
     let mut r = ordered(0, &[]);
     drain(&mut r);

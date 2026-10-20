@@ -407,8 +407,11 @@ impl Replica {
     /// Feeds one external event: a message from a peer, or the completion or failure of
     /// a [`Action::Persist`].
     ///
-    /// Malformed messages and messages from other clusters or non-members are counted in
-    /// [`Metrics::messages_rejected`] and otherwise ignored. After a storage failure the
+    /// Malformed messages, messages from other clusters, and replies or decisions from
+    /// replicas outside every known epoch are counted in [`Metrics::messages_rejected`] and
+    /// otherwise ignored. Requests (to record, to catch up, forwarded entries) are served for
+    /// any replica of the cluster: a removed replica whose epochs were all pruned still
+    /// needs them to retire. After a storage failure the
     /// replica is fenced: it reports outstanding proposals as [`Action::Dropped`] and
     /// ignores further events.
     ///
@@ -561,8 +564,15 @@ impl Replica {
         };
         let from = msg.env.from;
         let known = self.cfg.members.contains(&from) || self.schedule.knows(from);
-        if msg.env.to != self.me || from == self.me || !known {
+        let request =
+            matches!(msg.body, Body::RecordRequest { .. } | Body::CatchUp { .. } | Body::Forward { .. });
+        if msg.env.to != self.me || from == self.me || !(known || request) {
             self.metrics.messages_rejected += 1;
+            return;
+        }
+        // Progress hints only from replicas of a known epoch.
+        if !known {
+            self.inbox.push_back((from, msg.body));
             return;
         }
         if msg.env.commit_index > self.peer_committed {
