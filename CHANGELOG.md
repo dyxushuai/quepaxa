@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- `quepaxa`: a decided membership change takes effect without traffic: while it is
+  pending, the leader fills the slots before it with empty batches. Before, in a quiet
+  cluster the change never took effect, and a replica it removed probed forever without
+  reporting `Retired`.
+- `quepaxa`: `Retired` is decided once everything learned with the retirement barrier is
+  applied, so a catch-up page or snapshot that also adds the replica back no longer
+  produces `Retired` and the re-adding `Reconfigured` in the same call.
+- `quepaxa`: a restarted single-member cluster has no catch-up timer (it had one forever,
+  with nobody to ask).
+
 ## 0.3.3 — 2026-10-20
 
 - `quepaxa`: `Action::Retired` is reported only after a read barrier of the replica's own

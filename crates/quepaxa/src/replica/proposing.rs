@@ -129,6 +129,19 @@ impl Replica {
             let Some(slot) = self.alloc_slot() else { break };
             self.start(slot, seq);
         }
+        // A decided membership change takes effect only once the slots before it are decided:
+        // without writes the leader fills them, so the change completes and the cluster can
+        // go quiet (removed replicas retire) instead of waiting for traffic.
+        let (_, from) = self.schedule.epoch();
+        while self.leads_now() && from > self.committed && (self.proposers.len() as u64) < self.window() {
+            let Some(slot) = self.alloc_slot() else { break };
+            if slot.0 >= from {
+                self.next_alloc = slot.0; // not taken: the first slot of the epoch stays free
+                break;
+            }
+            let seq = self.new_batch(Vec::new());
+            self.start(slot, seq);
+        }
     }
 
     fn forward_pending(&mut self) {

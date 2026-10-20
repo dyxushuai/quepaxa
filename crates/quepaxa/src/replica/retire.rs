@@ -41,6 +41,13 @@ impl Replica {
     /// submits the confirming read barrier; until then, asks the members still behind on
     /// the retransmit timer.
     pub(super) fn check_retired(&mut self) {
+        if let Some(epoch) = self.retire_committed.take()
+            && self.removed_from().is_some_and(|(latest, _)| latest == epoch)
+        {
+            self.retired = Some(epoch);
+            self.member_progress.clear();
+            self.actions.push(Action::Retired { epoch });
+        }
         let Some((epoch, from)) = self.removed_from() else {
             self.member_progress.clear();
             self.retire_probe = None;
@@ -69,14 +76,11 @@ impl Replica {
         }
     }
 
-    /// The retirement barrier committed: reports [`Action::Retired`] if this replica is
-    /// still removed from the same epoch.
+    /// The retirement barrier committed: [`Action::Retired`] is reported when this call has
+    /// applied everything it learned, if the replica is still removed from the same epoch.
     pub(super) fn confirm_retired(&mut self) {
-        let Some((epoch, _)) = self.retire_barrier.take() else { return };
-        if self.removed_from().is_some_and(|(latest, _)| latest == epoch) {
-            self.retired = Some(epoch);
-            self.member_progress.clear();
-            self.actions.push(Action::Retired { epoch });
+        if let Some((epoch, _)) = self.retire_barrier.take() {
+            self.retire_committed = Some(epoch);
         }
     }
 }

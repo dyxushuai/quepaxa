@@ -142,6 +142,9 @@ pub struct Replica {
     /// A read barrier of this replica's own, confirming retirement from this epoch once
     /// committed (a later change may have added it back); never reported to the caller.
     retire_barrier: Option<(u64, ProposalId)>,
+    /// That barrier committed; retirement is decided once everything learned with it is
+    /// applied (the same page may add the replica back).
+    retire_committed: Option<u64>,
     /// Steps at which this replica's proposers decided, for verification only.
     #[cfg(feature = "model")]
     decided_steps: BTreeMap<Slot, (Proposal, u32)>,
@@ -273,6 +276,7 @@ impl Replica {
             retire_probe: None,
             retired: None,
             retire_barrier: None,
+            retire_committed: None,
             #[cfg(feature = "model")]
             decided_steps: BTreeMap::new(),
         };
@@ -348,7 +352,9 @@ impl Replica {
     /// (empty: by id).
     ///
     /// Once decided in slot `s` it takes effect at slot `s + 64`, reported by
-    /// [`Action::Reconfigured`] in log order; the id is reported like a proposal's. A
+    /// [`Action::Reconfigured`] in log order; the id is reported like a proposal's. The
+    /// leader fills the slots up to it with empty batches if nothing else is written, so a
+    /// change completes without traffic. A
     /// replica joining the cluster runs with the original [`Config`] (its own id need not
     /// be a member) and catches up before its first slot. See
     /// [`guide::membership`](crate::guide::membership).
@@ -611,7 +617,6 @@ impl Replica {
     /// Asks every known replica where the log is (again on the retransmit timer, until a
     /// catch-up reply arrives).
     pub(super) fn probe_peers(&mut self) {
-        self.startup_probe = Some(self.now.after(self.cfg.retransmit_interval));
         let peers: alloc::collections::BTreeSet<NodeId> = self
             .cfg
             .members
@@ -620,6 +625,8 @@ impl Replica {
             .chain(self.schedule.everyone())
             .filter(|&m| m != self.me)
             .collect();
+        // Nobody to ask (a single member): nothing to wait for either.
+        self.startup_probe = (!peers.is_empty()).then(|| self.now.after(self.cfg.retransmit_interval));
         for peer in peers {
             self.send(peer, Body::CatchUp { from: Slot(self.committed) });
         }
