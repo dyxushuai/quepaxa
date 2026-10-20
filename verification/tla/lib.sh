@@ -16,17 +16,23 @@ fi
 # 0 when an exhaustive check finished, 124 when the time ran out (no violation found in
 # simulation), 12 for an invariant violation; anything else is a failure.
 tlc() {
-  local args=(-cp tla2tools.jar tlc2.TLC "${@:4}" -workers auto -deadlock -metadir /tmp/tlc-$$ "$3.tla")
+  # A fresh state directory per run: TLC names its subdirectory by the time to the second,
+  # so back-to-back runs sharing one collided and the second failed to start.
+  local meta
+  meta=$(mktemp -d)
+  local args=(-cp tla2tools.jar tlc2.TLC "${@:4}" -workers auto -deadlock -metadir "$meta" "$3.tla")
   cp "$jar" "$1/tla2tools.jar"
   local status
   if command -v java >/dev/null; then
     (cd "$1" && timeout "$2" java -XX:+UseParallelGC "${args[@]}")
     status=$?
   else
+    args=(-cp tla2tools.jar tlc2.TLC "${@:4}" -workers auto -deadlock -metadir /tmp/tlc "$3.tla")
     # The time limit runs inside the container: killing the client would leave it running.
     docker run --rm -v "$1:/spec" -w /spec eclipse-temurin:21.0.4_7-jre timeout "$2" java "${args[@]}"
     status=$?
   fi
   rm -f "$1/tla2tools.jar"
+  rm -rf "${meta:?}"
   return $status
 }
