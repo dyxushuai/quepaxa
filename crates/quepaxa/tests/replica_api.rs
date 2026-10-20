@@ -762,7 +762,8 @@ fn a_replica_removed_while_down_learns_it_when_restarted() {
     cfg.id = NodeId(2);
     cfg.seed = [9; 32];
     rs[2] = Replica::new(cfg, disks[2].clone(), T0).unwrap();
-    let mut seen = Vec::new();
+    // Its first requests are lost: it asks again until someone answers.
+    let mut seen = run(&mut rs, &mut disks, &[0, 1, 3]);
     for t in 1..30 {
         seen.extend(run(&mut rs, &mut disks, &[]));
         for r in rs.iter_mut() {
