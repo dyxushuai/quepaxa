@@ -3,28 +3,32 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
-## Unreleased
-
-- `quepaxa`: after a restart, a replica asks every known replica where the log is (one
-  catch-up request each, sent with the incarnation's persist). A replica that was down
-  for its own removal, restarted into a quiet cluster, never learned of it and so never
-  reported `Retired`.
+## 0.3.3 — 2026-10-20
 
 - `quepaxa`: `Action::Retired` is reported only after a read barrier of the replica's own
   commits and shows no later change added it back (an internal barrier, never reported as
   `ReadReady`). Before, a replica added back by a change decided after the new members
   answered its progress probes could still report `Retired`; runtimes no longer need their
-  own barrier for this. A change decided after the barrier remains the operator's to
-  handle.
+  own barrier for this. `Retired` now comes one committed slot later than in 0.3.2. A
+  change decided after the barrier remains the operator's to handle.
+- `quepaxa`: after a restart, a replica asks every known replica where the log is (sent
+  with the incarnation's persist, and again on the retransmit timer until one answers).
+  A replica that was down for its own removal, restarted into a quiet cluster, never
+  learned of it and so never reported `Retired`.
 - `quepaxa`: requests (to record, to catch up, forwarded entries) are served for any
-  replica of the cluster, not only those of a known epoch, so a joiner removed again
-  can still retire after a further change pruned every epoch that listed it. Replies and
+  replica of the cluster, not only those of a known epoch, so a joiner removed again can
+  still retire after a further change pruned every epoch that listed it. Replies and
   decisions from unknown replicas are still rejected.
-
+- Guide: once any replica removed by a change reports `Retired`, every replica that
+  change removed may shut down (unless added back), which covers one that is down for
+  good or whose known peers were all replaced.
 - `examples/kv-tokio`: membership changes. `--peers` lists replicas that may join later,
   the client command `RECONFIGURE <ids> [LEADERS <ids>]` proposes a change (only naming
   replicas with an address), and a removed replica exits with status 0 once it reports
   `Retired`; a process-level test replaces a member.
+- Verification: Kani proves the recorder invariants for every register state; a TLA+
+  model of membership, durability and retirement is checked exhaustively; logs of the
+  real proposer and recorders are validated against the TLA+ spec.
 
 ## 0.3.2 — 2026-10-16
 

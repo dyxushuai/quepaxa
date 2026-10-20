@@ -445,7 +445,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "kv-tokio"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "quepaxa"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bolero",
  "bytes",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "quepaxa-ffi"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "quepaxa",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "quepaxa-sim"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "quepaxa",
