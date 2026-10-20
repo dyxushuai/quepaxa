@@ -384,12 +384,11 @@ fn an_empty_catch_up_page_is_retried_only_on_the_timer() {
     assert!(retry >= Timestamp(2).after(r.cfg.retransmit_interval), "{retry:?}");
 }
 
-#[test]
-fn a_barrier_the_new_epoch_commits_does_not_retire_without_a_caught_up_majority() {
-    // Replicas 0 and 1 leave; the new members are 2 (old) and 3 and 4 (joining). The
-    // joiners vote on the new epoch's slots but never learn a decision, so a slot the new
-    // epoch commits (a retirement barrier among them) says nothing about who holds the old
-    // slots: replicas 0 and 1 must not retire on it.
+/// Replicas 0-2 are configured, 3 and 4 join, and the members change to `new`. The joiners
+/// vote on the new epoch's slots but never learn a decision, so a slot the new epoch commits
+/// (a retirement barrier among them) says nothing about who holds the old slots. Returns
+/// the actions reported once the new epoch has committed past its first slot.
+fn with_joiners_that_never_learn(new: &[u32]) -> Vec<(usize, Action)> {
     let members = alloc::vec![NodeId(0), NodeId(1), NodeId(2)];
     let mut rs: Vec<Replica> = (0..5u32)
         .map(|i| {
@@ -432,8 +431,8 @@ fn a_barrier_the_new_epoch_commits_does_not_retire_without_a_caught_up_majority(
         }
     };
     run(&mut rs, &mut seen);
-    rs[0]
-        .propose_reconfiguration(Timestamp(0), alloc::vec![NodeId(2), NodeId(3), NodeId(4)], Vec::new())
+    rs[2]
+        .propose_reconfiguration(Timestamp(0), new.iter().copied().map(NodeId).collect(), Vec::new())
         .unwrap();
     run(&mut rs, &mut seen);
     for k in 0..90u32 {
@@ -455,9 +454,43 @@ fn a_barrier_the_new_epoch_commits_does_not_retire_without_a_caught_up_majority(
         .expect("the change was applied");
     assert!(rs[2].commit_index() > from, "the new epoch commits with the joiners' votes");
     assert_eq!((rs[3].commit_index(), rs[4].commit_index()), (0, 0), "the joiners learned nothing");
-    let retired: Vec<_> = seen.iter().filter(|(_, a)| matches!(a, Action::Retired { .. })).collect();
-    assert!(
-        retired.is_empty(),
-        "retired with only one of three new members holding the old slots: {retired:?}"
-    );
+    seen
+}
+
+#[test]
+fn a_barrier_the_new_epoch_commits_does_not_retire_without_a_caught_up_majority() {
+    let retired = |seen: Vec<(usize, Action)>| -> Vec<(usize, Action)> {
+        seen.into_iter().filter(|(_, a)| matches!(a, Action::Retired { .. })).collect()
+    };
+    // Replicas 0 and 1 leave; of the new members only 2 holds the old slots.
+    let r = retired(with_joiners_that_never_learn(&[2, 3, 4]));
+    assert!(r.is_empty(), "retired with only one of three new members holding the old slots: {r:?}");
+    // Replica 0 leaves; 1 and 2 hold the old slots, and half of four is not a majority.
+    let r = retired(with_joiners_that_never_learn(&[1, 2, 3, 4]));
+    assert!(r.is_empty(), "retired with only two of four new members holding the old slots: {r:?}");
+}
+
+#[test]
+fn a_snapshot_resolving_the_retirement_barrier_still_reports_other_proposals() {
+    // A snapshot that covers both an application proposal and the internal retirement
+    // barrier reports the proposal and confirms (never reports) the barrier.
+    let mut r = replica();
+    let mut out = Vec::new();
+    let app = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
+    let barrier = r.submit(Bytes::new(), Kind::Barrier).unwrap();
+    r.retire_barrier = Some((1, barrier));
+    r.poll_actions(&mut out);
+    let mut dedup = Dedup::default();
+    for id in [app, barrier] {
+        dedup.first_time(NodeId(0), r.incarnation, id);
+    }
+    let members = [NodeId(0), NodeId(1), NodeId(2)];
+    let state =
+        CoreState { next: 10, leaders: members.to_vec(), schedule: Schedule::new(&members), dedup }.encode();
+    assert_eq!(r.install_snapshot(Timestamp(2), Slot(9), state), Ok(true));
+    out.clear();
+    r.poll_actions(&mut out);
+    assert!(out.iter().any(|a| matches!(a, Action::Committed { id, .. } if *id == app)), "{out:?}");
+    assert!(!out.iter().any(|a| matches!(a, Action::ReadReady { id, .. } if *id == barrier)), "{out:?}");
+    assert_eq!(r.retire_barrier, None, "the barrier was confirmed");
 }
