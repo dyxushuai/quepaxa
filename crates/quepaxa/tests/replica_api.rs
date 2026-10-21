@@ -829,6 +829,22 @@ fn a_change_takes_effect_without_writes_while_the_leader_is_down() {
 }
 
 #[test]
+fn a_joiner_in_a_cluster_that_never_changed_adds_nothing() {
+    // Replica 3 runs with the configuration but is no member: with no change ever decided it
+    // was removed from nothing, so it must not retire (or propose to) anything.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let mut seen = run_without(&mut rs, &[]);
+    for t in 1..20 {
+        for r in &mut rs {
+            r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[]));
+    }
+    assert!(rs.iter().all(|r| r.commit_index() == 0 && r.next_deadline().is_none()));
+    assert!(!seen.iter().any(|(_, a)| matches!(a, Action::Retired { .. })));
+}
+
+#[test]
 fn a_restarted_single_member_goes_quiet() {
     // Nobody to ask where the log is: no catch-up timer either.
     let mut durable = Vec::new();

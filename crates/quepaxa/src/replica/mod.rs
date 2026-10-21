@@ -352,9 +352,10 @@ impl Replica {
     /// (empty: by id).
     ///
     /// Once decided in slot `s` it takes effect at slot `s + 64`, reported by
-    /// [`Action::Reconfigured`] in log order; the id is reported like a proposal's. The
-    /// leader fills the slots up to it with empty batches if nothing else is written, so a
-    /// change completes without traffic. A
+    /// [`Action::Reconfigured`] in log order; the id is reported like a proposal's. If
+    /// nothing else is written, the slots up to it are filled with empty batches (by the
+    /// leader after a hedge delay, or another member if it is down), so a change completes
+    /// without traffic. A
     /// replica joining the cluster runs with the original [`Config`] (its own id need not
     /// be a member) and catches up before its first slot. See
     /// [`guide::membership`](crate::guide::membership).

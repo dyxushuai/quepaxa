@@ -6,8 +6,8 @@ All notable changes to this project are documented here. The project follows
 ## Unreleased
 
 - `quepaxa`: a decided membership change takes effect without traffic: while it is
-  pending, the leader fills the slots before it with empty batches, and if the leader is
-  down the other replicas take them over after the hedge delay. Before, in a quiet
+  pending, the slots before it are taken over like stalled slots (the leader first, after
+  a hedge delay; the others if it is down) and filled with empty batches. Before, in a quiet
   cluster the change never took effect, and a replica it removed probed forever without
   reporting `Retired`.
 - `quepaxa`: `Retired` is decided once everything learned with the retirement barrier is
