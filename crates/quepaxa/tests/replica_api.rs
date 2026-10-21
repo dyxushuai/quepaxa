@@ -845,6 +845,65 @@ fn a_joiner_in_a_cluster_that_never_changed_adds_nothing() {
 }
 
 #[test]
+fn a_restarted_replica_keeps_asking_until_a_majority_answers() {
+    // Replicas 0 and 1 miss what 2, 3 and 4 decide. Replica 0 restarts, and only replica 1,
+    // as far behind as itself, hears it: that answer must not end its asking, or nothing in
+    // a quiet cluster would ever tell it what it missed.
+    let five = |id: u32, seed: u8| {
+        let mut cfg = config(&[0, 1, 2, 3, 4]);
+        (cfg.id, cfg.seed) = (NodeId(id), [seed; 32]);
+        cfg
+    };
+    let mut rs: Vec<Replica> = (0..5).map(|i| Replica::new(five(i, 1), [], T0).unwrap()).collect();
+    let mut disks = vec![Vec::new(); 5];
+    let run = |rs: &mut Vec<Replica>, disks: &mut Vec<Vec<Bytes>>, down: &[usize]| {
+        let mut queue = std::collections::VecDeque::new();
+        loop {
+            for (i, r) in rs.iter_mut().enumerate() {
+                for a in drain(r) {
+                    match a {
+                        Action::Send(o) => queue.push_back((o.to.0 as usize, Input::Message(o.bytes))),
+                        Action::Persist { id, records, then, replace } => {
+                            if replace {
+                                disks[i].clear();
+                            }
+                            disks[i].extend(records);
+                            queue
+                                .extend(then.into_iter().map(|o| (o.to.0 as usize, Input::Message(o.bytes))));
+                            queue.push_back((i, Input::Persisted(id)));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let Some((to, input)) = queue.pop_front() else { return };
+            if down.contains(&to) && !matches!(input, Input::Persisted(_)) {
+                continue;
+            }
+            rs[to].handle(T0, input).unwrap();
+        }
+    };
+    run(&mut rs, &mut disks, &[]);
+    for k in 0..5u32 {
+        rs[2].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+        run(&mut rs, &mut disks, &[0, 1]);
+        for r in &mut rs[2..] {
+            r.handle_timeout(Timestamp(u64::from(k + 1) * 1_000_000_000)).unwrap();
+        }
+        run(&mut rs, &mut disks, &[0, 1]);
+    }
+    let decided = rs[2].commit_index();
+    assert!(decided > 0 && rs[0].commit_index() == 0 && rs[1].commit_index() == 0);
+    rs[0] = Replica::new(five(0, 9), disks[0].clone(), T0).unwrap();
+    run(&mut rs, &mut disks, &[2, 3, 4]);
+    for t in 10..40 {
+        rs[0].handle_timeout(Timestamp(t * 1_000_000_000)).unwrap();
+        run(&mut rs, &mut disks, &[]);
+    }
+    assert_eq!(rs[0].commit_index(), decided, "replica 0 caught up after its restart");
+}
+
+#[test]
 fn a_restarted_single_member_goes_quiet() {
     // Nobody to ask where the log is: no catch-up timer either.
     let mut durable = Vec::new();

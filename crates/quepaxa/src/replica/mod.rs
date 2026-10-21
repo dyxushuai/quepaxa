@@ -93,9 +93,12 @@ pub struct Replica {
     seen: BTreeMap<Slot, Timestamp>,
     /// Outstanding bulk catch-up request: peer and when it was sent.
     catch_up: Option<(NodeId, Timestamp)>,
-    /// After a restart: when to ask every known replica where the log is again, until one
-    /// answers.
+    /// After a restart: when to ask every known replica where the log is again, until a
+    /// majority of the members has answered (one as far behind as this replica tells it
+    /// nothing).
     startup_probe: Option<Timestamp>,
+    /// Who answered it so far.
+    probe_answers: alloc::collections::BTreeSet<NodeId>,
     /// A peer that advertised `peer_committed`.
     ahead_peer: Option<NodeId>,
     /// Leader schedule as of the decided prefix (`committed`), used to drive slots.
@@ -254,6 +257,7 @@ impl Replica {
             seen: BTreeMap::new(),
             catch_up: None,
             startup_probe: None,
+            probe_answers: alloc::collections::BTreeSet::new(),
             ahead_peer: None,
             dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
             proposers: BTreeMap::new(),
@@ -604,7 +608,16 @@ impl Replica {
             self.request_catch_up(from);
         }
         if let Body::Entries { .. } = msg.body {
-            self.startup_probe = None;
+            if self.startup_probe.is_some() {
+                self.probe_answers.insert(from);
+                let members = self.schedule.members(Slot(self.committed));
+                let answered =
+                    members.iter().filter(|m| **m == self.me || self.probe_answers.contains(m)).count();
+                if answered > members.len() / 2 {
+                    self.startup_probe = None;
+                    self.probe_answers.clear();
+                }
+            }
             self.note_progress(from, msg.env.commit_index);
         }
         self.inbox.push_back((from, msg.body));

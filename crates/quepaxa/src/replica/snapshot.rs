@@ -125,11 +125,11 @@ impl Replica {
                 Action::Committed { id, slot: through }
             });
         }
-        let stale: Vec<Slot> = self.proposers.range(..Slot(state.next)).map(|(s, _)| *s).collect();
-        for slot in stale {
-            if let Some(a) = self.proposers.remove(&slot)
-                && let Some(b) = self.batches.get_mut(&a.batch)
-            {
+        self.proposers = self.proposers.split_off(&Slot(state.next));
+        // Local batches in covered slots, still proposed or already decided there but not yet
+        // applied: whatever of them committed is resolved above, the rest is proposed again.
+        for b in self.batches.values_mut() {
+            if b.slot.is_some_and(|s| s.0 < state.next) {
                 b.slot = None;
             }
         }

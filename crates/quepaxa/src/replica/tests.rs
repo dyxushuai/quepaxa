@@ -569,3 +569,51 @@ fn a_change_learned_from_others_blocks_another_until_it_takes_effect() {
         r.propose_reconfiguration(Timestamp(1), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], Vec::new());
     assert_eq!(again, Err(Error::ReconfigurationPending));
 }
+
+#[test]
+fn a_snapshot_over_a_decided_but_unapplied_local_batch_releases_it() {
+    // Slot 0 was started by a peer, so the local batch goes to slot 1; slot 1 is decided
+    // with it while slot 0 is still unknown (nothing applied yet). A snapshot then covers
+    // both: the batch, its entry committed, must not stay behind forever.
+    let mut r = replica();
+    let mut out = Vec::new();
+    let from_peer = |body| {
+        let env = Envelope {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            from: NodeId(1),
+            to: NodeId(0),
+            commit_index: 0,
+        };
+        Input::Message(Message { env, body }.encode())
+    };
+    r.handle(
+        Timestamp(1),
+        from_peer(Body::RecordRequest { slot: Slot(0), step: 4, proposal: proposal(1, 1, 0) }),
+    )
+    .unwrap();
+    r.poll_actions(&mut out);
+    let id = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    let (key, value, slot) =
+        r.batches.values().map(|b| (b.key, b.value.clone(), b.slot)).next().expect("a local batch");
+    assert_eq!(slot, Some(Slot(1)));
+    let decided = Proposal { priority: 1, key, value };
+    r.handle(Timestamp(1), from_peer(Body::Decided { slot: Slot(1), proposal: decided })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.emitted, 0, "slot 0 is still unknown");
+    // Another local batch in flight in slot 2, the first one the snapshot leaves open.
+    r.propose(Timestamp(1), Bytes::from_static(b"y")).unwrap();
+    r.poll_actions(&mut out);
+    let open = |r: &Replica| r.batches.values().filter(|b| b.slot == Some(Slot(2))).count();
+    assert_eq!(open(&r), 1);
+    let mut dedup = Dedup::default();
+    dedup.first_time(NodeId(0), r.incarnation, id);
+    let members = [NodeId(0), NodeId(1), NodeId(2)];
+    let state =
+        CoreState { next: 2, leaders: members.to_vec(), schedule: Schedule::new(&members), dedup }.encode();
+    assert_eq!(r.install_snapshot(Timestamp(2), Slot(1), state), Ok(true));
+    r.poll_actions(&mut out);
+    assert!(r.batches.values().all(|b| b.key != key), "a covered, committed batch is released");
+    assert_eq!(open(&r), 1, "a batch past the snapshot keeps its slot");
+}
