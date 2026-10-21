@@ -494,3 +494,78 @@ fn a_snapshot_resolving_the_retirement_barrier_still_reports_other_proposals() {
     assert!(!out.iter().any(|a| matches!(a, Action::ReadReady { id, .. } if *id == barrier)), "{out:?}");
     assert_eq!(r.retire_barrier, None, "the barrier was confirmed");
 }
+
+#[test]
+fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
+    // One page carries the slot of the retirement barrier and, right after it, a change
+    // adding the replica back: by the end of the call it is a member again.
+    let mut r = replica();
+    let mut out = Vec::new();
+    let from_peer = |body| {
+        let env = Envelope {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            from: NodeId(1),
+            to: NodeId(0),
+            commit_index: 0,
+        };
+        Input::Message(Message { env, body }.encode())
+    };
+    let decided = |seq: u64, items: &[Item]| Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(1), incarnation: 1, seq },
+        value: batch::encode(items),
+    };
+    let change = |id: u64, members: &[u32]| Item {
+        entry: Entry {
+            origin: NodeId(1),
+            incarnation: 1,
+            id: ProposalId(id),
+            payload: crate::schedule::encode_order(&members.iter().copied().map(NodeId).collect::<Vec<_>>()),
+        },
+        kind: Kind::Reconfigure,
+    };
+    // Slot 0 removes replica 0 from slot 64 on; slots 1-63 are empty.
+    let mut first = alloc::vec![decided(0, &[change(0, &[1, 2, 3])])];
+    first.extend((1..64).map(|s| decided(s, &[])));
+    r.handle(Timestamp(1), from_peer(Body::Entries { first: Slot(0), proposals: first })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.schedule.epoch(), (1, 64), "removed from slot 64 on");
+    let barrier = r.submit(Bytes::new(), Kind::Barrier).unwrap();
+    r.retire_barrier = Some((1, barrier));
+    let own = Item {
+        entry: Entry { origin: NodeId(0), incarnation: r.incarnation, id: barrier, payload: Bytes::new() },
+        kind: Kind::Barrier,
+    };
+    out.clear();
+    let page = alloc::vec![decided(64, &[own]), decided(65, &[change(1, &[0, 1, 2, 3])])];
+    r.handle(Timestamp(2), from_peer(Body::Entries { first: Slot(64), proposals: page })).unwrap();
+    r.poll_actions(&mut out);
+    assert!(out.iter().any(|a| matches!(a, Action::Reconfigured { epoch: 2, .. })), "{out:?}");
+    assert!(!out.iter().any(|a| matches!(a, Action::Retired { .. })), "retired although added back: {out:?}");
+}
+
+#[test]
+fn a_change_learned_from_others_blocks_another_until_it_takes_effect() {
+    let mut r = replica();
+    let mut out = Vec::new();
+    let order = crate::schedule::encode_order(&[NodeId(1), NodeId(2), NodeId(3)]);
+    let change = Item {
+        entry: Entry { origin: NodeId(1), incarnation: 1, id: ProposalId(0), payload: order },
+        kind: Kind::Reconfigure,
+    };
+    let decided = Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(1), incarnation: 1, seq: 0 },
+        value: batch::encode(&[change]),
+    };
+    let env =
+        Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 0 };
+    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![decided] };
+    r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.schedule.epoch(), (1, 64));
+    let again =
+        r.propose_reconfiguration(Timestamp(1), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], Vec::new());
+    assert_eq!(again, Err(Error::ReconfigurationPending));
+}

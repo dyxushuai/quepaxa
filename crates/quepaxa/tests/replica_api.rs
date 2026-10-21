@@ -405,13 +405,14 @@ fn a_member_is_replaced_and_the_new_majority_commits_without_it() {
     let mut rs = [ordered(0, &[]), ordered(1, &[]), ordered(2, &[]), ordered(3, &[])];
     let mut seen = run_without(&mut rs, &[]);
     let id = rs[0].propose_reconfiguration(T0, vec![NodeId(1), NodeId(2), NodeId(3)], vec![]).unwrap();
-    seen.extend(run_without(&mut rs, &[]));
-    assert!(seen.iter().any(|(i, a)| *i == 0 && matches!(a, Action::Committed { id: c, .. } if *c == id)));
+    // One change at a time.
     assert_eq!(
-        rs[1].propose_reconfiguration(T0, vec![NodeId(0), NodeId(1), NodeId(2)], vec![]),
+        rs[0].propose_reconfiguration(T0, vec![NodeId(0), NodeId(1), NodeId(2)], vec![]),
         Err(Error::ReconfigurationPending)
     );
-    // Fill the window until the new epoch is in force.
+    seen.extend(run_without(&mut rs, &[]));
+    assert!(seen.iter().any(|(i, a)| *i == 0 && matches!(a, Action::Committed { id: c, .. } if *c == id)));
+    // Writes carry on through the window (which also fills by itself).
     for k in 0..70u32 {
         rs[1].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
         seen.extend(run_without(&mut rs, &[]));
@@ -773,6 +774,85 @@ fn a_replica_removed_while_down_learns_it_when_restarted() {
     seen.extend(run(&mut rs, &mut disks, &[]));
     assert!(rs[2].commit_index() > behind, "replica 2 caught up after its restart");
     assert!(seen.iter().any(|(i, a)| *i == 2 && matches!(a, Action::Retired { epoch: 1 })));
+}
+
+#[test]
+fn a_change_takes_effect_and_the_cluster_goes_quiet_without_writes() {
+    // Nobody writes after the change: the window before it takes effect is filled anyway,
+    // the removed replica retires, and then every replica is quiet.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let mut seen = run_without(&mut rs, &[]);
+    rs[0].propose_reconfiguration(T0, vec![NodeId(1), NodeId(2), NodeId(3)], vec![]).unwrap();
+    seen.extend(run_without(&mut rs, &[]));
+    let mut t = 1;
+    while rs.iter().any(|r| r.next_deadline().is_some()) {
+        assert!(t < 200, "still busy: {:?}", rs.iter().map(Replica::next_deadline).collect::<Vec<_>>());
+        for r in &mut rs {
+            r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[]));
+        t += 1;
+    }
+    assert!(seen.iter().any(|(i, a)| *i == 3 && matches!(a, Action::Reconfigured { epoch: 1, .. })));
+    assert!(seen.iter().any(|(i, a)| *i == 0 && matches!(a, Action::Retired { epoch: 1 })));
+}
+
+#[test]
+fn a_change_takes_effect_without_writes_while_the_leader_is_down() {
+    // The leader (0) is down when replica 1 proposes replacing it: the others fill the
+    // window themselves, the change takes effect, and they go quiet.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let mut seen = run_without(&mut rs, &[]);
+    rs[1].propose_reconfiguration(T0, vec![NodeId(1), NodeId(2), NodeId(3)], vec![]).unwrap();
+    seen.extend(run_without(&mut rs, &[0]));
+    let mut t = 1;
+    loop {
+        for r in &mut rs[1..] {
+            r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[0]));
+        if rs[1..].iter().all(|r| r.next_deadline().is_none()) {
+            break;
+        }
+        assert!(t < 400, "still busy: {:?}", rs.iter().map(Replica::commit_index).collect::<Vec<_>>());
+        t += 1;
+    }
+    assert!(seen.iter().any(|(i, a)| *i == 3 && matches!(a, Action::Reconfigured { epoch: 1, .. })));
+    let from = seen
+        .iter()
+        .find_map(|(_, a)| match a {
+            Action::Reconfigured { epoch: 1, from, .. } => Some(from.0),
+            _ => None,
+        })
+        .unwrap();
+    assert!(rs[1..].iter().all(|r| r.commit_index() >= from), "the window was filled without the leader");
+}
+
+#[test]
+fn a_joiner_in_a_cluster_that_never_changed_adds_nothing() {
+    // Replica 3 runs with the configuration but is no member: with no change ever decided it
+    // was removed from nothing, so it must not retire (or propose to) anything.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let mut seen = run_without(&mut rs, &[]);
+    for t in 1..20 {
+        for r in &mut rs {
+            r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[]));
+    }
+    assert!(rs.iter().all(|r| r.commit_index() == 0 && r.next_deadline().is_none()));
+    assert!(!seen.iter().any(|(_, a)| matches!(a, Action::Retired { .. })));
+}
+
+#[test]
+fn a_restarted_single_member_goes_quiet() {
+    // Nobody to ask where the log is: no catch-up timer either.
+    let mut durable = Vec::new();
+    let mut r = Replica::new(config(&[0]), [], T0).unwrap();
+    settle(&mut r, &mut durable);
+    let mut r = Replica::new(config(&[0]), durable.clone(), T0).unwrap();
+    settle(&mut r, &mut durable);
+    assert_eq!(r.next_deadline(), None);
 }
 
 #[test]

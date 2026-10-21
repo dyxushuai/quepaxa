@@ -31,7 +31,9 @@ to `s + 63` keep the old members and slot `s + 64` onward use the new ones. The 
 the bound on how far ahead any replica drives slots, so every replica knows the members of
 every slot it touches from the decided log alone — no joint quorums, no second protocol.
 Each replica reports the change with [`Reconfigured { epoch, from, members }`](crate::Action::Reconfigured)
-in log order.
+in log order. If nothing is written meanwhile, slots `s + 1` to `s + 63` are filled with
+empty batches like stalled slots (the leader first, the others if it is down), so a change
+takes effect without traffic.
 
 - **One change at a time.** Proposing while a change has not taken effect returns
   [`ReconfigurationPending`](crate::Error::ReconfigurationPending). Of two changes proposed
