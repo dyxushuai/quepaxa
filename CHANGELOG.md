@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `kv-tokio` (reference runtime): log frames and snapshots carry checksums. On restart only
+  a torn tail is truncated; a damaged length field or record before it stops the restart
+  instead of silently cutting acknowledged records. The data directory and its parents are
+  synced on every start. The on-disk format changed: start from an empty data directory.
 - `quepaxa`: a decided membership change takes effect without traffic: while it is
   pending, the slots before it are taken over like stalled slots (the leader first, after
   a hedge delay; the others if it is down) and filled with empty batches. Before, in a quiet

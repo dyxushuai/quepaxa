@@ -18,7 +18,10 @@ store and hand back — and is safe as long as your storage keeps four promises.
    last record. Drop it (records are self-checking: a CRC-32C covers each), or pass it on
    and let [`Replica::new`](crate::Replica::new) report
    [`CorruptRecord`](crate::Error::CorruptRecord) — never hand back bytes that were not a
-   complete record.
+   complete record. Truncate only what a crash can leave behind: a length field or a record
+   that fails its check *before* the tail is corruption, and cutting the log there would
+   silently drop acknowledged records. Checksum your own framing, and refuse to start on
+   corruption.
 
 If storage fails, report [`Input::StorageFailed`](crate::Input::StorageFailed). The replica
 **fences** itself: it stops sending and answering, reports every outstanding proposal as
