@@ -544,3 +544,28 @@ fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
     assert!(out.iter().any(|a| matches!(a, Action::Reconfigured { epoch: 2, .. })), "{out:?}");
     assert!(!out.iter().any(|a| matches!(a, Action::Retired { .. })), "retired although added back: {out:?}");
 }
+
+#[test]
+fn a_change_learned_from_others_blocks_another_until_it_takes_effect() {
+    let mut r = replica();
+    let mut out = Vec::new();
+    let order = crate::schedule::encode_order(&[NodeId(1), NodeId(2), NodeId(3)]);
+    let change = Item {
+        entry: Entry { origin: NodeId(1), incarnation: 1, id: ProposalId(0), payload: order },
+        kind: Kind::Reconfigure,
+    };
+    let decided = Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(1), incarnation: 1, seq: 0 },
+        value: batch::encode(&[change]),
+    };
+    let env =
+        Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 0 };
+    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![decided] };
+    r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.schedule.epoch(), (1, 64));
+    let again =
+        r.propose_reconfiguration(Timestamp(1), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], Vec::new());
+    assert_eq!(again, Err(Error::ReconfigurationPending));
+}

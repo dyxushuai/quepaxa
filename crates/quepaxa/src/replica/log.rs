@@ -129,6 +129,13 @@ impl Replica {
         if ahead {
             self.seen.entry(Slot(self.committed)).or_insert(self.now);
         }
+        // A decided membership change not yet in force needs the slots before it: its leader
+        // fills them (see `drive`); if that leader is down, the others take them over, a
+        // window at a time.
+        let from = self.schedule.epoch().1;
+        for slot in self.committed..from.min(self.committed + self.window()) {
+            self.seen.entry(Slot(slot)).or_insert(self.now);
+        }
     }
 
     pub(super) fn emit_commits(&mut self) {

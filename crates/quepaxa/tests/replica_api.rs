@@ -798,6 +798,37 @@ fn a_change_takes_effect_and_the_cluster_goes_quiet_without_writes() {
 }
 
 #[test]
+fn a_change_takes_effect_without_writes_while_the_leader_is_down() {
+    // The leader (0) is down when replica 1 proposes replacing it: the others fill the
+    // window themselves, the change takes effect, and they go quiet.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let mut seen = run_without(&mut rs, &[]);
+    rs[1].propose_reconfiguration(T0, vec![NodeId(1), NodeId(2), NodeId(3)], vec![]).unwrap();
+    seen.extend(run_without(&mut rs, &[0]));
+    let mut t = 1;
+    loop {
+        for r in &mut rs[1..] {
+            r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[0]));
+        if rs[1..].iter().all(|r| r.next_deadline().is_none()) {
+            break;
+        }
+        assert!(t < 400, "still busy: {:?}", rs.iter().map(Replica::commit_index).collect::<Vec<_>>());
+        t += 1;
+    }
+    assert!(seen.iter().any(|(i, a)| *i == 3 && matches!(a, Action::Reconfigured { epoch: 1, .. })));
+    let from = seen
+        .iter()
+        .find_map(|(_, a)| match a {
+            Action::Reconfigured { epoch: 1, from, .. } => Some(from.0),
+            _ => None,
+        })
+        .unwrap();
+    assert!(rs[1..].iter().all(|r| r.commit_index() >= from), "the window was filled without the leader");
+}
+
+#[test]
 fn a_restarted_single_member_goes_quiet() {
     // Nobody to ask where the log is: no catch-up timer either.
     let mut durable = Vec::new();
