@@ -245,7 +245,14 @@ async fn client(s: TcpStream, events: SyncSender<Ev>) {
         if line.len() > MAX_LINE && line.last() != Some(&b'\n') {
             let _ = reply.send(format!("ERR line longer than {MAX_LINE} bytes"));
             let _ = tx.send(rx).await;
-            break;
+            drop(tx);
+            // The writer closes its side once the error is out; the rest of the input is
+            // read and dropped meanwhile, as closing with unread input would reset the
+            // connection (macOS, Windows) and could discard the error.
+            let mut sink = tokio::io::sink();
+            let drain = tokio::io::copy(&mut r, &mut sink);
+            let _ = tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(writer, drain) }).await;
+            return;
         }
         let text = line.strip_suffix(b"\n").map_or(&line[..], |l| l.strip_suffix(b"\r").unwrap_or(l));
         match std::str::from_utf8(text).ok().and_then(parse_cmd) {
@@ -357,9 +364,8 @@ mod tests {
     async fn an_overlong_line_is_refused() {
         let (s, _events) = connect().await;
         let (r, mut w) = s.into_split();
-        // Exactly what the server reads before giving up: closing with unread input would
-        // reset the connection (macOS, Windows) and could discard the reply.
-        tokio::spawn(async move { w.write_all(&vec![b'x'; MAX_LINE + 1]).await });
+        // More than the server reads before giving up: it must not reset the connection.
+        tokio::spawn(async move { w.write_all(&vec![b'x'; 2 * MAX_LINE]).await });
         let mut reply = String::new();
         BufReader::new(r).read_to_string(&mut reply).await.unwrap();
         assert_eq!(reply, format!("ERR line longer than {MAX_LINE} bytes\n"), "then the connection closes");

@@ -123,6 +123,9 @@ impl Written {
 /// the event loop waits for the disk: a slow disk then backs up the event queue, and through
 /// it peers and clients, instead of piling records up in memory.
 const MAX_UNWRITTEN: u64 = 64 << 20;
+/// Pending record bytes past which a group of events is flushed early, so one hand-off
+/// cannot overshoot `MAX_UNWRITTEN` by much.
+const FLUSH_EARLY: u64 = MAX_UNWRITTEN / 8;
 
 struct PendingPersist {
     id: PersistId,
@@ -175,6 +178,8 @@ pub struct Node {
     writes: HashMap<ProposalId, oneshot::Sender<String>>,
     reads: HashMap<ProposalId, (String, oneshot::Sender<String>)>,
     persists: Vec<PendingPersist>,
+    /// Record bytes in `persists`.
+    pending: u64,
 }
 
 /// How many queued events are handled before their persists are flushed together.
@@ -208,6 +213,7 @@ impl Node {
             writes: HashMap::new(),
             reads: HashMap::new(),
             persists: Vec::new(),
+            pending: 0,
         }
     }
 
@@ -267,6 +273,9 @@ impl Node {
                     self.on_event(ev);
                     for ev in rx.try_iter().take(GROUP) {
                         self.on_event(ev);
+                        if self.pending > FLUSH_EARLY {
+                            self.flush();
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -325,6 +334,7 @@ impl Node {
             if !ok {
                 eprintln!("kv-tokio: storage failed; fencing this replica");
                 self.persists.clear();
+                self.pending = 0;
                 self.jobs = None;
                 let _ = self.replica.handle(now, Input::StorageFailed(id));
                 self.drain();
@@ -406,6 +416,7 @@ impl Node {
             eprintln!("kv-tokio: cannot save the received snapshot ({e}); fencing this replica");
             if let Some(last) = self.persists.last().map(|p| p.id) {
                 self.persists.clear();
+                self.pending = 0;
                 let _ = self.replica.handle(now, Input::StorageFailed(last));
             }
             return;
@@ -421,6 +432,7 @@ impl Node {
             match a {
                 Action::Send(o) => self.send(o.to.0, PeerFrame::Msg(o.bytes)),
                 Action::Persist { id, records, then, replace } => {
+                    self.pending += records.iter().map(|r| r.len() as u64).sum::<u64>();
                     self.persists.push(PendingPersist { id, records, then, replace })
                 }
                 Action::Commit { slot, entries } => {
@@ -483,8 +495,9 @@ impl Node {
             return;
         }
         let batch = std::mem::take(&mut self.persists);
+        let bytes = std::mem::take(&mut self.pending);
         if let Some(jobs) = &self.jobs {
-            self.handed += batch_bytes(&batch);
+            self.handed += bytes;
             let _ = jobs.send(batch);
             self.written.wait_for(self.handed.saturating_sub(MAX_UNWRITTEN));
         }
