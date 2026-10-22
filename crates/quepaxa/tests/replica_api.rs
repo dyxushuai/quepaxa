@@ -904,6 +904,75 @@ fn a_restarted_replica_keeps_asking_until_a_majority_answers() {
 }
 
 #[test]
+fn a_restarted_replica_counts_answers_against_the_membership_it_catches_up_into() {
+    // Replica 0 is down while {0,1,2} becomes {0,3,4}, and replica 1 misses what the new
+    // epoch decides next. After its restart replica 0 reaches only 1, whose page takes it
+    // into the new epoch: 1 and itself are a majority of the old members but not of the
+    // new ones, so it must keep asking (now 3 and 4 too).
+    let mut rs: Vec<Replica> = (0..5).map(|i| ordered(i, &[])).collect();
+    let mut disks = vec![Vec::new(); 5];
+    let run = |rs: &mut Vec<Replica>, disks: &mut Vec<Vec<Bytes>>, down: &[usize], t: u64| {
+        let now = Timestamp(t * 100_000_000);
+        let (mut queue, mut timed) = (std::collections::VecDeque::new(), false);
+        loop {
+            for (i, r) in rs.iter_mut().enumerate() {
+                for a in drain(r) {
+                    if let Action::Send(o) = a {
+                        queue.push_back((o.to.0 as usize, Input::Message(o.bytes)));
+                    } else if let Action::Persist { id, records, then, replace } = a {
+                        if replace {
+                            disks[i].clear();
+                        }
+                        disks[i].extend(records);
+                        queue.extend(then.into_iter().map(|o| (o.to.0 as usize, Input::Message(o.bytes))));
+                        queue.push_back((i, Input::Persisted(id)));
+                    }
+                }
+            }
+            let Some((to, input)) = queue.pop_front() else {
+                // Settled: fire the timers once, then settle again.
+                if timed {
+                    return;
+                }
+                timed = true;
+                for (i, r) in rs.iter_mut().enumerate() {
+                    if !down.contains(&i) {
+                        r.handle_timeout(now).unwrap();
+                    }
+                }
+                continue;
+            };
+            if down.contains(&to) && !matches!(input, Input::Persisted(_)) {
+                continue;
+            }
+            rs[to].handle(now, input).unwrap();
+        }
+    };
+    run(&mut rs, &mut disks, &[], 0);
+    rs[1].propose_reconfiguration(T0, vec![NodeId(0), NodeId(3), NodeId(4)], vec![]).unwrap();
+    for t in 1..200 {
+        run(&mut rs, &mut disks, &[0], t);
+    }
+    let boundary = rs[1].commit_index();
+    assert!(boundary > 0 && rs[0].commit_index() == 0);
+    rs[3].propose(T0, Bytes::from_static(b"new epoch")).unwrap();
+    for t in 200..300 {
+        run(&mut rs, &mut disks, &[0, 1, 2], t);
+    }
+    let decided = rs[3].commit_index();
+    assert!(decided > boundary && rs[1].commit_index() == boundary, "1 missed the new epoch");
+    let mut cfg = config(&[0, 1, 2]);
+    (cfg.id, cfg.seed) = (NodeId(0), [9; 32]);
+    rs[0] = Replica::new(cfg, disks[0].clone(), T0).unwrap();
+    run(&mut rs, &mut disks, &[2, 3, 4], 300);
+    assert_eq!(rs[0].commit_index(), boundary, "replica 1 took it into the new epoch");
+    for t in 301..400 {
+        run(&mut rs, &mut disks, &[], t);
+    }
+    assert_eq!(rs[0].commit_index(), decided, "it kept asking until the new members answered");
+}
+
+#[test]
 fn a_restarted_single_member_goes_quiet() {
     // Nobody to ask where the log is: no catch-up timer either.
     let mut durable = Vec::new();

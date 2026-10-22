@@ -610,17 +610,25 @@ impl Replica {
         if let Body::Entries { .. } = msg.body {
             if self.startup_probe.is_some() {
                 self.probe_answers.insert(from);
-                let members = self.schedule.members(Slot(self.committed));
-                let answered =
-                    members.iter().filter(|m| **m == self.me || self.probe_answers.contains(m)).count();
-                if answered > members.len() / 2 {
-                    self.startup_probe = None;
-                    self.probe_answers.clear();
-                }
             }
             self.note_progress(from, msg.env.commit_index);
         }
         self.inbox.push_back((from, msg.body));
+    }
+
+    /// Ends the startup probe once a majority of the members at the decided prefix, counting
+    /// this replica, answered it. Checked after a page is applied: a page that crosses into a
+    /// new epoch must be answered by its members, not the old ones.
+    fn check_probe_answers(&mut self) {
+        if self.startup_probe.is_none() {
+            return;
+        }
+        let members = self.schedule.members(Slot(self.committed));
+        let answered = members.iter().filter(|m| **m == self.me || self.probe_answers.contains(m)).count();
+        if answered > members.len() / 2 {
+            self.startup_probe = None;
+            self.probe_answers.clear();
+        }
     }
 
     /// Whether a bulk catch-up request may be (re)sent now.
@@ -629,7 +637,7 @@ impl Replica {
     }
 
     /// Asks every known replica where the log is (again on the retransmit timer, until a
-    /// catch-up reply arrives).
+    /// majority of the members answered; see `check_probe_answers`).
     pub(super) fn probe_peers(&mut self) {
         let peers: alloc::collections::BTreeSet<NodeId> = self
             .cfg
@@ -670,6 +678,7 @@ impl Replica {
                             let Some(slot) = first.0.checked_add(i as u64) else { break };
                             self.learn(Slot(slot), p, false);
                         }
+                        self.check_probe_answers();
                         // A late or duplicate page from another peer is still useful, but only
                         // the active request's answer moves the catch-up along.
                         if self.catch_up.is_some_and(|(peer, _)| peer == from) {

@@ -16,8 +16,9 @@ All notable changes to this project are documented here. The project follows
 - `quepaxa`: a restarted single-member cluster has no catch-up timer (it had one forever,
   with nobody to ask).
 - `quepaxa`: after a restart a replica keeps asking where the log is until a majority of
-  the members answered; one answer from a peer as far behind as itself used to end it,
-  and in a quiet cluster it then never caught up.
+  the members answered (the members as of what it has learned, so a page that takes it
+  into a new epoch needs that epoch's members); one answer from a peer as far behind as
+  itself used to end it, and in a quiet cluster it then never caught up.
 - `quepaxa`: a snapshot covering a local batch that was decided but not yet applied
   releases it (it stayed in memory forever).
 - Guide (snapshots): restoring after a crash applies only the re-emitted slots after the

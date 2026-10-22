@@ -53,8 +53,8 @@ takes effect without traffic.
   when the barrier commits and no change decided before it has added the replica back.
   Only a change decided after that can still add it back: whoever proposes one keeps the
   replica running (or restarts it). A replica that was down for its whole removal learns
-  of it when it restarts (it asks every known replica where the log is, until one
-  answers); one that kept running but was cut off learns only when it hears from a
+  of it when it restarts (it asks every known replica where the log is, until a
+  majority of the members it then knows of have answered); one that kept running but was cut off learns only when it hears from a
   member, so restart it.
 - **Retiring a replica that cannot report it.** What `Retired { epoch }` waits for —
   a majority of that epoch's members durably holding the slots before it — is the same
