@@ -9,6 +9,11 @@ All notable changes to this project are documented here. The project follows
   a torn tail is truncated; a damaged length field or record before it stops the restart
   instead of silently cutting acknowledged records. The data directory and its parents are
   synced on every start. The on-disk format changed: start from an empty data directory.
+- `kv-tokio` (reference runtime): bounded resources under misbehaving inputs. A client
+  connection holds about 1024 unanswered requests and 1 MiB per line; a disk that falls
+  more than 64 MiB behind stalls the event loop instead of buffering; a replica id listed
+  twice in `--members`/`--peers` is rejected; peer reconnects back off up to 5 s; `kv-bench`
+  no longer waits forever on a stalled server.
 - `quepaxa`: a decided membership change takes effect without traffic: while it is
   pending, the slots before it are taken over like stalled slots (the leader first, after
   a hedge delay; the others if it is down) and filled with empty batches. Before, in a quiet

@@ -59,8 +59,7 @@ struct Args {
     leader_order: Vec<NodeId>,
 }
 
-fn parse_args() -> Result<Args, String> {
-    let mut it = std::env::args().skip(1);
+fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
     let (mut leader_order, mut peers) = (Vec::new(), Vec::new());
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
@@ -91,6 +90,11 @@ fn parse_args() -> Result<Args, String> {
             }
             other => return Err(format!("unknown flag {other}")),
         }
+    }
+    let mut ids: Vec<u32> = members.iter().chain(&peers).map(|(i, _)| *i).collect();
+    ids.sort_unstable();
+    if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
+        return Err(format!("replica {} is listed twice in --members/--peers", w[0]));
     }
     Ok(Args {
         id: id.ok_or("--id is required")?,
@@ -139,29 +143,30 @@ async fn write_frame(s: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> std::io
     s.write_all(frame).await
 }
 
-/// Keeps a connection to `peer`, reconnecting forever; lost frames are retransmitted by
-/// the protocol.
+/// Keeps a connection to `peer`, reconnecting forever with exponential backoff (reset once
+/// a connection carries a frame); lost frames are retransmitted by the protocol.
 async fn outbound(me: u32, addr: SocketAddr, mut rx: tmpsc::Receiver<Vec<u8>>) {
+    const MIN: Duration = Duration::from_millis(100);
+    let mut backoff = MIN;
     loop {
-        let Ok(s) = TcpStream::connect(addr).await else {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            continue;
-        };
-        let _ = s.set_nodelay(true);
-        // Frames queued while the previous batch was written go out in one syscall.
-        let mut w = BufWriter::with_capacity(64 << 10, s);
-        if write_frame(&mut w, &me.to_le_bytes()).await.is_err() || w.flush().await.is_err() {
-            continue;
-        }
-        while let Some(frame) = rx.recv().await {
-            let mut ok = write_frame(&mut w, &frame).await.is_ok();
-            while ok && let Ok(frame) = rx.try_recv() {
-                ok = write_frame(&mut w, &frame).await.is_ok();
-            }
-            if !ok || w.flush().await.is_err() {
-                break;
+        if let Ok(s) = TcpStream::connect(addr).await {
+            let _ = s.set_nodelay(true);
+            // Frames queued while the previous batch was written go out in one syscall.
+            let mut w = BufWriter::with_capacity(64 << 10, s);
+            let hello = write_frame(&mut w, &me.to_le_bytes()).await.is_ok() && w.flush().await.is_ok();
+            while hello && let Some(frame) = rx.recv().await {
+                let mut ok = write_frame(&mut w, &frame).await.is_ok();
+                while ok && let Ok(frame) = rx.try_recv() {
+                    ok = write_frame(&mut w, &frame).await.is_ok();
+                }
+                if !ok || w.flush().await.is_err() {
+                    break;
+                }
+                backoff = MIN;
             }
         }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(5));
     }
 }
 
@@ -195,12 +200,19 @@ fn parse_cmd(line: &str) -> Option<Cmd> {
     }
 }
 
+/// Longest request line; a longer one is answered with an error and closes the connection.
+const MAX_LINE: usize = 1 << 20;
+/// Requests one connection may have queued for replies (plus the one being written and the
+/// one being read); past that, its requests are no longer read (TCP pushes back on the
+/// client) until replies drain.
+const MAX_PIPELINE: usize = 1024;
+
 /// Pipelined client connection: requests go to the node as they arrive, replies are
 /// written in request order.
 async fn client(s: TcpStream, events: SyncSender<Ev>) {
     let _ = s.set_nodelay(true);
     let (r, w) = s.into_split();
-    let (tx, mut replies) = tmpsc::unbounded_channel::<oneshot::Receiver<String>>();
+    let (tx, mut replies) = tmpsc::channel::<oneshot::Receiver<String>>(MAX_PIPELINE);
     let writer = tokio::spawn(async move {
         // Replies already available are written together; the buffer is flushed before
         // waiting on one that is not.
@@ -222,10 +234,28 @@ async fn client(s: TcpStream, events: SyncSender<Ev>) {
             }
         }
     });
-    let mut lines = BufReader::new(r).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    let mut r = BufReader::new(r);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if !matches!((&mut r).take(MAX_LINE as u64 + 1).read_until(b'\n', &mut line).await, Ok(1..)) {
+            break;
+        }
         let (reply, rx) = oneshot::channel();
-        match parse_cmd(&line) {
+        if line.len() > MAX_LINE && line.last() != Some(&b'\n') {
+            let _ = reply.send(format!("ERR line longer than {MAX_LINE} bytes"));
+            let _ = tx.send(rx).await;
+            drop(tx);
+            // The writer closes its side once the error is out; the rest of the input is
+            // read and dropped meanwhile, as closing with unread input would reset the
+            // connection (macOS, Windows) and could discard the error.
+            let mut sink = tokio::io::sink();
+            let drain = tokio::io::copy(&mut r, &mut sink);
+            let _ = tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(writer, drain) }).await;
+            return;
+        }
+        let text = line.strip_suffix(b"\n").map_or(&line[..], |l| l.strip_suffix(b"\r").unwrap_or(l));
+        match std::str::from_utf8(text).ok().and_then(parse_cmd) {
             Some(cmd) => {
                 if !push(&events, Ev::Client { cmd, reply }).await {
                     break;
@@ -238,7 +268,7 @@ async fn client(s: TcpStream, events: SyncSender<Ev>) {
                 );
             }
         }
-        if tx.send(rx).is_err() {
+        if tx.send(rx).await.is_err() {
             break;
         }
     }
@@ -254,7 +284,7 @@ fn seed() -> [u8; 32] {
 
 #[tokio::main]
 async fn main() {
-    let args = match parse_args() {
+    let args = match parse_args(std::env::args().skip(1)) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("kv-tokio: {e}");
@@ -300,5 +330,62 @@ async fn main() {
     });
     while let Ok((s, _)) = client_listener.accept().await {
         tokio::spawn(client(s, events.clone()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(line: &str) -> Result<Args, String> {
+        parse_args(line.split_whitespace().map(str::to_owned))
+    }
+
+    #[test]
+    fn a_replica_listed_twice_is_rejected() {
+        let base = "--id 0 --client 127.0.0.1:1 --data d --members 0=127.0.0.1:2,1=127.0.0.1:3";
+        assert!(args(base).is_ok());
+        assert!(args(&format!("{base} --peers 2=127.0.0.1:4")).is_ok());
+        let twice = args(&format!("{base} --peers 1=127.0.0.1:4")).err().unwrap();
+        assert!(twice.contains("replica 1 is listed twice"), "{twice}");
+        assert!(args("--id 0 --client 127.0.0.1:1 --data d --members 0=127.0.0.1:2,0=127.0.0.1:3").is_err());
+    }
+
+    /// A client connection served by `client`, with the node side of its events.
+    async fn connect() -> (TcpStream, mpsc::Receiver<Ev>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (events, rx) = mpsc::sync_channel(4 * MAX_PIPELINE);
+        tokio::spawn(async move { client(listener.accept().await.unwrap().0, events).await });
+        (TcpStream::connect(addr).await.unwrap(), rx)
+    }
+
+    #[tokio::test]
+    async fn an_overlong_line_is_refused() {
+        let (s, _events) = connect().await;
+        let (r, mut w) = s.into_split();
+        // More than the server reads before giving up: it must not reset the connection.
+        tokio::spawn(async move { w.write_all(&vec![b'x'; 2 * MAX_LINE]).await });
+        let mut reply = String::new();
+        BufReader::new(r).read_to_string(&mut reply).await.unwrap();
+        assert_eq!(reply, format!("ERR line longer than {MAX_LINE} bytes\n"), "then the connection closes");
+    }
+
+    #[tokio::test]
+    async fn a_client_that_never_reads_cannot_queue_unbounded_requests() {
+        let (s, events) = connect().await;
+        let (_r, mut w) = s.into_split();
+        // The node never answers: every request stays outstanding.
+        tokio::spawn(async move {
+            for _ in 0..3 * MAX_PIPELINE {
+                if w.write_all(b"GET k\n").await.is_err() {
+                    return;
+                }
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let held: Vec<Ev> = events.try_iter().collect();
+        assert!(held.len() <= MAX_PIPELINE + 2, "{} requests taken in", held.len());
+        assert!(held.len() >= MAX_PIPELINE, "{} requests taken in", held.len());
     }
 }

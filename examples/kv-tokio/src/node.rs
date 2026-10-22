@@ -3,7 +3,8 @@
 //! fsync (group commit); their gated messages leave only after it.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -73,13 +74,58 @@ pub enum Ev {
         bytes: Bytes,
         saved: Result<bool, String>,
     },
-    /// The writer thread made persists up to `id` durable (or failed to).
-    Persisted {
-        id: PersistId,
-        then: Vec<quepaxa::Outbound>,
-        ok: bool,
-    },
+    /// The writer thread has reports in `Written`.
+    Written,
 }
+
+/// The writer thread made persists up to `id` durable (or failed to).
+struct Report {
+    id: PersistId,
+    then: Vec<quepaxa::Outbound>,
+    ok: bool,
+}
+
+/// What the writer thread has done, shared with the event loop. Reports pass here rather
+/// than through the event queue so the writer never blocks: the event loop may be waiting
+/// for it (see `MAX_UNWRITTEN`) and so not making room in that queue.
+#[derive(Default)]
+struct Written {
+    state: Mutex<(u64, Vec<Report>)>,
+    advanced: Condvar,
+}
+
+impl Written {
+    fn lock(&self) -> std::sync::MutexGuard<'_, (u64, Vec<Report>)> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `bytes` of records are now durable (or will never be written), with `report`.
+    fn advance(&self, bytes: u64, report: Option<Report>) {
+        let mut state = self.lock();
+        state.0 = bytes;
+        state.1.extend(report);
+        self.advanced.notify_all();
+    }
+
+    fn wait_for(&self, bytes: u64) {
+        let mut state = self.lock();
+        while state.0 < bytes {
+            state = self.advanced.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    fn reports(&self) -> Vec<Report> {
+        std::mem::take(&mut self.lock().1)
+    }
+}
+
+/// Record bytes that may be handed to the writer thread and not yet be durable. Past this,
+/// the event loop waits for the disk: a slow disk then backs up the event queue, and through
+/// it peers and clients, instead of piling records up in memory.
+const MAX_UNWRITTEN: u64 = 64 << 20;
+/// Pending record bytes past which a group of events is flushed early, so one hand-off
+/// cannot overshoot `MAX_UNWRITTEN` by much.
+const FLUSH_EARLY: u64 = MAX_UNWRITTEN / 8;
 
 struct PendingPersist {
     id: PersistId,
@@ -111,6 +157,9 @@ pub struct Node {
     snapshots: SnapshotWriter,
     /// Persists for the writer thread, in order.
     jobs: Option<std::sync::mpsc::Sender<Vec<PendingPersist>>>,
+    /// Record bytes handed to the writer thread, and how many of them it has written.
+    handed: u64,
+    written: Arc<Written>,
     kv: Kv,
     /// Next slot to apply.
     applied: u64,
@@ -129,6 +178,8 @@ pub struct Node {
     writes: HashMap<ProposalId, oneshot::Sender<String>>,
     reads: HashMap<ProposalId, (String, oneshot::Sender<String>)>,
     persists: Vec<PendingPersist>,
+    /// Record bytes in `persists`.
+    pending: u64,
 }
 
 /// How many queued events are handled before their persists are flushed together.
@@ -147,6 +198,8 @@ impl Node {
             snapshots: disk.snapshots(),
             disk: Some(disk),
             jobs: None,
+            handed: 0,
+            written: Arc::default(),
             kv: Kv::default(),
             applied: 0,
             snapshot_every: every,
@@ -160,6 +213,7 @@ impl Node {
             writes: HashMap::new(),
             reads: HashMap::new(),
             persists: Vec::new(),
+            pending: 0,
         }
     }
 
@@ -192,8 +246,12 @@ impl Node {
     pub fn run(mut self, rx: Receiver<Ev>) {
         if let Some(disk) = self.disk.take() {
             let (jobs, queue) = std::sync::mpsc::channel();
-            let events = self.events.clone();
-            std::thread::spawn(move || write_persists(disk, &queue, &events));
+            let (events, written) = (self.events.clone(), self.written.clone());
+            std::thread::spawn(move || {
+                write_persists(disk, &queue, &events, &written);
+                // Nothing more will be written: the event loop must not wait for it.
+                written.advance(u64::MAX, None);
+            });
             self.jobs = Some(jobs);
         }
         self.drain();
@@ -215,11 +273,15 @@ impl Node {
                     self.on_event(ev);
                     for ev in rx.try_iter().take(GROUP) {
                         self.on_event(ev);
+                        if self.pending > FLUSH_EARLY {
+                            self.flush();
+                        }
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
+            self.on_written();
             self.flush();
             self.maybe_snapshot();
         }
@@ -242,19 +304,7 @@ impl Node {
                 }
             }
             Ev::Client { cmd, reply } => self.on_client(now, cmd, reply),
-            Ev::Persisted { id, then, ok } => {
-                if !ok {
-                    eprintln!("kv-tokio: storage failed; fencing this replica");
-                    self.persists.clear();
-                    self.jobs = None;
-                    let _ = self.replica.handle(now, Input::StorageFailed(id));
-                } else {
-                    for o in then {
-                        self.send(o.to.0, PeerFrame::Msg(o.bytes));
-                    }
-                    let _ = self.replica.handle(now, Input::Persisted(id));
-                }
-            }
+            Ev::Written => {} // taken by `on_written`
             Ev::SnapshotSaved { through, core, bytes, saved } => {
                 self.snapshotting = false;
                 match saved {
@@ -272,6 +322,30 @@ impl Node {
             }
         }
         self.drain();
+    }
+
+    /// Takes the writer thread's reports: gated messages leave, and the replica hears of
+    /// its persists. Checked on every turn, since a wake-up may not fit in the event queue.
+    fn on_written(&mut self) {
+        // Each report is drained before the next: the replica refuses input while actions
+        // are pending.
+        for Report { id, then, ok } in self.written.reports() {
+            let now = self.now();
+            if !ok {
+                eprintln!("kv-tokio: storage failed; fencing this replica");
+                self.persists.clear();
+                self.pending = 0;
+                self.jobs = None;
+                let _ = self.replica.handle(now, Input::StorageFailed(id));
+                self.drain();
+                break;
+            }
+            for o in then {
+                self.send(o.to.0, PeerFrame::Msg(o.bytes));
+            }
+            let _ = self.replica.handle(now, Input::Persisted(id));
+            self.drain();
+        }
     }
 
     fn on_client(&mut self, now: Timestamp, cmd: Cmd, reply: oneshot::Sender<String>) {
@@ -342,6 +416,7 @@ impl Node {
             eprintln!("kv-tokio: cannot save the received snapshot ({e}); fencing this replica");
             if let Some(last) = self.persists.last().map(|p| p.id) {
                 self.persists.clear();
+                self.pending = 0;
                 let _ = self.replica.handle(now, Input::StorageFailed(last));
             }
             return;
@@ -357,6 +432,7 @@ impl Node {
             match a {
                 Action::Send(o) => self.send(o.to.0, PeerFrame::Msg(o.bytes)),
                 Action::Persist { id, records, then, replace } => {
+                    self.pending += records.iter().map(|r| r.len() as u64).sum::<u64>();
                     self.persists.push(PendingPersist { id, records, then, replace })
                 }
                 Action::Commit { slot, entries } => {
@@ -412,15 +488,18 @@ impl Node {
     }
 
     /// Hands pending persists to the writer thread; their messages leave, and the replica
-    /// hears of them, once they are durable (`Ev::Persisted`). The loop keeps running
+    /// hears of them, once they are durable (`on_written`). The loop keeps running
     /// meanwhile, so persists issued during one fsync share the next (group commit).
     fn flush(&mut self) {
         if self.persists.is_empty() {
             return;
         }
         let batch = std::mem::take(&mut self.persists);
+        let bytes = std::mem::take(&mut self.pending);
         if let Some(jobs) = &self.jobs {
+            self.handed += bytes;
             let _ = jobs.send(batch);
+            self.written.wait_for(self.handed.saturating_sub(MAX_UNWRITTEN));
         }
     }
 
@@ -454,17 +533,24 @@ impl Node {
     }
 }
 
+fn batch_bytes(batch: &[PendingPersist]) -> u64 {
+    batch.iter().flat_map(|p| &p.records).map(|r| r.len() as u64).sum()
+}
+
 /// The writer thread: makes persists durable in order, each group with one fsync, and
 /// reports them; after a failure it writes nothing more (later records assume it).
 fn write_persists(
     mut disk: Disk,
     queue: &std::sync::mpsc::Receiver<Vec<PendingPersist>>,
     events: &SyncSender<Ev>,
+    written: &Written,
 ) {
+    let mut total = 0;
     while let Ok(mut batch) = queue.recv() {
         while let Ok(more) = queue.try_recv() {
             batch.extend(more);
         }
+        total += batch_bytes(&batch);
         let mut appends: Vec<Bytes> = Vec::new();
         let (mut last, mut then, mut ok) = (None, Vec::new(), true);
         for p in batch {
@@ -478,8 +564,14 @@ fn write_persists(
             last = Some(p.id);
         }
         ok = ok && (appends.is_empty() || disk.append(&appends).is_ok());
-        let Some(id) = last else { continue };
-        if events.send(Ev::Persisted { id, then, ok }).is_err() || !ok {
+        let Some(id) = last else {
+            written.advance(total, None);
+            continue;
+        };
+        written.advance(total, Some(Report { id, then, ok }));
+        // A full queue needs no wake-up: the event loop has events to handle and takes
+        // the reports with them.
+        if matches!(events.try_send(Ev::Written), Err(TrySendError::Disconnected(_))) || !ok {
             return;
         }
     }
@@ -488,6 +580,56 @@ fn write_persists(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single-member node whose persists are reported by hand (no writer thread).
+    fn node(name: &str) -> Node {
+        let dir = std::env::temp_dir().join(format!("kv-tokio-node-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (disk, records) = Disk::open(&dir).unwrap();
+        let cfg = quepaxa::Config::new([1; 16], NodeId(0), vec![NodeId(0)], [2; 32]);
+        let replica = Replica::new(cfg, records, Timestamp(0)).unwrap();
+        let (events, _) = std::sync::mpsc::sync_channel(16);
+        let mut n = Node::new(replica, disk, HashMap::new(), u64::MAX, events);
+        n.drain();
+        n
+    }
+
+    #[test]
+    fn every_report_reaches_the_replica_even_when_several_arrive_together() {
+        let mut n = node("reports");
+        let (reply, _) = oneshot::channel();
+        n.on_client(n.now(), Cmd::Put("k".to_owned(), "v".to_owned()), reply);
+        n.drain();
+        let id = n.persists.last().expect("the proposal persists").id;
+        // Two reports taken in one turn: the first produces actions, the second is a failure.
+        let report = |ok| Report { id, then: Vec::new(), ok };
+        n.written.advance(0, Some(report(true)));
+        n.written.advance(0, Some(report(false)));
+        n.on_written();
+        assert_eq!(
+            n.replica.propose(n.now(), Bytes::from_static(b"x")),
+            Err(quepaxa::Error::Fenced),
+            "the storage failure fenced the replica"
+        );
+    }
+
+    #[test]
+    fn waiting_for_the_disk_ends_once_the_writer_catches_up() {
+        let written = Arc::new(Written::default());
+        let writer = written.clone();
+        let t = std::thread::spawn(move || {
+            for bytes in [10, 20, 30] {
+                std::thread::sleep(Duration::from_millis(5));
+                writer.advance(bytes, None);
+            }
+        });
+        written.wait_for(0);
+        written.wait_for(25);
+        assert!(written.lock().0 >= 25);
+        t.join().unwrap();
+        written.advance(u64::MAX, None);
+        written.wait_for(u64::MAX - 1);
+    }
 
     #[test]
     fn put_encoding_keeps_any_key() {
