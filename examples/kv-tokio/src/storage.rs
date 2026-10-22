@@ -2,9 +2,9 @@
 //! snapshot, both on local disk with fsync.
 //!
 //! Log format: `[len u32][crc32 of len u32][crc32 of record u32][record]` frames, little
-//! endian. On load, a torn tail (a crash mid-append: a frame cut short, or whole sectors
-//! at the end that never reached disk and read back as zeros) is truncated, as any
-//! write-ahead log does.
+//! endian. On load, a torn tail (a crash mid-append: a frame cut short, or a write that
+//! never reached disk and reads back as zeros from where the append or a sector began) is
+//! truncated, as any write-ahead log does.
 //! Anything else that fails a checksum is corruption, and the log is left alone: truncating
 //! there would silently drop records that were acknowledged.
 
@@ -103,6 +103,11 @@ fn u32_at(b: &[u8], at: usize) -> u32 {
 /// The records in `bytes` and the length of the valid prefix holding them; an error if
 /// what follows that prefix is not a torn tail.
 fn read_frames(bytes: &[u8]) -> io::Result<(Vec<Bytes>, usize)> {
+    // A lost write reads back as zeros from where it started (a frame boundary) or from a
+    // sector boundary within it: where the zeros ending the file start, and the first sector
+    // boundary from there.
+    let zero_run = bytes.iter().rposition(|&b| b != 0).map_or(0, |last| last + 1);
+    let zeros = zero_run.next_multiple_of(SECTOR);
     let mut out = Vec::new();
     let mut pos = 0;
     while pos < bytes.len() {
@@ -112,8 +117,9 @@ fn read_frames(bytes: &[u8]) -> io::Result<(Vec<Bytes>, usize)> {
         }
         let corrupt =
             || io::Error::new(io::ErrorKind::InvalidData, format!("records.log is corrupt at byte {pos}"));
+        // A frame that fails its check is torn only if the lost write reaches into it.
         if crc32fast::hash(&rest[..4]) != u32_at(rest, 4) {
-            if rest.iter().all(|&b| b == 0) {
+            if zero_run <= pos || zeros < pos + HEADER {
                 break;
             }
             return Err(corrupt());
@@ -121,10 +127,7 @@ fn read_frames(bytes: &[u8]) -> io::Result<(Vec<Bytes>, usize)> {
         let end = HEADER + u32_at(rest, 0) as usize;
         let Some(record) = rest.get(HEADER..end) else { break };
         if crc32fast::hash(record) != u32_at(rest, 8) {
-            // Torn only if the file ends in a whole zeroed sector (reaching into this record),
-            // not merely because nothing follows the record.
-            let last_sector = (bytes.len() - 1) / SECTOR * SECTOR;
-            if last_sector >= pos + HEADER && bytes[last_sector..].iter().all(|&b| b == 0) {
+            if zeros < pos + end {
                 break;
             }
             return Err(corrupt());
@@ -314,6 +317,31 @@ mod tests {
             assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{name}");
             assert_eq!(fs::read(&path).unwrap(), bytes, "{name}: nothing was truncated");
         }
+    }
+
+    #[test]
+    fn a_torn_sector_may_start_inside_a_frame_header() {
+        // The next frame's header straddles a sector boundary; the sector after it is lost.
+        let dir = two_records("straddle");
+        let filler = Bytes::from(vec![5u8; SECTOR - 6 - frame(&AB).len() - HEADER]);
+        Disk::open(&dir).unwrap().0.append(std::slice::from_ref(&filler)).unwrap();
+        let mut torn = frame(&[Bytes::from(vec![7u8; 600])]);
+        torn[6..].fill(0);
+        append_raw(&dir, &torn);
+        assert_eq!(Disk::open(&dir).unwrap().1, [AB[0].clone(), AB[1].clone(), filler]);
+    }
+
+    #[test]
+    fn a_zeroed_sector_after_a_later_record_does_not_excuse_a_corrupt_one() {
+        let dir = two_records("unrelated");
+        let path = dir.join("records.log");
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[HEADER] ^= 0x40; // the first record's payload
+        bytes.extend(frame(&[Bytes::from(vec![3u8; 600])]));
+        bytes.extend([0; 2 * SECTOR]);
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(Disk::open(&dir).err().expect("corrupt").kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
     }
 
     #[test]
