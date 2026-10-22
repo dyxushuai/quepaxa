@@ -318,21 +318,24 @@ impl Node {
     /// Takes the writer thread's reports: gated messages leave, and the replica hears of
     /// its persists. Checked on every turn, since a wake-up may not fit in the event queue.
     fn on_written(&mut self) {
-        let now = self.now();
+        // Each report is drained before the next: the replica refuses input while actions
+        // are pending.
         for Report { id, then, ok } in self.written.reports() {
+            let now = self.now();
             if !ok {
                 eprintln!("kv-tokio: storage failed; fencing this replica");
                 self.persists.clear();
                 self.jobs = None;
                 let _ = self.replica.handle(now, Input::StorageFailed(id));
+                self.drain();
                 break;
             }
             for o in then {
                 self.send(o.to.0, PeerFrame::Msg(o.bytes));
             }
             let _ = self.replica.handle(now, Input::Persisted(id));
+            self.drain();
         }
-        self.drain();
     }
 
     fn on_client(&mut self, now: Timestamp, cmd: Cmd, reply: oneshot::Sender<String>) {
@@ -564,6 +567,38 @@ fn write_persists(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A single-member node whose persists are reported by hand (no writer thread).
+    fn node(name: &str) -> Node {
+        let dir = std::env::temp_dir().join(format!("kv-tokio-node-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (disk, records) = Disk::open(&dir).unwrap();
+        let cfg = quepaxa::Config::new([1; 16], NodeId(0), vec![NodeId(0)], [2; 32]);
+        let replica = Replica::new(cfg, records, Timestamp(0)).unwrap();
+        let (events, _) = std::sync::mpsc::sync_channel(16);
+        let mut n = Node::new(replica, disk, HashMap::new(), u64::MAX, events);
+        n.drain();
+        n
+    }
+
+    #[test]
+    fn every_report_reaches_the_replica_even_when_several_arrive_together() {
+        let mut n = node("reports");
+        let (reply, _) = oneshot::channel();
+        n.on_client(n.now(), Cmd::Put("k".to_owned(), "v".to_owned()), reply);
+        n.drain();
+        let id = n.persists.last().expect("the proposal persists").id;
+        // Two reports taken in one turn: the first produces actions, the second is a failure.
+        let report = |ok| Report { id, then: Vec::new(), ok };
+        n.written.advance(0, Some(report(true)));
+        n.written.advance(0, Some(report(false)));
+        n.on_written();
+        assert_eq!(
+            n.replica.propose(n.now(), Bytes::from_static(b"x")),
+            Err(quepaxa::Error::Fenced),
+            "the storage failure fenced the replica"
+        );
+    }
 
     #[test]
     fn waiting_for_the_disk_ends_once_the_writer_catches_up() {

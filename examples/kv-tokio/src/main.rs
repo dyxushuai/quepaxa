@@ -202,8 +202,9 @@ fn parse_cmd(line: &str) -> Option<Cmd> {
 
 /// Longest request line; a longer one is answered with an error and closes the connection.
 const MAX_LINE: usize = 1 << 20;
-/// Requests one connection may have unanswered or unwritten; past that, its requests are
-/// no longer read (TCP pushes back on the client) until replies drain.
+/// Requests one connection may have queued for replies (plus the one being written and the
+/// one being read); past that, its requests are no longer read (TCP pushes back on the
+/// client) until replies drain.
 const MAX_PIPELINE: usize = 1024;
 
 /// Pipelined client connection: requests go to the node as they arrive, replies are

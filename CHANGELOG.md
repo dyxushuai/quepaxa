@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The project follows
 ## Unreleased
 
 - `kv-tokio` (reference runtime): bounded resources under misbehaving inputs. A client
-  connection holds at most 1024 unanswered requests and 1 MiB per line; a disk that falls
+  connection holds about 1024 unanswered requests and 1 MiB per line; a disk that falls
   more than 64 MiB behind stalls the event loop instead of buffering; a replica id listed
   twice in `--members`/`--peers` is rejected; peer reconnects back off up to 5 s; `kv-bench`
   no longer waits forever on a stalled server.
