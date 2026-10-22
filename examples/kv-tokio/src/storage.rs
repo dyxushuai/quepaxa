@@ -2,8 +2,9 @@
 //! snapshot, both on local disk with fsync.
 //!
 //! Log format: `[len u32][crc32 of len u32][crc32 of record u32][record]` frames, little
-//! endian. On load, a torn tail (a crash mid-append: a frame cut short, or blocks that
-//! never reached disk and read back as zeros) is truncated, as any write-ahead log does.
+//! endian. On load, a torn tail (a crash mid-append: a frame cut short, or whole sectors
+//! at the end that never reached disk and read back as zeros) is truncated, as any
+//! write-ahead log does.
 //! Anything else that fails a checksum is corruption, and the log is left alone: truncating
 //! there would silently drop records that were acknowledged.
 
@@ -63,12 +64,15 @@ impl SnapshotWriter {
 /// Creates `dir` with any missing parents and makes the entries of `dir` and its ancestors
 /// durable. Done on every open, for the same reason as the log's own sync.
 fn create_dir_durably(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    let dir = fs::canonicalize(dir)?;
+    let dir = std::path::absolute(dir)?;
+    let created: Vec<PathBuf> = dir.ancestors().take_while(|d| !d.exists()).map(Path::to_path_buf).collect();
+    fs::create_dir_all(&dir)?;
     for parent in dir.ancestors().skip(1) {
         match sync_dir(parent) {
-            // A directory this process may not read is not one it created.
-            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {}
+            // An older directory this process may not read holds no entry it just made.
+            Err(e)
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    && !created.iter().any(|c| c.parent() == Some(parent)) => {}
             r => r?,
         }
     }
@@ -89,6 +93,8 @@ fn sync_dir(_dir: &Path) -> io::Result<()> {
 }
 
 const HEADER: usize = 12;
+/// The unit a crash loses data in: a lost write leaves whole sectors of zeros.
+const SECTOR: usize = 512;
 
 fn u32_at(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().expect("4 bytes"))
@@ -115,7 +121,10 @@ fn read_frames(bytes: &[u8]) -> io::Result<(Vec<Bytes>, usize)> {
         let end = HEADER + u32_at(rest, 0) as usize;
         let Some(record) = rest.get(HEADER..end) else { break };
         if crc32fast::hash(record) != u32_at(rest, 8) {
-            if rest[end..].iter().all(|&b| b == 0) {
+            // Torn only if the file ends in a whole zeroed sector (reaching into this record),
+            // not merely because nothing follows the record.
+            let last_sector = (bytes.len() - 1) / SECTOR * SECTOR;
+            if last_sector >= pos + HEADER && bytes[last_sector..].iter().all(|&b| b == 0) {
                 break;
             }
             return Err(corrupt());
@@ -286,8 +295,9 @@ mod tests {
         let dir = two_records("zeros");
         append_raw(&dir, &[0; 40]);
         assert_eq!(Disk::open(&dir).unwrap().1, AB);
-        let mut torn = frame(&[Bytes::from_static(b"lost")]);
-        torn[HEADER..].fill(0);
+        // Whole sectors are lost: here the record's last 1000 bytes.
+        let mut torn = frame(&[Bytes::from(vec![7u8; 1100])]);
+        torn[HEADER + 100..].fill(0);
         append_raw(&dir, &torn);
         assert_eq!(Disk::open(&dir).unwrap().1, AB);
     }
@@ -304,6 +314,38 @@ mod tests {
             assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{name}");
             assert_eq!(fs::read(&path).unwrap(), bytes, "{name}: nothing was truncated");
         }
+    }
+
+    #[test]
+    fn a_corrupt_final_record_refuses_to_open() {
+        let dir = two_records("last");
+        let path = dir.join("records.log");
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 0x40;
+        fs::write(&path, &bytes).unwrap();
+        let err = Disk::open(&dir).err().expect("an acknowledged record is not a torn tail");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_directory_whose_parent_cannot_be_synced_refuses_to_open() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_dir("unreadable");
+        fs::create_dir_all(&root).unwrap();
+        // Write and search, no read: the entry can be created but the parent not opened.
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o300)).unwrap();
+        let readable = fs::File::open(&root).is_ok(); // as root
+        let opened = Disk::open(&root.join("data"));
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        if readable {
+            return;
+        }
+        assert_eq!(
+            opened.err().expect("the new entry cannot be made durable").kind(),
+            io::ErrorKind::PermissionDenied
+        );
     }
 
     #[test]
