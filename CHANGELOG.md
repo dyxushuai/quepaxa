@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `kv-tokio` (reference runtime): log frames and snapshots carry checksums. On restart only
+  a torn tail is truncated; a damaged length field or record before it stops the restart
+  instead of silently cutting acknowledged records. The data directory and its parents are
+  synced on every start. The on-disk format changed: start from an empty data directory.
 - `kv-tokio` (reference runtime): bounded resources under misbehaving inputs. A client
   connection holds about 1024 unanswered requests and 1 MiB per line; a disk that falls
   more than 64 MiB behind stalls the event loop instead of buffering; a replica id listed

@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 bytes = "1.12"
+crc32fast = "1.5"
 getrandom = "0.4"
 mimalloc = { version = "0.1.52", default-features = false }
 quepaxa = { path = "../../crates/quepaxa" }
