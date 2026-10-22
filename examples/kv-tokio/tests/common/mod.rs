@@ -97,7 +97,12 @@ impl Cluster {
     pub fn request(&self, i: usize, cmd: &str) -> String {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
-            if let Ok(mut s) = TcpStream::connect(("127.0.0.1", self.clients[i])) {
+            // While the replica is down its port is free, and a connect may be given that
+            // same port as its own and reach itself (TCP simultaneous open), echoing `cmd`.
+            let connected = TcpStream::connect(("127.0.0.1", self.clients[i]))
+                .ok()
+                .filter(|s| s.local_addr().ok() != s.peer_addr().ok());
+            if let Some(mut s) = connected {
                 s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
                 if s.write_all(format!("{cmd}\n").as_bytes()).is_ok() {
                     let mut line = String::new();
