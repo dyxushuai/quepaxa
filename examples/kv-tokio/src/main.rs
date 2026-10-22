@@ -357,8 +357,9 @@ mod tests {
     async fn an_overlong_line_is_refused() {
         let (s, _events) = connect().await;
         let (r, mut w) = s.into_split();
-        // Written in the background: the server stops reading once it has seen enough.
-        tokio::spawn(async move { w.write_all(&vec![b'x'; 2 * MAX_LINE]).await });
+        // Exactly what the server reads before giving up: closing with unread input would
+        // reset the connection (macOS, Windows) and could discard the reply.
+        tokio::spawn(async move { w.write_all(&vec![b'x'; MAX_LINE + 1]).await });
         let mut reply = String::new();
         BufReader::new(r).read_to_string(&mut reply).await.unwrap();
         assert_eq!(reply, format!("ERR line longer than {MAX_LINE} bytes\n"), "then the connection closes");
