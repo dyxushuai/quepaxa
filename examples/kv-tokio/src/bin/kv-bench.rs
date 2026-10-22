@@ -44,6 +44,9 @@ fn command(rng: &mut SplitMix, gets: f64) -> String {
     if rng.unit() < gets { format!("GET {key}\n") } else { format!("PUT {key} {}\n", word(rng)) }
 }
 
+/// How long a connect, the final `STATS`, or the wait for in-flight replies may take.
+const GRACE: Duration = Duration::from_secs(5);
+
 #[derive(Default)]
 struct Stats {
     latencies_us: Vec<u64>,
@@ -62,7 +65,7 @@ async fn connection(
     seed: u64,
     stats: Arc<Mutex<Stats>>,
 ) {
-    let Ok(s) = TcpStream::connect(addr).await else {
+    let Ok(Ok(s)) = tokio::time::timeout(GRACE, TcpStream::connect(addr)).await else {
         stats.lock().unwrap().errors += 1;
         return;
     };
@@ -98,13 +101,16 @@ async fn connection(
             continue;
         }
         sent.lock().unwrap().push_back(Instant::now());
-        if w.write_all(command(&mut rng, gets).as_bytes()).await.is_err() {
+        // A server that stops reading must not hold the run past its end.
+        let cmd = command(&mut rng, gets);
+        let write = w.write_all(cmd.as_bytes());
+        if !matches!(tokio::time::timeout_at((until + GRACE).into(), write).await, Ok(Ok(()))) {
             write_failed = true;
             break;
         }
     }
     // Give in-flight requests a grace period, then count the rest as unanswered.
-    let grace = Instant::now() + Duration::from_secs(5);
+    let grace = Instant::now() + GRACE;
     while !sent.lock().unwrap().is_empty() && Instant::now() < grace && !write_failed {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -169,12 +175,14 @@ async fn main() {
         );
     }
     for addr in targets {
-        if let Ok(s) = TcpStream::connect(addr).await {
-            let (r, mut w) = s.into_split();
-            let _ = w.write_all(b"STATS\n").await;
-            if let Ok(Some(line)) = BufReader::new(r).lines().next_line().await {
-                println!("{addr} {line}");
-            }
+        let stats = async {
+            let (r, mut w) = TcpStream::connect(addr).await.ok()?.into_split();
+            w.write_all(b"STATS\n").await.ok()?;
+            BufReader::new(r).lines().next_line().await.ok()?
+        };
+        match tokio::time::timeout(GRACE, stats).await {
+            Ok(Some(line)) => println!("{addr} {line}"),
+            _ => println!("{addr} no STATS within {GRACE:?}"),
         }
     }
 }
