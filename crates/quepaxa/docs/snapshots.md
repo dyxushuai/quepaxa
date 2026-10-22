@@ -44,6 +44,26 @@ use quepaxa::{Action, Config, Input, NodeId, Replica, Slot, Timestamp};
 #     }
 #     committed
 # }
+# fn settle_slots(r: &mut Replica, disk: &mut Vec<Bytes>) -> Vec<(u64, Bytes)> {
+#     let mut committed = Vec::new();
+#     let mut actions = Vec::new();
+#     r.poll_actions(&mut actions);
+#     while !actions.is_empty() {
+#         for action in std::mem::take(&mut actions) {
+#             match action {
+#                 Action::Persist { id, records, replace, .. } => {
+#                     if replace { disk.clear(); }
+#                     disk.extend(records);
+#                     r.handle(Timestamp(0), Input::Persisted(id)).unwrap();
+#                 }
+#                 Action::Commit { slot, entries } => committed.extend(entries.into_iter().map(|e| (slot.0, e.payload))),
+#                 _ => {}
+#             }
+#         }
+#         r.poll_actions(&mut actions);
+#     }
+#     committed
+# }
 let config = |seed| Config::new([7; 16], NodeId(0), vec![NodeId(0)], seed);
 let (mut disk, mut state) = (Vec::new(), Vec::new());
 let mut replica = Replica::new(config([1; 32]), [], Timestamp(0))?;
@@ -58,6 +78,7 @@ let through = replica.emitted_index() - 1;
 let snapshot = (state.clone(), replica.core_state());
 // 2. (store `snapshot` durably here)
 // 3. Compact: the checkpoint replaces the durable log.
+let before_checkpoint = disk.clone();
 let records_before = disk.len();
 replica.compact(Timestamp(0), Slot(through), snapshot.1.clone())?;
 settle(&mut replica, &mut disk);
@@ -67,12 +88,27 @@ replica.propose(Timestamp(0), Bytes::from_static(b"d"))?;
 state.extend(settle(&mut replica, &mut disk));
 
 // After a crash, the application's memory is gone. Restore its snapshot first, then start
-// the replica from the records: it re-emits only the slots after the checkpoint, which
-// apply on top of the snapshot.
+// the replica from the records. It re-emits the slots after the last checkpoint that
+// reached the disk; if the crash came after the snapshot was stored but before its
+// checkpoint, that includes slots the snapshot already covers: apply only those after it.
 let mut state = snapshot.0.clone();
 let mut replica = Replica::new(config([2; 32]), disk.clone(), Timestamp(1))?;
-state.extend(settle(&mut replica, &mut disk));
+for (slot, payload) in settle_slots(&mut replica, &mut disk) {
+    if slot > through {
+        state.push(payload);
+    }
+}
 assert_eq!(state, [&b"a"[..], b"b", b"c", b"d"]);
+
+// Had the crash come before the checkpoint reached the disk, a, b and c would be emitted
+// again, and the filter keeps the snapshot from applying them twice.
+let (mut older, mut state_then) = (before_checkpoint, snapshot.0.clone());
+let mut restarted = Replica::new(config([3; 32]), older.clone(), Timestamp(1))?;
+let replayed = settle_slots(&mut restarted, &mut older);
+assert_eq!(replayed.len(), 3);
+state_then.extend(replayed.into_iter().filter(|(slot, _)| *slot > through).map(|(_, p)| p));
+assert_eq!(state_then, [&b"a"[..], b"b", b"c"]);
+
 // Then tell the replica about the snapshot: it may be newer than the last checkpoint that
 // reached the disk (here it is not, so nothing changes).
 let installed = replica.install_snapshot(Timestamp(1), Slot(through), snapshot.1)?;
