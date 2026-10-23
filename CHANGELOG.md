@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- `quepaxa` (breaking): only the current durable and snapshot formats are read. Recorder
+  records of kind 2 and core states of versions 2 and 3 are rejected (`CorruptRecord`,
+  `InvalidCoreState`) instead of converted; before 1.0 a replica whose storage predates a
+  format change rejoins as a new replica (new id, empty storage).
+
 ## 0.3.4 — 2026-10-23
 
 - `quepaxa`: a decided membership change takes effect without traffic: while it is
