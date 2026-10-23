@@ -6,17 +6,35 @@ use quepaxa_ffi::*;
 
 const N: usize = 3;
 
-unsafe fn new_replica(i: u32, members: &[u32; N]) -> *mut qpx_replica {
-    let mut cfg = std::mem::MaybeUninit::<qpx_config>::uninit();
-    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr(), size_of::<qpx_config>()) }, QPX_OK);
-    let mut cfg = unsafe { cfg.assume_init() };
-    cfg.cluster_id = *b"rust-c-abi-tests";
-    cfg.id = i;
-    cfg.members = members.as_ptr();
-    cfg.members_len = N;
-    cfg.seed = [i as u8 + 1; 32];
+/// A configuration for replica `id` of `members`; free it with `qpx_config_free`.
+fn config(id: u32, members: &[u32]) -> *mut qpx_config {
+    let mut cfg = ptr::null_mut();
+    let seed = [id as u8 + 1; 32];
+    let rc = unsafe {
+        qpx_config_new(
+            b"rust-c-abi-tests".as_ptr(),
+            id,
+            members.as_ptr(),
+            members.len(),
+            seed.as_ptr(),
+            &mut cfg,
+        )
+    };
+    assert_eq!(rc, QPX_OK);
+    cfg
+}
+
+/// `qpx_replica_new` from `cfg` with no durable records, then frees `cfg`.
+fn replica_from(cfg: *mut qpx_config, records: &[qpx_bytes]) -> (i32, *mut qpx_replica) {
     let mut h = ptr::null_mut();
-    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
+    let rc = unsafe { qpx_replica_new(cfg, records.as_ptr(), records.len(), 0, &mut h) };
+    unsafe { qpx_config_free(cfg) };
+    (rc, h)
+}
+
+unsafe fn new_replica(i: u32, members: &[u32; N]) -> *mut qpx_replica {
+    let (rc, h) = replica_from(config(i, members), &[]);
+    assert_eq!(rc, QPX_OK);
     h
 }
 
@@ -141,19 +159,18 @@ fn contract_violations_are_reported_not_undefined() {
 
 #[test]
 fn bad_config_and_corrupt_records_are_rejected() {
-    let mut cfg = std::mem::MaybeUninit::<qpx_config>::uninit();
-    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr(), size_of::<qpx_config>()) }, QPX_OK);
-    let mut cfg = unsafe { cfg.assume_init() };
-    let mut h = ptr::null_mut();
-    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_CONFIG);
-    let members = [0u32];
-    cfg.members = members.as_ptr();
-    cfg.members_len = 1;
+    assert_eq!(replica_from(config(0, &[]), &[]).0, QPX_ERR_INVALID_CONFIG);
     let junk = qpx_bytes { ptr: b"junk".as_ptr(), len: 4 };
-    assert_eq!(unsafe { qpx_replica_new(&cfg, &junk, 1, 0, &mut h) }, QPX_ERR_CORRUPT_RECORD);
-    cfg.struct_size = 8;
-    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_ARGUMENT);
+    let (rc, h) = replica_from(config(0, &[0]), &[junk]);
+    assert_eq!(rc, QPX_ERR_CORRUPT_RECORD);
     assert!(h.is_null());
+    let mut h = ptr::null_mut();
+    assert_eq!(unsafe { qpx_replica_new(ptr::null(), ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_ARGUMENT);
+    let mut cfg = ptr::null_mut();
+    let seed = [0u8; 32];
+    let rc = unsafe { qpx_config_new(ptr::null(), 0, ptr::null(), 0, seed.as_ptr(), &mut cfg) };
+    assert_eq!(rc, QPX_ERR_INVALID_ARGUMENT, "a cluster id is required");
+    unsafe { qpx_config_free(ptr::null_mut()) };
 }
 
 #[test]
@@ -175,14 +192,7 @@ fn last_error() -> String {
 
 #[test]
 fn last_error_explains_an_invalid_config() {
-    let mut cfg = std::mem::MaybeUninit::<qpx_config>::uninit();
-    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr(), size_of::<qpx_config>()) }, QPX_OK);
-    let mut cfg = unsafe { cfg.assume_init() };
-    let members = [0u32, 0];
-    cfg.members = members.as_ptr();
-    cfg.members_len = 2;
-    let mut h = ptr::null_mut();
-    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_CONFIG);
+    assert_eq!(replica_from(config(0, &[0, 0]), &[]).0, QPX_ERR_INVALID_CONFIG);
     assert!(last_error().contains("members must be unique"), "{}", last_error());
     // A later failure in argument checking replaces the old description.
     assert_eq!(unsafe { qpx_poll(ptr::null_mut(), ptr::null_mut()) }, QPX_ERR_INVALID_ARGUMENT);
@@ -190,27 +200,67 @@ fn last_error_explains_an_invalid_config() {
 }
 
 #[test]
-fn config_layouts_are_size_aware() {
-    // Too small for any supported layout.
-    let mut small = [0u8; 8];
-    assert_eq!(unsafe { qpx_config_init(small.as_mut_ptr().cast(), small.len()) }, QPX_ERR_INVALID_ARGUMENT);
-    // A caller compiled against a larger (future) layout: only our prefix is touched.
-    #[repr(C)]
-    struct Future {
-        cfg: qpx_config,
-        extra: u64,
+fn options_are_set_one_by_one_and_checked() {
+    let cfg = config(0, &[0]);
+    assert_eq!(unsafe { qpx_config_set(cfg, QPX_CONFIG_HEDGE_MAX_NS, 7_000_000) }, QPX_OK);
+    assert_eq!(unsafe { qpx_config_set(cfg, QPX_CONFIG_MAX_IN_FLIGHT_SLOTS, 16) }, QPX_OK);
+    // Too large for the option, or an option this library does not know: refused, named.
+    assert_eq!(unsafe { qpx_config_set(cfg, QPX_CONFIG_MAX_BATCH_BYTES, 1 << 32) }, QPX_ERR_INVALID_ARGUMENT);
+    assert!(last_error().contains("out of range"), "{}", last_error());
+    assert_eq!(unsafe { qpx_config_set(cfg, 999, 1) }, QPX_ERR_INVALID_ARGUMENT);
+    assert!(last_error().contains("unknown config option 999"), "{}", last_error());
+    assert_eq!(
+        unsafe { qpx_config_set(ptr::null_mut(), QPX_CONFIG_HEDGE_MIN_NS, 1) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
+    // Consistency is checked when the replica is created.
+    assert_eq!(unsafe { qpx_config_set(cfg, QPX_CONFIG_MAX_IN_FLIGHT_SLOTS, 1000) }, QPX_OK);
+    assert_eq!(replica_from(cfg, &[]).0, QPX_ERR_INVALID_CONFIG);
+}
+
+#[test]
+fn options_take_effect_and_a_rejected_value_changes_nothing() {
+    let cfg = config(0, &[0]);
+    assert_eq!(unsafe { qpx_config_set(cfg, QPX_CONFIG_MAX_OUTSTANDING_PROPOSALS, 1) }, QPX_OK);
+    let rejected =
+        unsafe { qpx_config_set(cfg, QPX_CONFIG_MAX_OUTSTANDING_PROPOSALS, u64::from(u32::MAX) + 1) };
+    assert_eq!(rejected, QPX_ERR_INVALID_ARGUMENT);
+    let (rc, h) = replica_from(cfg, &[]);
+    assert_eq!(rc, QPX_OK);
+    let mut a = empty_action();
+    while unsafe { qpx_poll(h, &mut a) } == QPX_OK {}
+    let mut id = 0;
+    assert_eq!(unsafe { qpx_propose(h, 0, b"x".as_ptr(), 1, &mut id) }, QPX_OK);
+    while unsafe { qpx_poll(h, &mut a) } == QPX_OK {}
+    assert_eq!(unsafe { qpx_propose(h, 0, b"y".as_ptr(), 1, &mut id) }, QPX_ERR_BUSY, "still at most one");
+    unsafe { qpx_replica_free(h) };
+    // The largest u32 is in range for every u32 option; every option is known.
+    let cfg = config(0, &[0]);
+    for option in [
+        QPX_CONFIG_MAX_BATCH_BYTES,
+        QPX_CONFIG_MAX_MESSAGE_BYTES,
+        QPX_CONFIG_MAX_IN_FLIGHT_SLOTS,
+        QPX_CONFIG_MAX_OUTSTANDING_PROPOSALS,
+        QPX_CONFIG_RETRANSMIT_INTERVAL_NS,
+        QPX_CONFIG_HEDGE_MIN_NS,
+        QPX_CONFIG_HEDGE_MAX_NS,
+    ] {
+        assert_eq!(unsafe { qpx_config_set(cfg, option, u64::from(u32::MAX)) }, QPX_OK, "option {option}");
     }
-    let mut f = std::mem::MaybeUninit::<Future>::uninit();
-    unsafe { (&raw mut (*f.as_mut_ptr()).extra).write(0xDEAD_BEEF) };
-    assert_eq!(unsafe { qpx_config_init(f.as_mut_ptr().cast(), size_of::<Future>()) }, QPX_OK);
-    let mut f = unsafe { f.assume_init() };
-    assert_eq!((f.cfg.struct_size, f.extra), (size_of::<qpx_config>(), 0xDEAD_BEEF));
-    let members = [0u32];
-    f.cfg.members = members.as_ptr();
-    f.cfg.members_len = 1;
-    f.cfg.struct_size = size_of::<Future>();
+    unsafe { qpx_config_free(cfg) };
+}
+
+#[test]
+fn a_replica_keeps_its_own_copy_of_the_config() {
+    let members = [0u32, 1, 2];
+    let cfg = config(0, &members);
     let mut h = ptr::null_mut();
-    assert_eq!(unsafe { qpx_replica_new(&f.cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
+    assert_eq!(unsafe { qpx_replica_new(cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
+    unsafe { qpx_config_free(cfg) };
+    let mut a = empty_action();
+    while unsafe { qpx_poll(h, &mut a) } == QPX_OK {}
+    let mut id = 0;
+    assert_eq!(unsafe { qpx_propose(h, 0, b"x".as_ptr(), 1, &mut id) }, QPX_OK);
     unsafe { qpx_replica_free(h) };
 }
 
@@ -222,38 +272,38 @@ fn metrics_are_readable_over_the_abi() {
     let mut a = empty_action();
     while unsafe { qpx_poll(h, &mut a) } == QPX_OK {}
     assert_eq!(unsafe { qpx_handle_message(h, 0, garbage.as_ptr(), garbage.len()) }, QPX_OK);
-    let mut m = std::mem::MaybeUninit::<qpx_metrics>::zeroed();
-    unsafe { (&raw mut (*m.as_mut_ptr()).struct_size).write(size_of::<qpx_metrics>()) };
-    assert_eq!(unsafe { qpx_get_metrics(h, m.as_mut_ptr()) }, QPX_OK);
-    let m = unsafe { m.assume_init() };
-    assert_eq!(m.messages_rejected, 1);
+    let mut v = 0;
+    assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_MESSAGES_REJECTED, &mut v) }, QPX_OK);
+    assert_eq!(v, 1);
+    assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_LIVE_REGISTERS, &mut v) }, QPX_OK);
+    for metric in 1..=QPX_METRIC_LIVE_REGISTERS {
+        assert_eq!(unsafe { qpx_metric(h, metric, &mut v) }, QPX_OK, "metric {metric}");
+    }
+    assert_eq!(
+        unsafe { qpx_metric(h, QPX_METRIC_LIVE_REGISTERS, ptr::null_mut()) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
+    assert_eq!(unsafe { qpx_metric(h, 0, &mut v) }, QPX_ERR_INVALID_ARGUMENT);
+    assert!(last_error().contains("unknown metric 0"), "{}", last_error());
     unsafe { qpx_replica_free(h) };
 }
 
 #[test]
-fn leader_order_is_read_from_abi_0_4_layouts_only() {
-    let mut cfg = std::mem::MaybeUninit::<qpx_config>::uninit();
-    assert_eq!(unsafe { qpx_config_init(cfg.as_mut_ptr(), size_of::<qpx_config>()) }, QPX_OK);
-    let mut cfg = unsafe { cfg.assume_init() };
-    assert!(cfg.leader_order.is_null() && cfg.leader_order_len == 0);
+fn leader_order_is_a_permutation_of_the_members() {
     let members = [0u32, 1, 2];
-    cfg.members = members.as_ptr();
-    cfg.members_len = 3;
-    let mut h = ptr::null_mut();
-    let (good, bad) = ([2u32, 0, 1], [2u32, 2, 1]);
-    cfg.leader_order = good.as_ptr();
-    cfg.leader_order_len = 3;
-    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
-    unsafe { qpx_replica_free(h) };
-    cfg.leader_order = bad.as_ptr();
-    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_CONFIG);
-    cfg.leader_order = ptr::null();
-    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_ERR_INVALID_ARGUMENT);
-    // An ABI 0.3 caller's struct ends before `leader_order`: whatever follows is not read.
-    cfg.leader_order = bad.as_ptr();
-    cfg.struct_size = std::mem::offset_of!(qpx_config, leader_order);
-    assert_eq!(unsafe { qpx_replica_new(&cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
-    unsafe { qpx_replica_free(h) };
+    let with_order = |order: &[u32]| {
+        let cfg = config(0, &members);
+        assert_eq!(unsafe { qpx_config_set_leader_order(cfg, order.as_ptr(), order.len()) }, QPX_OK);
+        let (rc, h) = replica_from(cfg, &[]);
+        unsafe { qpx_replica_free(h) };
+        rc
+    };
+    assert_eq!(with_order(&[2, 0, 1]), QPX_OK);
+    assert_eq!(with_order(&[]), QPX_OK, "none: by id");
+    assert_eq!(with_order(&[2, 2, 1]), QPX_ERR_INVALID_CONFIG);
+    let cfg = config(0, &members);
+    assert_eq!(unsafe { qpx_config_set_leader_order(cfg, ptr::null(), 3) }, QPX_ERR_INVALID_ARGUMENT);
+    unsafe { qpx_config_free(cfg) };
 }
 
 #[test]

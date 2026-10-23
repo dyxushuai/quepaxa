@@ -9,7 +9,7 @@ after_includes = """
 // - After a mutating call, drain qpx_poll until QPX_EMPTY before the next mutating call.
 // - Execute actions in order. A QPX_ACTION_PERSIST must be durable (after all earlier
 //   ones) before its `then` messages are sent and qpx_persisted is called.
-// - Every start (including restarts) needs a fresh CSPRNG seed in qpx_config.seed.
+// - Every start (including restarts) needs a fresh CSPRNG seed (qpx_config_new).
 // - A library panic returns QPX_ERR_PANIC and poisons the handle (QPX_ERR_POISONED)."""
 cpp_compat = true
 documentation_style = "c99"

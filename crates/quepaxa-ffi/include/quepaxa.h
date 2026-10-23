@@ -15,7 +15,7 @@
 // - After a mutating call, drain qpx_poll until QPX_EMPTY before the next mutating call.
 // - Execute actions in order. A QPX_ACTION_PERSIST must be durable (after all earlier
 //   ones) before its `then` messages are sent and qpx_persisted is called.
-// - Every start (including restarts) needs a fresh CSPRNG seed in qpx_config.seed.
+// - Every start (including restarts) needs a fresh CSPRNG seed (qpx_config_new).
 // - A library panic returns QPX_ERR_PANIC and poisons the handle (QPX_ERR_POISONED).
 
 // ABI major version: incompatible changes bump it. While it is 0 the ABI is unstable and
@@ -29,7 +29,10 @@
 // 0.5: membership changes: `qpx_propose_reconfiguration`, `QPX_ACTION_RECONFIGURED`,
 // `qpx_action_member`, `QPX_ERR_RECONFIGURATION_PENDING`.
 // 0.6: `QPX_ACTION_RETIRED`.
-#define QPX_ABI_VERSION_MINOR 6
+// 0.7: opaque `qpx_config` (`qpx_config_new`, `qpx_config_set`, `qpx_config_set_leader_order`,
+// `qpx_config_free`) and `qpx_metric` replace the `qpx_config` and `qpx_metrics` structs,
+// `qpx_config_init` and `qpx_get_metrics` (incompatible).
+#define QPX_ABI_VERSION_MINOR 7
 
 // Success.
 #define QPX_OK 0
@@ -43,7 +46,7 @@
 // The call had no effect: the snapshot is older than what the replica already emitted.
 #define QPX_IGNORED 3
 
-// A null pointer, bad `struct_size` or out-of-range index.
+// A null pointer, unknown option or metric, out-of-range value or index.
 #define QPX_ERR_INVALID_ARGUMENT -1
 
 // The configuration is invalid.
@@ -118,43 +121,64 @@
 // `flags` of `QPX_ACTION_DROPPED`: the replica is fenced (outcome unknown).
 #define QPX_DROP_FENCED 1
 
+// Network messages rejected (malformed, foreign or from non-members).
+#define QPX_METRIC_MESSAGES_REJECTED 1
+
+// Record requests re-sent.
+#define QPX_METRIC_RETRANSMITS 2
+
+// Catch-up requests re-sent.
+#define QPX_METRIC_CATCH_UP_RETRIES 3
+
+// Slots learned as decided.
+#define QPX_METRIC_SLOTS_DECIDED 4
+
+// Own decisions on the leader fast path.
+#define QPX_METRIC_FAST_PATH_DECISIONS 5
+
+// Decided batches that failed to decode.
+#define QPX_METRIC_CORRUPT_BATCHES 6
+
+// Batches forwarded to the leader.
+#define QPX_METRIC_FORWARDED 7
+
+// Own entries proposed directly after the leader was too slow.
+#define QPX_METRIC_HEDGED 8
+
+// Gauge: decided slots held in memory.
+#define QPX_METRIC_RETAINED_SLOTS 9
+
+// Gauge: recorder registers held in memory.
+#define QPX_METRIC_LIVE_REGISTERS 10
+
+// Largest batch of entries per slot, bytes (`u32`).
+#define QPX_CONFIG_MAX_BATCH_BYTES 1
+
+// Largest accepted message, bytes (`u32`).
+#define QPX_CONFIG_MAX_MESSAGE_BYTES 2
+
+// Concurrent slots driven by this replica (`u32`, at most 64).
+#define QPX_CONFIG_MAX_IN_FLIGHT_SLOTS 3
+
+// Outstanding proposals before `QPX_ERR_BUSY` (`u32`).
+#define QPX_CONFIG_MAX_OUTSTANDING_PROPOSALS 4
+
+// Record request retransmission interval, nanoseconds.
+#define QPX_CONFIG_RETRANSMIT_INTERVAL_NS 5
+
+// Lower bound of the hedge delay, nanoseconds.
+#define QPX_CONFIG_HEDGE_MIN_NS 6
+
+// Upper bound of the hedge delay, nanoseconds.
+#define QPX_CONFIG_HEDGE_MAX_NS 7
+
+// Replica configuration: create it with `qpx_config_new`, adjust it with `qpx_config_set`
+// and `qpx_config_set_leader_order`, pass it to `qpx_replica_new` (which copies it), and
+// release it with `qpx_config_free`.
+typedef struct qpx_config qpx_config;
+
 // An opaque replica handle.
 typedef struct qpx_replica qpx_replica;
-
-// Replica configuration. Initialize with `qpx_config_init`, then set fields.
-typedef struct {
-  // `sizeof(qpx_config)`, set by `qpx_config_init`; lets the struct grow compatibly.
-  size_t struct_size;
-  // Cluster identity; messages from other clusters are dropped.
-  uint8_t cluster_id[16];
-  // This replica.
-  uint32_t id;
-  // All replicas including this one.
-  const uint32_t *members;
-  // Number of `members`.
-  size_t members_len;
-  // Fresh CSPRNG output on every start (never reuse it).
-  uint8_t seed[32];
-  // See the Rust `Config` for the meaning of the remaining fields.
-  uint32_t max_batch_bytes;
-  // Largest accepted message.
-  uint32_t max_message_bytes;
-  // Concurrent slots driven by this replica (≤ 64).
-  uint32_t max_in_flight_slots;
-  // Outstanding proposals before `QPX_ERR_BUSY`.
-  uint32_t max_outstanding_proposals;
-  // Record request retransmission interval, nanoseconds.
-  uint64_t retransmit_interval_ns;
-  // Lower bound of the hedge delay, nanoseconds.
-  uint64_t hedge_min_ns;
-  // Upper bound of the hedge delay, nanoseconds.
-  uint64_t hedge_max_ns;
-  // Preferred leaders, first to last (every member once), or null for "by id".
-  // Every member must use the same order. ABI 0.4.
-  const uint32_t *leader_order;
-  // Number of `leader_order` ids (0 with a null `leader_order`).
-  size_t leader_order_len;
-} qpx_config;
 
 // A borrowed byte range. `ptr` may be null when `len` is 0.
 typedef struct {
@@ -163,32 +187,6 @@ typedef struct {
   // Length in bytes.
   size_t len;
 } qpx_bytes;
-
-// Replica counters (see the Rust `Metrics`). Set `struct_size` before `qpx_get_metrics`.
-typedef struct {
-  // `sizeof(qpx_metrics)` as compiled by the caller.
-  size_t struct_size;
-  // Network messages rejected (malformed, foreign or from non-members).
-  uint64_t messages_rejected;
-  // Record requests re-sent.
-  uint64_t retransmits;
-  // Catch-up requests re-sent.
-  uint64_t catch_up_retries;
-  // Slots learned as decided.
-  uint64_t slots_decided;
-  // Own decisions on the leader fast path.
-  uint64_t fast_path_decisions;
-  // Decided batches that failed to decode.
-  uint64_t corrupt_batches;
-  // Batches forwarded to the leader.
-  uint64_t forwarded;
-  // Own entries proposed directly after the leader was too slow.
-  uint64_t hedged;
-  // Gauge: decided slots held in memory.
-  uint64_t retained_slots;
-  // Gauge: recorder registers held in memory.
-  uint64_t live_registers;
-} qpx_metrics;
 
 // One action. Borrowed fields stay valid until the next call on the handle.
 typedef struct {
@@ -232,19 +230,12 @@ uint32_t qpx_abi_version(void);
 // Static, NUL-terminated description of a status code.
 const char *qpx_status_str(int32_t status);
 
-// Fills the first `size` bytes of `cfg` (pass `sizeof(qpx_config)`) with defaults,
-// including `struct_size`; `members` stays null.
+// Creates a replica with configuration `cfg` (copied; free it whenever) from
+// `n_records` durable records (in persisted order).
 //
 // # Safety
-// `cfg` must be null or point to `size` writable bytes.
-int32_t qpx_config_init(qpx_config *cfg, size_t size);
-
-// Creates a replica from `n_records` durable records (in persisted order).
-//
-// # Safety
-// `cfg` must point to an initialized `qpx_config` whose `members` points to
-// `members_len` ids (and `leader_order`, if not null, to `leader_order_len` ids); `records` must point to `n_records` valid `qpx_bytes`; `out` must
-// be writable. On success `*out` owns a handle to release with `qpx_replica_free`.
+// `cfg` must come from `qpx_config_new`; `records` must point to `n_records` valid
+// `qpx_bytes`; `out` must be writable. On success `*out` owns a handle to release with `qpx_replica_free`.
 int32_t qpx_replica_new(const qpx_config *cfg,
                         const qpx_bytes *records,
                         size_t n_records,
@@ -355,13 +346,12 @@ int32_t qpx_install_snapshot(qpx_replica *h,
                              const uint8_t *state,
                              size_t len);
 
-// Copies the counters into `out`, writing at most `out->struct_size` bytes (set it to
-// `sizeof(qpx_metrics)` first).
+// Reads counter or gauge `metric` (`QPX_METRIC_*`, see the Rust `Metrics`) into `out`; an
+// unknown metric is `QPX_ERR_INVALID_ARGUMENT`.
 //
 // # Safety
-// `h` must be a live handle; `out` must point to a `qpx_metrics` whose `struct_size`
-// bytes are writable.
-int32_t qpx_get_metrics(qpx_replica *h, qpx_metrics *out);
+// `h` must be a live handle; `out` writable.
+int32_t qpx_metric(qpx_replica *h, uint32_t metric, uint64_t *out);
 
 // Copies the description of the calling thread's most recent failing call (empty if the
 // last call succeeded) as a NUL-terminated string. Two-call pattern: with too small a
@@ -401,6 +391,44 @@ int32_t qpx_action_member(qpx_replica *h, size_t i, uint32_t *out);
 // # Safety
 // `h` must be a live handle; `out` writable.
 int32_t qpx_action_entry(qpx_replica *h, size_t i, qpx_entry *out);
+
+// Creates a configuration with default settings: `cluster_id` (16 bytes; messages from
+// other clusters are dropped), this replica's `id`, the `members_len` configured members at
+// `members` (including this one; a joining replica lists the original members), and
+// `seed` (32 bytes of fresh CSPRNG output on every start; never reuse it).
+//
+// # Safety
+// `cluster_id` must point to 16 readable bytes, `seed` to 32, `members` to `members_len`
+// ids (or be null when it is 0); `out` must be writable. On success `*out` owns a
+// configuration to release with `qpx_config_free`.
+int32_t qpx_config_new(const uint8_t *cluster_id,
+                       uint32_t id,
+                       const uint32_t *members,
+                       size_t members_len,
+                       const uint8_t *seed,
+                       qpx_config **out);
+
+// Sets option `option` (`QPX_CONFIG_*`) to `value`. An unknown option, or a value too large
+// for it, is `QPX_ERR_INVALID_ARGUMENT`; whether the settings are consistent is checked by
+// `qpx_replica_new` (`QPX_ERR_INVALID_CONFIG`).
+//
+// # Safety
+// `cfg` must come from `qpx_config_new` and not be used concurrently.
+int32_t qpx_config_set(qpx_config *cfg, uint32_t option, uint64_t value);
+
+// Sets the preferred leaders, first to last: every member once, or none (`len` 0) for
+// "by id". Every member must use the same order.
+//
+// # Safety
+// `cfg` must come from `qpx_config_new` and not be used concurrently; `order` must point
+// to `len` ids (or be null when it is 0).
+int32_t qpx_config_set_leader_order(qpx_config *cfg, const uint32_t *order, size_t len);
+
+// Releases a configuration (null is ignored). Replicas created from it are unaffected.
+//
+// # Safety
+// `cfg` must come from `qpx_config_new` and not be used afterwards.
+void qpx_config_free(qpx_config *cfg);
 
 #ifdef __cplusplus
 }  // extern "C"
