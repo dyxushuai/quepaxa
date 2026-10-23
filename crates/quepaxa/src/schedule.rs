@@ -186,20 +186,18 @@ impl Schedule {
         }
     }
 
-    /// Restores a schedule. Before epochs (`with_epochs` false) every order is a permutation
-    /// of the configured `members`.
-    pub fn decode(r: &mut Reader<'_>, members: &[NodeId], with_epochs: bool) -> Result<Self, DecodeError> {
-        let (mut epoch, mut epoch_from, mut settled) = (0, 0, Vec::new());
-        if with_epochs {
-            epoch = r.u64()?;
-            epoch_from = r.u64()?;
-            let n = r.u32()? as usize;
-            for _ in 0..n {
-                settled.push((NodeId(r.u32()?), r.u64()?, ProposalId(r.u64()?)));
-            }
-            if (settled.len() as u64) < epoch {
-                return Err(DecodeError::BadTag);
-            }
+    /// Restores a schedule; until the first change every order is a permutation of the
+    /// configured `members`.
+    pub fn decode(r: &mut Reader<'_>, members: &[NodeId]) -> Result<Self, DecodeError> {
+        let epoch = r.u64()?;
+        let epoch_from = r.u64()?;
+        let n = r.u32()? as usize;
+        let mut settled = Vec::new();
+        for _ in 0..n {
+            settled.push((NodeId(r.u32()?), r.u64()?, ProposalId(r.u64()?)));
+        }
+        if (settled.len() as u64) < epoch {
+            return Err(DecodeError::BadTag);
         }
         let streak = r.u32()?;
         if streak >= ROTATE_AFTER {
@@ -306,6 +304,9 @@ mod tests {
         let members = ids(&[0, 1, 2]);
         let encoded = |froms: &[u64]| {
             let mut out = Vec::new();
+            out.put_u64_le(0);
+            out.put_u64_le(0);
+            out.put_u32_le(0);
             out.put_u32_le(0);
             out.put_u64_le(0);
             out.put_u32_le(froms.len() as u32);
@@ -316,9 +317,8 @@ mod tests {
             }
             bytes::Bytes::from(out)
         };
-        let decode = |b: &bytes::Bytes| {
-            Schedule::decode(&mut Reader::new(b), &members, false).map(|s| s.history.len())
-        };
+        let decode =
+            |b: &bytes::Bytes| Schedule::decode(&mut Reader::new(b), &members).map(|s| s.history.len());
         assert_eq!(decode(&encoded(&[0, 9])), Ok(2));
         assert!(decode(&encoded(&[])).is_err());
         assert!(decode(&encoded(&[9, 0])).is_err());
@@ -375,7 +375,7 @@ mod tests {
         let mut out = Vec::new();
         s.encode(&mut out);
         let b = bytes::Bytes::from(out);
-        assert_eq!(Schedule::decode(&mut Reader::new(&b), &ids(&[0, 1, 2]), true), Ok(s));
+        assert_eq!(Schedule::decode(&mut Reader::new(&b), &ids(&[0, 1, 2])), Ok(s));
     }
 
     #[test]
@@ -404,17 +404,15 @@ mod tests {
     }
 
     /// One schedule encoding with a single order: before epochs (`None`) or in `epoch`.
-    fn encoded(epoch: Option<u64>, order: &[u32]) -> bytes::Bytes {
+    fn encoded(epoch: u64, order: &[u32]) -> bytes::Bytes {
         let mut out = Vec::new();
-        if let Some(e) = epoch {
-            out.put_u64_le(e);
-            out.put_u64_le(0);
-            out.put_u32_le(e as u32);
-            for k in 0..e {
-                out.put_u32_le(0);
-                out.put_u64_le(1);
-                out.put_u64_le(k);
-            }
+        out.put_u64_le(epoch);
+        out.put_u64_le(0);
+        out.put_u32_le(epoch as u32);
+        for k in 0..epoch {
+            out.put_u32_le(0);
+            out.put_u64_le(1);
+            out.put_u64_le(k);
         }
         out.put_u32_le(0);
         out.put_u64_le(0);
@@ -428,26 +426,24 @@ mod tests {
     #[test]
     fn decoding_checks_every_order() {
         let members = ids(&[0, 1, 2]);
-        let decode = |epoch: Option<u64>, order: &[u32]| {
-            Schedule::decode(&mut Reader::new(&encoded(epoch, order)), &members, epoch.is_some()).is_ok()
+        let decode = |epoch: u64, order: &[u32]| {
+            Schedule::decode(&mut Reader::new(&encoded(epoch, order)), &members).is_ok()
         };
         // Before any change, orders are permutations of the configured members.
-        for epoch in [None, Some(0)] {
-            assert!(decode(epoch, &[2, 0, 1]));
-            assert!(!decode(epoch, &[0, 1]) && !decode(epoch, &[0, 1, 7]) && !decode(epoch, &[0, 1, 1]));
-        }
+        assert!(decode(0, &[2, 0, 1]));
+        assert!(!decode(0, &[0, 1]) && !decode(0, &[0, 1, 7]) && !decode(0, &[0, 1, 1]));
         // After one, any non-empty order of distinct replicas, up to the bound.
-        assert!(decode(Some(1), &[7, 8]) && decode(Some(1), &[5]));
-        assert!(!decode(Some(1), &[]) && !decode(Some(1), &[7, 7]));
+        assert!(decode(1, &[7, 8]) && decode(1, &[5]));
+        assert!(!decode(1, &[]) && !decode(1, &[7, 7]));
         let max: Vec<u32> = (0..MAX_MEMBERS as u32).collect();
         let over: Vec<u32> = (0..=MAX_MEMBERS as u32).collect();
-        assert!(decode(Some(1), &max) && !decode(Some(1), &over));
+        assert!(decode(1, &max) && !decode(1, &over));
         // An epoch needs at least as many settled changes.
-        let mut short = encoded(Some(2), &[5]).to_vec();
+        let mut short = encoded(2, &[5]).to_vec();
         short[16..20].copy_from_slice(&1u32.to_le_bytes());
         short.drain(20..40);
         let short = bytes::Bytes::from(short);
-        assert!(Schedule::decode(&mut Reader::new(&short), &members, true).is_err());
+        assert!(Schedule::decode(&mut Reader::new(&short), &members).is_err());
     }
 
     proptest::proptest! {
