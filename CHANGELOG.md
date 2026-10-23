@@ -3,17 +3,8 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
-## Unreleased
+## 0.3.4 — 2026-10-23
 
-- `kv-tokio` (reference runtime): log frames and snapshots carry checksums. On restart only
-  a torn tail is truncated; a damaged length field or record before it stops the restart
-  instead of silently cutting acknowledged records. The data directory and its parents are
-  synced on every start. The on-disk format changed: start from an empty data directory.
-- `kv-tokio` (reference runtime): bounded resources under misbehaving inputs. A client
-  connection holds about 1024 unanswered requests and 1 MiB per line; a disk that falls
-  more than 64 MiB behind stalls the event loop instead of buffering; a replica id listed
-  twice in `--members`/`--peers` is rejected; peer reconnects back off up to 5 s; `kv-bench`
-  no longer waits forever on a stalled server.
 - `quepaxa`: a decided membership change takes effect without traffic: while it is
   pending, the slots before it are taken over like stalled slots (the leader first, after
   a hedge delay; the others if it is down) and filled with empty batches. Before, in a quiet
@@ -33,6 +24,15 @@ All notable changes to this project are documented here. The project follows
 - Guide (snapshots): restoring after a crash applies only the re-emitted slots after the
   snapshot's `through`; the example applied all of them, so a crash between storing a
   snapshot and its checkpoint becoming durable applied some operations twice.
+- `examples/kv-tokio`: log frames and snapshots carry checksums. On restart only
+  a torn tail is truncated; a damaged length field or record before it stops the restart
+  instead of silently cutting acknowledged records. The data directory and its parents are
+  synced on every start. The on-disk format changed: start from an empty data directory.
+- `examples/kv-tokio`: bounded resources under misbehaving inputs. A client
+  connection holds about 1024 unanswered requests and 1 MiB per line; a disk that falls
+  more than 64 MiB behind stalls the event loop instead of buffering; a replica id listed
+  twice in `--members`/`--peers` is rejected; peer reconnects back off up to 5 s; `kv-bench`
+  no longer waits forever on a stalled server.
 
 ## 0.3.3 — 2026-10-20
 
