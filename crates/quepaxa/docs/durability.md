@@ -104,5 +104,7 @@ top priority for a slot it may have used it in before.
   ([membership](crate::guide::membership)).
 - Reusing the seed across starts (liveness, not safety: priorities become predictable).
 
-Records are versioned: newer versions of the crate read older records, but older versions
-may not read newer ones. The changelog lists format changes and upgrade notes.
+Records are versioned, but before 1.0 a version reads only its own formats: after a format
+change (listed in the changelog) a replica refuses its old records and snapshots with an
+error rather than misreading them. Upgrade such a replica as a new one: a new id with empty
+storage, added to the cluster ([membership](crate::guide::membership)).

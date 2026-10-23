@@ -9,9 +9,7 @@ use crate::dedup::Dedup;
 use crate::schedule::Schedule;
 use crate::types::NodeId;
 
-/// 2: the schedule is the one as of `next` (version 1 stored the decided-prefix schedule).
-/// 3: adds the configured leader order the schedule was built from.
-/// 4: the schedule carries membership epochs (orders may name non-configured members).
+/// Only this version is read; earlier ones are rejected (no compatibility before 1.0).
 const VERSION: u8 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,29 +40,23 @@ impl CoreState {
     pub fn decode(buf: &Bytes, members: &[NodeId]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(buf);
         let version = r.u8()?;
-        if !(2..=VERSION).contains(&version) {
+        if version != VERSION {
             return Err(DecodeError::BadVersion);
         }
         let next = r.u64()?;
         let mut by_id = members.to_vec();
         by_id.sort_unstable();
-        // Version 2 predates custom orders: its schedule was built by id.
-        let leaders = if version == 2 {
-            by_id
-        } else {
-            let n = r.u32()? as usize;
-            if n != members.len() {
-                return Err(DecodeError::BadTag);
-            }
-            let leaders: Vec<NodeId> = (0..n).map(|_| r.u32().map(NodeId)).collect::<Result<_, _>>()?;
-            let mut sorted = leaders.clone();
-            sorted.sort_unstable();
-            if sorted != by_id {
-                return Err(DecodeError::BadTag);
-            }
-            leaders
-        };
-        let schedule = Schedule::decode(&mut r, members, version >= 4)?;
+        let n = r.u32()? as usize;
+        if n != members.len() {
+            return Err(DecodeError::BadTag);
+        }
+        let leaders: Vec<NodeId> = (0..n).map(|_| r.u32().map(NodeId)).collect::<Result<_, _>>()?;
+        let mut sorted = leaders.clone();
+        sorted.sort_unstable();
+        if sorted != by_id {
+            return Err(DecodeError::BadTag);
+        }
+        let schedule = Schedule::decode(&mut r, members)?;
         let dedup = Dedup::decode(&mut r)?;
         r.finish()?;
         Ok(Self { next, leaders, schedule, dedup })
@@ -115,24 +107,16 @@ mod tests {
     }
 
     #[test]
-    fn version_2_states_were_built_by_id() {
+    fn earlier_versions_are_rejected() {
         let state = CoreState {
             next: 4,
             leaders: members(),
             schedule: Schedule::new(&members()),
             dedup: Dedup::default(),
         };
-        let mut v2 = alloc::vec![2u8];
-        v2.extend_from_slice(&4u64.to_le_bytes());
-        // The pre-epoch schedule encoding: no rotation pending, one order by id.
-        v2.extend_from_slice(&0u32.to_le_bytes());
-        v2.extend_from_slice(&0u64.to_le_bytes());
-        v2.extend_from_slice(&1u32.to_le_bytes());
-        v2.extend_from_slice(&0u64.to_le_bytes());
-        v2.extend_from_slice(&3u32.to_le_bytes());
-        (0..3u32).for_each(|n| v2.extend_from_slice(&n.to_le_bytes()));
-        state.dedup.encode(&mut v2);
-        assert_eq!(CoreState::decode(&Bytes::from(v2), &members()), Ok(state));
+        let mut old = state.encode().to_vec();
+        old[0] = VERSION - 1;
+        assert_eq!(CoreState::decode(&Bytes::from(old), &members()), Err(DecodeError::BadVersion));
     }
 
     #[test]

@@ -15,16 +15,14 @@ const MAGIC: [u8; 2] = *b"QR";
 const FORMAT_VERSION: u8 = 1;
 
 const KIND_INCARNATION: u8 = 1;
-const KIND_RECORDER: u8 = 2;
 const KIND_RESERVATION: u8 = 3;
 const KIND_DECIDED: u8 = 4;
 const KIND_COMPACTED: u8 = 5;
 /// A recorder register whose `agg` and `prev_agg` may refer to an earlier field instead of
-/// repeating its value (on the fast path `agg` is `first`). Replaces `KIND_RECORDER`, which
-/// is still read.
-const KIND_RECORDER_SHARED: u8 = 6;
+/// repeating its value (on the fast path `agg` is `first`). Kind 2 was an earlier encoding.
+const KIND_RECORDER: u8 = 6;
 
-// Field tags of `KIND_RECORDER_SHARED` beyond the codec's nil/present.
+// Field tags of `KIND_RECORDER` beyond the codec's nil/present.
 const SAME_AS_FIRST: u8 = 3;
 const SAME_AS_AGG: u8 = 4;
 
@@ -53,7 +51,7 @@ impl Record {
                 out.put_u64_le(*n);
             }
             Record::Recorder { slot, reg } => {
-                out.put_u8(KIND_RECORDER_SHARED);
+                out.put_u8(KIND_RECORDER);
                 out.put_u64_le(slot.0);
                 out.put_u32_le(reg.step);
                 let (first, agg) = (reg.first.as_ref(), reg.agg.as_ref());
@@ -99,17 +97,6 @@ impl Record {
         let rec = match r.u8()? {
             KIND_INCARNATION => Record::Incarnation(r.u64()?),
             KIND_RECORDER => {
-                let slot = Slot(r.u64()?);
-                let step = r.u32()?;
-                let reg = Register {
-                    step,
-                    first: r.opt_proposal()?,
-                    agg: r.opt_proposal()?,
-                    prev_agg: r.opt_proposal()?,
-                };
-                Record::Recorder { slot, reg }
-            }
-            KIND_RECORDER_SHARED => {
                 let slot = Slot(r.u64()?);
                 let step = r.u32()?;
                 let first = r.opt_proposal()?;
@@ -220,17 +207,14 @@ mod tests {
     }
 
     #[test]
-    fn registers_written_before_value_sharing_still_decode() {
-        let reg = Register { step: 6, first: Some(prop(4, 1, 0)), agg: Some(prop(8, 2, 1)), prev_agg: None };
+    fn an_earlier_recorder_encoding_is_rejected() {
         let mut old = b"QR\x01\x02".to_vec();
         old.extend_from_slice(&9u64.to_le_bytes());
         old.extend_from_slice(&6u32.to_le_bytes());
-        put_opt_proposal(&mut old, reg.first.as_ref());
-        put_opt_proposal(&mut old, reg.agg.as_ref());
-        put_opt_proposal(&mut old, None);
+        old.extend_from_slice(&[0, 0, 0]);
         let crc = crc32c(&old);
         old.extend_from_slice(&crc.to_le_bytes());
-        assert_eq!(Record::decode(&Bytes::from(old)), Ok(Record::Recorder { slot: Slot(9), reg }));
+        assert!(Record::decode(&Bytes::from(old)).is_err());
     }
 
     #[test]
