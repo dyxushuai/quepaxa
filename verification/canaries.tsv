@@ -13,4 +13,4 @@ reconfiguration-applied-twice	-	cargo nextest run -p quepaxa schedule	late dupli
 proposer-uses-configured-members	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	did not converge|G[1345] |agreement
 retire-without-the-new-majority	-	cargo nextest run -p quepaxa --lib caught_up_majority	retired with only one of three
 trace-phase0-adopts-the-first-reply	-	verification/tla/traces.sh	REJECTED
-retire-without-the-barrier	-	cargo nextest run -p quepaxa --test replica_api added_back_after	retired although it was added back
+retire-without-the-barrier	-	cargo nextest run -p quepaxa --test membership_api added_back_after	retired although it was added back
