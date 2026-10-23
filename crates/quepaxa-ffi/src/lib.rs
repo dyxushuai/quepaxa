@@ -21,15 +21,16 @@
 //! ```c
 //! #include "quepaxa.h"
 //!
-//! qpx_config cfg;
-//! qpx_config_init(&cfg, sizeof cfg);          /* defaults; sets cfg.struct_size */
-//! memcpy(cfg.cluster_id, "my-cluster-0001!", 16);
-//! cfg.id = 0;
-//! cfg.members = members;  cfg.members_len = 3; /* uint32_t members[3] = {0, 1, 2} */
-//! fill_with_csprng(cfg.seed, sizeof cfg.seed); /* fresh on every start */
+//! uint32_t members[3] = {0, 1, 2};
+//! uint8_t seed[32];
+//! fill_with_csprng(seed, sizeof seed);         /* fresh on every start */
+//! qpx_config *cfg;
+//! check(qpx_config_new((const uint8_t *)"my-cluster-0001!", 0, members, 3, seed, &cfg));
+//! check(qpx_config_set(cfg, QPX_CONFIG_MAX_IN_FLIGHT_SLOTS, 32)); /* optional settings */
 //!
 //! qpx_replica *r;
-//! check(qpx_replica_new(&cfg, records, n_records, now_ns(), &r)); /* durable records, in order */
+//! check(qpx_replica_new(cfg, records, n_records, now_ns(), &r)); /* durable records, in order */
+//! qpx_config_free(cfg);                        /* the replica keeps its own copy */
 //!
 //! for (;;) {                                   /* after every call: drain */
 //!   qpx_action a;
@@ -77,11 +78,13 @@
 //! # Versioning
 //!
 //! [`qpx_abi_version`] returns `(major << 16) | minor`; compare it with
-//! `QPX_ABI_VERSION_MAJOR`/`MINOR` from the header you compiled against. Versioned structs
-//! (`qpx_config`, `qpx_metrics`) start with `struct_size`, the size the caller compiled
-//! against: the library reads and writes only that many bytes, so a program built against
-//! an older header keeps working (new fields take their defaults). Before 1.0 a minor ABI
-//! bump may still be incompatible; the changelog says when.
+//! `QPX_ABI_VERSION_MAJOR`/`MINOR` from the header you compiled against. Settings and
+//! metrics are not structs: the configuration is an opaque object set option by option
+//! ([`qpx_config_set`]) and metrics are read one by one ([`qpx_metric`]), so a new one is a
+//! new constant, and an option or metric the library does not know is an explicit
+//! `QPX_ERR_INVALID_ARGUMENT`. The only structs are outputs with a fixed layout (`qpx_bytes`,
+//! `qpx_action`, `qpx_entry`). Before 1.0 a minor ABI bump may be incompatible; the
+//! changelog says when.
 #![expect(non_camel_case_types)]
 // C naming for exported types
 // Panics across the C ABI are caught, but production code should not rely on that.
@@ -93,7 +96,13 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{ptr, slice};
 
 use bytes::Bytes;
-use quepaxa::{Action, Config, DropReason, Error, Input, NodeId, PersistId, Replica, Slot, Timestamp};
+use quepaxa::{Action, Error, Input, NodeId, PersistId, Replica, Slot, Timestamp};
+
+mod actions;
+mod config;
+
+pub use actions::*;
+pub use config::*;
 
 /// ABI major version: incompatible changes bump it. While it is 0 the ABI is unstable and
 /// every minor bump may be incompatible.
@@ -105,7 +114,10 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// 0.5: membership changes: `qpx_propose_reconfiguration`, `QPX_ACTION_RECONFIGURED`,
 /// `qpx_action_member`, `QPX_ERR_RECONFIGURATION_PENDING`.
 /// 0.6: `QPX_ACTION_RETIRED`.
-pub const QPX_ABI_VERSION_MINOR: u32 = 6;
+/// 0.7: opaque `qpx_config` (`qpx_config_new`, `qpx_config_set`, `qpx_config_set_leader_order`,
+/// `qpx_config_free`) and `qpx_metric` replace the `qpx_config` and `qpx_metrics` structs,
+/// `qpx_config_init` and `qpx_get_metrics` (incompatible).
+pub const QPX_ABI_VERSION_MINOR: u32 = 7;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -115,7 +127,7 @@ pub const QPX_EMPTY: i32 = 1;
 pub const QPX_BUFFER_TOO_SMALL: i32 = 2;
 /// The call had no effect: the snapshot is older than what the replica already emitted.
 pub const QPX_IGNORED: i32 = 3;
-/// A null pointer, bad `struct_size` or out-of-range index.
+/// A null pointer, unknown option or metric, out-of-range value or index.
 pub const QPX_ERR_INVALID_ARGUMENT: i32 = -1;
 /// The configuration is invalid.
 pub const QPX_ERR_INVALID_CONFIG: i32 = -2;
@@ -188,103 +200,6 @@ impl qpx_bytes {
     }
 }
 
-/// Replica configuration. Initialize with `qpx_config_init`, then set fields.
-#[repr(C)]
-pub struct qpx_config {
-    /// `sizeof(qpx_config)`, set by `qpx_config_init`; lets the struct grow compatibly.
-    pub struct_size: usize,
-    /// Cluster identity; messages from other clusters are dropped.
-    pub cluster_id: [u8; 16],
-    /// This replica.
-    pub id: u32,
-    /// All replicas including this one.
-    pub members: *const u32,
-    /// Number of `members`.
-    pub members_len: usize,
-    /// Fresh CSPRNG output on every start (never reuse it).
-    pub seed: [u8; 32],
-    /// See the Rust `Config` for the meaning of the remaining fields.
-    pub max_batch_bytes: u32,
-    /// Largest accepted message.
-    pub max_message_bytes: u32,
-    /// Concurrent slots driven by this replica (≤ 64).
-    pub max_in_flight_slots: u32,
-    /// Outstanding proposals before `QPX_ERR_BUSY`.
-    pub max_outstanding_proposals: u32,
-    /// Record request retransmission interval, nanoseconds.
-    pub retransmit_interval_ns: u64,
-    /// Lower bound of the hedge delay, nanoseconds.
-    pub hedge_min_ns: u64,
-    /// Upper bound of the hedge delay, nanoseconds.
-    pub hedge_max_ns: u64,
-    /// Preferred leaders, first to last (every member once), or null for "by id".
-    /// Every member must use the same order. ABI 0.4.
-    pub leader_order: *const u32,
-    /// Number of `leader_order` ids (0 with a null `leader_order`).
-    pub leader_order_len: usize,
-}
-
-/// One action. Borrowed fields stay valid until the next call on the handle.
-#[repr(C)]
-pub struct qpx_action {
-    /// `QPX_ACTION_*`.
-    pub kind: u32,
-    /// `QPX_PERSIST_REPLACE` or `QPX_DROP_*`.
-    pub flags: u32,
-    /// Persist id or proposal id.
-    pub id: u64,
-    /// Slot of a commit, committed, read-ready or snapshot action.
-    pub slot: u64,
-    /// Destination of a send, or the peer holding a needed snapshot.
-    pub peer: u32,
-    /// Message of a send.
-    pub bytes: qpx_bytes,
-    /// Records of a persist, or entries of a commit.
-    pub count: usize,
-    /// Messages gated on a persist.
-    pub then_count: usize,
-}
-
-/// A committed entry.
-#[repr(C)]
-pub struct qpx_entry {
-    /// Replica that accepted the proposal.
-    pub origin: u32,
-    /// Its incarnation at the time.
-    pub incarnation: u64,
-    /// The proposal id at the origin.
-    pub id: u64,
-    /// Application bytes.
-    pub payload: qpx_bytes,
-}
-
-/// Replica counters (see the Rust `Metrics`). Set `struct_size` before `qpx_get_metrics`.
-#[repr(C)]
-pub struct qpx_metrics {
-    /// `sizeof(qpx_metrics)` as compiled by the caller.
-    pub struct_size: usize,
-    /// Network messages rejected (malformed, foreign or from non-members).
-    pub messages_rejected: u64,
-    /// Record requests re-sent.
-    pub retransmits: u64,
-    /// Catch-up requests re-sent.
-    pub catch_up_retries: u64,
-    /// Slots learned as decided.
-    pub slots_decided: u64,
-    /// Own decisions on the leader fast path.
-    pub fast_path_decisions: u64,
-    /// Decided batches that failed to decode.
-    pub corrupt_batches: u64,
-    /// Batches forwarded to the leader.
-    pub forwarded: u64,
-    /// Own entries proposed directly after the leader was too slow.
-    pub hedged: u64,
-    /// Gauge: decided slots held in memory.
-    pub retained_slots: u64,
-    /// Gauge: recorder registers held in memory.
-    pub live_registers: u64,
-}
-
 /// An opaque replica handle.
 pub struct qpx_replica {
     replica: Replica,
@@ -301,18 +216,20 @@ thread_local! {
 
 /// An argument check failed before the call reached the replica.
 fn invalid() -> i32 {
-    set_last_error("invalid argument: null pointer, bad size or out-of-range index");
+    set_last_error("invalid argument: null pointer or out-of-range index");
     QPX_ERR_INVALID_ARGUMENT
 }
 
 fn set_last_error(msg: &str) {
-    LAST_ERROR.with(|e| msg.clone_into(&mut e.borrow_mut()));
+    // `try_with`: a call from a TLS destructor after ours ran loses the message, not the
+    // process (a panic here would unwind across the C boundary).
+    let _ = LAST_ERROR.try_with(|e| msg.clone_into(&mut e.borrow_mut()));
 }
 
 /// Records a failing status's description unless a more specific one was set.
 fn note(rc: i32) -> i32 {
     if rc < 0 {
-        LAST_ERROR.with(|e| {
+        let _ = LAST_ERROR.try_with(|e| {
             if e.borrow().is_empty() {
                 // SAFETY: `qpx_status_str` returns a static NUL-terminated string.
                 let s = unsafe { std::ffi::CStr::from_ptr(qpx_status_str(rc)) };
@@ -430,57 +347,12 @@ pub extern "C" fn qpx_status_str(status: i32) -> *const std::ffi::c_char {
     s.as_ptr().cast()
 }
 
-fn default_config() -> qpx_config {
-    let d = Config::new([0; 16], NodeId(0), Vec::new(), [0; 32]);
-    qpx_config {
-        struct_size: size_of::<qpx_config>(),
-        cluster_id: [0; 16],
-        id: 0,
-        members: ptr::null(),
-        members_len: 0,
-        seed: [0; 32],
-        max_batch_bytes: d.max_batch_bytes,
-        max_message_bytes: d.max_message_bytes,
-        max_in_flight_slots: d.max_in_flight_slots,
-        max_outstanding_proposals: d.max_outstanding_proposals,
-        retransmit_interval_ns: d.retransmit_interval,
-        hedge_min_ns: d.hedge_min,
-        hedge_max_ns: d.hedge_max,
-        leader_order: ptr::null(),
-        leader_order_len: 0,
-    }
-}
-
-/// Size of the ABI 0.1 `qpx_config` layout (it ends at `hedge_max_ns`), the smallest the
-/// library accepts. Defined by that field, not by the live struct, so appended fields
-/// never raise it.
-const CONFIG_V1_SIZE: usize = std::mem::offset_of!(qpx_config, hedge_max_ns) + size_of::<u64>();
-
-/// Fills the first `size` bytes of `cfg` (pass `sizeof(qpx_config)`) with defaults,
-/// including `struct_size`; `members` stays null.
+/// Creates a replica with configuration `cfg` (copied; free it whenever) from
+/// `n_records` durable records (in persisted order).
 ///
 /// # Safety
-/// `cfg` must be null or point to `size` writable bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qpx_config_init(cfg: *mut qpx_config, size: usize) -> i32 {
-    set_last_error("");
-    if cfg.is_null() || size < CONFIG_V1_SIZE {
-        return invalid();
-    }
-    let mut init = default_config();
-    let n = size.min(size_of::<qpx_config>());
-    init.struct_size = n;
-    // SAFETY: the caller guarantees `size >= n` writable bytes at `cfg`; `init` has `n` bytes.
-    unsafe { ptr::copy_nonoverlapping((&raw const init).cast::<u8>(), cfg.cast::<u8>(), n) };
-    QPX_OK
-}
-
-/// Creates a replica from `n_records` durable records (in persisted order).
-///
-/// # Safety
-/// `cfg` must point to an initialized `qpx_config` whose `members` points to
-/// `members_len` ids (and `leader_order`, if not null, to `leader_order_len` ids); `records` must point to `n_records` valid `qpx_bytes`; `out` must
-/// be writable. On success `*out` owns a handle to release with `qpx_replica_free`.
+/// `cfg` must come from `qpx_config_new`; `records` must point to `n_records` valid
+/// `qpx_bytes`; `out` must be writable. On success `*out` owns a handle to release with `qpx_replica_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_replica_new(
     cfg: *const qpx_config,
@@ -491,51 +363,12 @@ pub unsafe extern "C" fn qpx_replica_new(
 ) -> i32 {
     set_last_error("");
     let result = catch_unwind(|| {
-        if cfg.is_null() || out.is_null() {
+        if out.is_null() {
             return invalid();
         }
-        // Read only the bytes the caller's layout has; later fields keep their defaults.
-        // SAFETY: `struct_size` is the first field of every layout version.
-        let size = unsafe { cfg.cast::<usize>().read_unaligned() };
-        if size < CONFIG_V1_SIZE {
-            set_last_error("qpx_config.struct_size is smaller than any supported layout");
-            return invalid();
-        }
-        let mut local = default_config();
-        // SAFETY: the caller's struct has `size` readable bytes; we copy at most our size.
-        unsafe {
-            ptr::copy_nonoverlapping(
-                cfg.cast::<u8>(),
-                (&raw mut local).cast::<u8>(),
-                size.min(size_of::<qpx_config>()),
-            )
-        };
-        let c = &local;
-        if c.members.is_null() && c.members_len > 0 {
-            return invalid();
-        }
-        let members = if c.members_len == 0 {
-            Vec::new()
-        } else {
-            // SAFETY: guaranteed by the caller.
-            unsafe { slice::from_raw_parts(c.members, c.members_len) }.iter().copied().map(NodeId).collect()
-        };
-        let mut config = Config::new(c.cluster_id, NodeId(c.id), members, c.seed);
-        config.max_batch_bytes = c.max_batch_bytes;
-        config.max_message_bytes = c.max_message_bytes;
-        config.max_in_flight_slots = c.max_in_flight_slots;
-        config.max_outstanding_proposals = c.max_outstanding_proposals;
-        config.retransmit_interval = c.retransmit_interval_ns;
-        config.hedge_min = c.hedge_min_ns;
-        config.hedge_max = c.hedge_max_ns;
-        if c.leader_order_len > 0 {
-            if c.leader_order.is_null() {
-                return invalid();
-            }
-            // SAFETY: guaranteed by the caller.
-            let order = unsafe { slice::from_raw_parts(c.leader_order, c.leader_order_len) };
-            config.leader_order = order.iter().copied().map(NodeId).collect();
-        }
+        // SAFETY: guaranteed by the caller.
+        let Some(cfg) = (unsafe { cfg.as_ref() }) else { return invalid() };
+        let config = cfg.config.clone();
         let raw: &[qpx_bytes] = if n_records == 0 {
             &[]
         } else if records.is_null() {
@@ -820,39 +653,57 @@ pub unsafe extern "C" fn qpx_install_snapshot(
     if rc == QPX_OK && !adopted { QPX_IGNORED } else { rc }
 }
 
-/// Copies the counters into `out`, writing at most `out->struct_size` bytes (set it to
-/// `sizeof(qpx_metrics)` first).
+/// Network messages rejected (malformed, foreign or from non-members).
+pub const QPX_METRIC_MESSAGES_REJECTED: u32 = 1;
+/// Record requests re-sent.
+pub const QPX_METRIC_RETRANSMITS: u32 = 2;
+/// Catch-up requests re-sent.
+pub const QPX_METRIC_CATCH_UP_RETRIES: u32 = 3;
+/// Slots learned as decided.
+pub const QPX_METRIC_SLOTS_DECIDED: u32 = 4;
+/// Own decisions on the leader fast path.
+pub const QPX_METRIC_FAST_PATH_DECISIONS: u32 = 5;
+/// Decided batches that failed to decode.
+pub const QPX_METRIC_CORRUPT_BATCHES: u32 = 6;
+/// Batches forwarded to the leader.
+pub const QPX_METRIC_FORWARDED: u32 = 7;
+/// Own entries proposed directly after the leader was too slow.
+pub const QPX_METRIC_HEDGED: u32 = 8;
+/// Gauge: decided slots held in memory.
+pub const QPX_METRIC_RETAINED_SLOTS: u32 = 9;
+/// Gauge: recorder registers held in memory.
+pub const QPX_METRIC_LIVE_REGISTERS: u32 = 10;
+
+/// Reads counter or gauge `metric` (`QPX_METRIC_*`, see the Rust `Metrics`) into `out`; an
+/// unknown metric is `QPX_ERR_INVALID_ARGUMENT`.
 ///
 /// # Safety
-/// `h` must be a live handle; `out` must point to a `qpx_metrics` whose `struct_size`
-/// bytes are writable.
+/// `h` must be a live handle; `out` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn qpx_get_metrics(h: *mut qpx_replica, out: *mut qpx_metrics) -> i32 {
+pub unsafe extern "C" fn qpx_metric(h: *mut qpx_replica, metric: u32, out: *mut u64) -> i32 {
     if out.is_null() {
         return invalid();
     }
     with(h, |h| {
-        // SAFETY: `struct_size` is the first field; the caller set it.
-        let size = unsafe { out.cast::<usize>().read_unaligned() };
-        if size < size_of::<usize>() + size_of::<u64>() {
-            return invalid();
-        }
         let m = h.replica.metrics();
-        let v = qpx_metrics {
-            struct_size: size.min(size_of::<qpx_metrics>()),
-            messages_rejected: m.messages_rejected,
-            retransmits: m.retransmits,
-            catch_up_retries: m.catch_up_retries,
-            slots_decided: m.slots_decided,
-            fast_path_decisions: m.fast_path_decisions,
-            corrupt_batches: m.corrupt_batches,
-            forwarded: m.forwarded,
-            hedged: m.hedged,
-            retained_slots: m.retained_slots,
-            live_registers: m.live_registers,
+        let v = match metric {
+            QPX_METRIC_MESSAGES_REJECTED => m.messages_rejected,
+            QPX_METRIC_RETRANSMITS => m.retransmits,
+            QPX_METRIC_CATCH_UP_RETRIES => m.catch_up_retries,
+            QPX_METRIC_SLOTS_DECIDED => m.slots_decided,
+            QPX_METRIC_FAST_PATH_DECISIONS => m.fast_path_decisions,
+            QPX_METRIC_CORRUPT_BATCHES => m.corrupt_batches,
+            QPX_METRIC_FORWARDED => m.forwarded,
+            QPX_METRIC_HEDGED => m.hedged,
+            QPX_METRIC_RETAINED_SLOTS => m.retained_slots,
+            QPX_METRIC_LIVE_REGISTERS => m.live_registers,
+            _ => {
+                set_last_error(&format!("unknown metric {metric}"));
+                return QPX_ERR_INVALID_ARGUMENT;
+            }
         };
-        // SAFETY: the caller guarantees `size` writable bytes; we copy at most our size.
-        unsafe { ptr::copy_nonoverlapping((&raw const v).cast::<u8>(), out.cast::<u8>(), v.struct_size) };
+        // SAFETY: checked non-null; the caller guarantees it is writable.
+        unsafe { out.write(v) };
         QPX_OK
     })
 }
@@ -869,8 +720,7 @@ pub unsafe extern "C" fn qpx_last_error(buf: *mut std::ffi::c_char, cap: usize, 
     if out_len.is_null() || (buf.is_null() && cap > 0) {
         return QPX_ERR_INVALID_ARGUMENT;
     }
-    LAST_ERROR.with(|e| {
-        let msg = e.borrow();
+    let copy = |msg: &str| {
         let need = msg.len() + 1;
         // SAFETY: checked non-null; the caller guarantees it is writable.
         unsafe { out_len.write(need) };
@@ -883,202 +733,14 @@ pub unsafe extern "C" fn qpx_last_error(buf: *mut std::ffi::c_char, cap: usize, 
             buf.add(msg.len()).write(0);
         }
         QPX_OK
-    })
-}
-
-/// Takes the next action into `out`, or returns `QPX_EMPTY`.
-///
-/// # Safety
-/// `h` must be a live handle; `out` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qpx_poll(h: *mut qpx_replica, out: *mut qpx_action) -> i32 {
-    if out.is_null() {
-        return invalid();
-    }
-    with(h, |h| {
-        h.current = h.queue.pop_front();
-        let Some(a) = &h.current else {
-            h.drained = true;
-            return QPX_EMPTY;
-        };
-        let mut v = qpx_action {
-            kind: 0,
-            flags: 0,
-            id: 0,
-            slot: 0,
-            peer: 0,
-            bytes: qpx_bytes::EMPTY,
-            count: 0,
-            then_count: 0,
-        };
-        match a {
-            Action::Persist { id, records, then, replace } => {
-                v.kind = QPX_ACTION_PERSIST;
-                v.id = id.0;
-                v.count = records.len();
-                v.then_count = then.len();
-                v.flags = if *replace { QPX_PERSIST_REPLACE } else { 0 };
-            }
-            Action::Send(o) => {
-                v.kind = QPX_ACTION_SEND;
-                v.peer = o.to.0;
-                v.bytes = qpx_bytes::of(&o.bytes);
-            }
-            Action::Commit { slot, entries } => {
-                v.kind = QPX_ACTION_COMMIT;
-                v.slot = slot.0;
-                v.count = entries.len();
-            }
-            Action::Committed { id, slot } => {
-                v.kind = QPX_ACTION_COMMITTED;
-                v.id = id.0;
-                v.slot = slot.0;
-            }
-            Action::ReadReady { id, slot } => {
-                v.kind = QPX_ACTION_READ_READY;
-                v.id = id.0;
-                v.slot = slot.0;
-            }
-            Action::SnapshotNeeded { peer, through } => {
-                v.kind = QPX_ACTION_SNAPSHOT_NEEDED;
-                v.peer = peer.0;
-                v.slot = through.0;
-            }
-            Action::Reconfigured { epoch, from, members } => {
-                v.kind = QPX_ACTION_RECONFIGURED;
-                v.id = *epoch;
-                v.slot = from.0;
-                v.count = members.len();
-            }
-            Action::Retired { epoch } => {
-                v.kind = QPX_ACTION_RETIRED;
-                v.id = *epoch;
-            }
-            Action::Dropped { id, reason } => {
-                v.kind = QPX_ACTION_DROPPED;
-                v.id = id.0;
-                v.flags = match reason {
-                    DropReason::Fenced => QPX_DROP_FENCED,
-                    _ => 0,
-                };
-            }
-            _ => {}
-        }
-        // SAFETY: checked non-null; the caller guarantees it is writable.
-        unsafe { out.write(v) };
-        QPX_OK
-    })
-}
-
-/// Record `i` of the current persist action.
-///
-/// # Safety
-/// `h` must be a live handle; `out` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qpx_action_record(h: *mut qpx_replica, i: usize, out: *mut qpx_bytes) -> i32 {
-    if out.is_null() {
-        return invalid();
-    }
-    with(h, |h| match &h.current {
-        Some(Action::Persist { records, .. }) if i < records.len() => {
-            // SAFETY: checked non-null; the caller guarantees it is writable.
-            unsafe { out.write(qpx_bytes::of(&records[i])) };
-            QPX_OK
-        }
-        _ => QPX_ERR_INVALID_ARGUMENT,
-    })
-}
-
-/// Message `i` gated on the current persist action, and its destination.
-///
-/// # Safety
-/// `h` must be a live handle; `to` and `out` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qpx_action_then(
-    h: *mut qpx_replica,
-    i: usize,
-    to: *mut u32,
-    out: *mut qpx_bytes,
-) -> i32 {
-    if out.is_null() || to.is_null() {
-        return invalid();
-    }
-    with(h, |h| match &h.current {
-        Some(Action::Persist { then, .. }) if i < then.len() => {
-            // SAFETY: checked non-null; the caller guarantees both are writable.
-            unsafe {
-                to.write(then[i].to.0);
-                out.write(qpx_bytes::of(&then[i].bytes));
-            }
-            QPX_OK
-        }
-        _ => QPX_ERR_INVALID_ARGUMENT,
-    })
-}
-
-/// Member `i` of the current `QPX_ACTION_RECONFIGURED` action (preferred leaders first).
-///
-/// # Safety
-/// `h` must be a live handle; `out` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qpx_action_member(h: *mut qpx_replica, i: usize, out: *mut u32) -> i32 {
-    if out.is_null() {
-        return invalid();
-    }
-    with(h, |h| match &h.current {
-        Some(Action::Reconfigured { members, .. }) if i < members.len() => {
-            // SAFETY: checked non-null; the caller guarantees it is writable.
-            unsafe { out.write(members[i].0) };
-            QPX_OK
-        }
-        _ => QPX_ERR_INVALID_ARGUMENT,
-    })
-}
-
-/// Entry `i` of the current commit action.
-///
-/// # Safety
-/// `h` must be a live handle; `out` writable.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn qpx_action_entry(h: *mut qpx_replica, i: usize, out: *mut qpx_entry) -> i32 {
-    if out.is_null() {
-        return invalid();
-    }
-    with(h, |h| match &h.current {
-        Some(Action::Commit { entries, .. }) if i < entries.len() => {
-            let e = &entries[i];
-            let v = qpx_entry {
-                origin: e.origin.0,
-                incarnation: e.incarnation,
-                id: e.id.0,
-                payload: qpx_bytes::of(&e.payload),
-            };
-            // SAFETY: checked non-null; the caller guarantees it is writable.
-            unsafe { out.write(v) };
-            QPX_OK
-        }
-        _ => QPX_ERR_INVALID_ARGUMENT,
-    })
+    };
+    LAST_ERROR.try_with(|e| copy(&e.borrow())).unwrap_or_else(|_| copy(""))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn layouts_only_ever_grow_at_the_end() {
-        // Appending a field must leave CONFIG_V1_SIZE unchanged and make this fail on purpose.
-        assert_eq!(CONFIG_V1_SIZE, std::mem::offset_of!(qpx_config, leader_order));
-        // The last field ends the layout (up to tail padding on 32-bit targets).
-        assert!(
-            std::mem::offset_of!(qpx_config, leader_order_len) + size_of::<usize>()
-                <= size_of::<qpx_config>()
-        );
-        assert!(
-            size_of::<qpx_config>() - std::mem::offset_of!(qpx_config, leader_order_len)
-                < 2 * size_of::<u64>()
-        );
-    }
+    use quepaxa::Config;
 
     #[test]
     fn a_panic_poisons_the_handle() {

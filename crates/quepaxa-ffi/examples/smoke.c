@@ -90,14 +90,14 @@ int main(void) {
   uint32_t members[N] = {0, 1, 2};
   qpx_replica *r[N];
   for (int i = 0; i < N; i++) {
-    qpx_config cfg;
-    check(qpx_config_init(&cfg, sizeof cfg), "qpx_config_init");
-    memcpy(cfg.cluster_id, "c-smoke-cluster!", 16);
-    cfg.id = (uint32_t)i;
-    cfg.members = members;
-    cfg.members_len = N;
-    for (int k = 0; k < 32; k++) cfg.seed[k] = (uint8_t)(i * 31 + k); /* demo only: use a CSPRNG */
-    check(qpx_replica_new(&cfg, NULL, 0, 0, &r[i]), "qpx_replica_new");
+    uint8_t seed[32];
+    for (int k = 0; k < 32; k++) seed[k] = (uint8_t)(i * 31 + k); /* demo only: use a CSPRNG */
+    qpx_config *cfg;
+    check(qpx_config_new((const uint8_t *)"c-smoke-cluster!", (uint32_t)i, members, N, seed, &cfg),
+          "qpx_config_new");
+    check(qpx_config_set(cfg, QPX_CONFIG_MAX_IN_FLIGHT_SLOTS, 16), "qpx_config_set");
+    check(qpx_replica_new(cfg, NULL, 0, 0, &r[i]), "qpx_replica_new");
+    qpx_config_free(cfg); /* the replica keeps its own copy */
     drain(r, i);
   }
   uint64_t id;
@@ -114,6 +114,12 @@ int main(void) {
   for (int i = 0; i < N; i++) {
     if (!saw_payload[i] || committed[i] == 0) {
       fprintf(stderr, "replica %d did not commit (committed=%llu)\n", i, (unsigned long long)committed[i]);
+      return 1;
+    }
+    uint64_t decided;
+    check(qpx_metric(r[i], QPX_METRIC_SLOTS_DECIDED, &decided), "qpx_metric");
+    if (decided == 0) {
+      fprintf(stderr, "replica %d reports no decided slot\n", i);
       return 1;
     }
     qpx_replica_free(r[i]);
