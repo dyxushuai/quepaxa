@@ -219,6 +219,38 @@ fn options_are_set_one_by_one_and_checked() {
 }
 
 #[test]
+fn options_take_effect_and_a_rejected_value_changes_nothing() {
+    let cfg = config(0, &[0]);
+    assert_eq!(unsafe { qpx_config_set(cfg, QPX_CONFIG_MAX_OUTSTANDING_PROPOSALS, 1) }, QPX_OK);
+    let rejected =
+        unsafe { qpx_config_set(cfg, QPX_CONFIG_MAX_OUTSTANDING_PROPOSALS, u64::from(u32::MAX) + 1) };
+    assert_eq!(rejected, QPX_ERR_INVALID_ARGUMENT);
+    let (rc, h) = replica_from(cfg, &[]);
+    assert_eq!(rc, QPX_OK);
+    let mut a = empty_action();
+    while unsafe { qpx_poll(h, &mut a) } == QPX_OK {}
+    let mut id = 0;
+    assert_eq!(unsafe { qpx_propose(h, 0, b"x".as_ptr(), 1, &mut id) }, QPX_OK);
+    while unsafe { qpx_poll(h, &mut a) } == QPX_OK {}
+    assert_eq!(unsafe { qpx_propose(h, 0, b"y".as_ptr(), 1, &mut id) }, QPX_ERR_BUSY, "still at most one");
+    unsafe { qpx_replica_free(h) };
+    // The largest u32 is in range for every u32 option; every option is known.
+    let cfg = config(0, &[0]);
+    for option in [
+        QPX_CONFIG_MAX_BATCH_BYTES,
+        QPX_CONFIG_MAX_MESSAGE_BYTES,
+        QPX_CONFIG_MAX_IN_FLIGHT_SLOTS,
+        QPX_CONFIG_MAX_OUTSTANDING_PROPOSALS,
+        QPX_CONFIG_RETRANSMIT_INTERVAL_NS,
+        QPX_CONFIG_HEDGE_MIN_NS,
+        QPX_CONFIG_HEDGE_MAX_NS,
+    ] {
+        assert_eq!(unsafe { qpx_config_set(cfg, option, u64::from(u32::MAX)) }, QPX_OK, "option {option}");
+    }
+    unsafe { qpx_config_free(cfg) };
+}
+
+#[test]
 fn a_replica_keeps_its_own_copy_of_the_config() {
     let members = [0u32, 1, 2];
     let cfg = config(0, &members);
@@ -244,6 +276,13 @@ fn metrics_are_readable_over_the_abi() {
     assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_MESSAGES_REJECTED, &mut v) }, QPX_OK);
     assert_eq!(v, 1);
     assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_LIVE_REGISTERS, &mut v) }, QPX_OK);
+    for metric in 1..=QPX_METRIC_LIVE_REGISTERS {
+        assert_eq!(unsafe { qpx_metric(h, metric, &mut v) }, QPX_OK, "metric {metric}");
+    }
+    assert_eq!(
+        unsafe { qpx_metric(h, QPX_METRIC_LIVE_REGISTERS, ptr::null_mut()) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
     assert_eq!(unsafe { qpx_metric(h, 0, &mut v) }, QPX_ERR_INVALID_ARGUMENT);
     assert!(last_error().contains("unknown metric 0"), "{}", last_error());
     unsafe { qpx_replica_free(h) };

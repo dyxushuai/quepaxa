@@ -221,13 +221,15 @@ fn invalid() -> i32 {
 }
 
 fn set_last_error(msg: &str) {
-    LAST_ERROR.with(|e| msg.clone_into(&mut e.borrow_mut()));
+    // `try_with`: a call from a TLS destructor after ours ran loses the message, not the
+    // process (a panic here would unwind across the C boundary).
+    let _ = LAST_ERROR.try_with(|e| msg.clone_into(&mut e.borrow_mut()));
 }
 
 /// Records a failing status's description unless a more specific one was set.
 fn note(rc: i32) -> i32 {
     if rc < 0 {
-        LAST_ERROR.with(|e| {
+        let _ = LAST_ERROR.try_with(|e| {
             if e.borrow().is_empty() {
                 // SAFETY: `qpx_status_str` returns a static NUL-terminated string.
                 let s = unsafe { std::ffi::CStr::from_ptr(qpx_status_str(rc)) };
@@ -718,8 +720,7 @@ pub unsafe extern "C" fn qpx_last_error(buf: *mut std::ffi::c_char, cap: usize, 
     if out_len.is_null() || (buf.is_null() && cap > 0) {
         return QPX_ERR_INVALID_ARGUMENT;
     }
-    LAST_ERROR.with(|e| {
-        let msg = e.borrow();
+    let copy = |msg: &str| {
         let need = msg.len() + 1;
         // SAFETY: checked non-null; the caller guarantees it is writable.
         unsafe { out_len.write(need) };
@@ -732,7 +733,8 @@ pub unsafe extern "C" fn qpx_last_error(buf: *mut std::ffi::c_char, cap: usize, 
             buf.add(msg.len()).write(0);
         }
         QPX_OK
-    })
+    };
+    LAST_ERROR.try_with(|e| copy(&e.borrow())).unwrap_or_else(|_| copy(""))
 }
 
 #[cfg(test)]
