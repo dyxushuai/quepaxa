@@ -10,7 +10,7 @@ crates/quepaxa/src/proposer.rs: replace < with > in SlotProposer::on_reply
 crates/quepaxa/src/recorder.rs: replace > with >= in Register::record
 crates/quepaxa/src/rng.rs: replace >> with << in ChaCha20::next_u32
 crates/quepaxa/src/rng.rs: replace | with ^ in ChaCha20::next_u64
-crates/quepaxa/src/replica/mod.rs: replace > with >= in Replica::on_message
+crates/quepaxa/src/replica/messages.rs: replace > with >= in Replica::on_message
 
 # Equivalent with overwhelming probability: a ChaCha20 output of exactly 0 or u64::MAX.
 crates/quepaxa/src/rng.rs: replace && with || in ChaCha20::priority
@@ -26,14 +26,14 @@ crates/quepaxa/src/replica/log.rs: delete ! in Replica::on_request
 crates/quepaxa/src/replica/log.rs: replace > with >= in Replica::on_catch_up
 crates/quepaxa/src/replica/log.rs: replace Replica::observe_latency with ()
 crates/quepaxa/src/replica/log.rs: replace / with % in Replica::observe_latency
-crates/quepaxa/src/replica/mod.rs: replace > with == in Replica::on_message
-crates/quepaxa/src/replica/mod.rs: replace > with >= in Replica::on_message
-crates/quepaxa/src/replica/mod.rs: replace > with >= in Replica::on_message
-crates/quepaxa/src/replica/mod.rs: replace + with * in Replica::on_message
-crates/quepaxa/src/replica/mod.rs: replace Replica::catch_up_due -> bool with true
-crates/quepaxa/src/replica/mod.rs: replace == with != in Replica::pump
-crates/quepaxa/src/replica/mod.rs: replace > with >= in Replica::pump
-crates/quepaxa/src/replica/mod.rs: replace + with * in Replica::pump
+crates/quepaxa/src/replica/messages.rs: replace > with == in Replica::on_message
+crates/quepaxa/src/replica/messages.rs: replace > with >= in Replica::on_message
+crates/quepaxa/src/replica/messages.rs: replace > with >= in Replica::on_message
+crates/quepaxa/src/replica/messages.rs: replace + with * in Replica::on_message
+crates/quepaxa/src/replica/messages.rs: replace Replica::catch_up_due -> bool with true
+crates/quepaxa/src/replica/messages.rs: replace == with != in Replica::pump
+crates/quepaxa/src/replica/messages.rs: replace > with >= in Replica::pump
+crates/quepaxa/src/replica/messages.rs: replace + with * in Replica::pump
 crates/quepaxa/src/replica/proposing.rs: replace / with * in Replica::hedge_delay
 crates/quepaxa/src/replica/proposing.rs: replace < with <= in Replica::drive
 crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::forward_pending
