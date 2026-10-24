@@ -3,8 +3,12 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
-## Unreleased
+## 0.4.0 — 2026-10-24
 
+- `quepaxa` (breaking): only the current durable and snapshot formats are read. Recorder
+  records of kind 2 and core states of versions 2 and 3 are rejected (`CorruptRecord`,
+  `InvalidCoreState`) instead of converted; before 1.0 a replica whose storage predates a
+  format change rejoins as a new replica (new id, empty storage).
 - `quepaxa-ffi` (breaking, ABI 0.7): no configuration or metrics struct is part of the ABI
   any more. `qpx_config` is an opaque object: `qpx_config_new(cluster_id, id, members,
   n, seed, &cfg)`, `qpx_config_set(cfg, QPX_CONFIG_*, value)`,
@@ -13,10 +17,7 @@ All notable changes to this project are documented here. The project follows
   metric is an explicit `QPX_ERR_INVALID_ARGUMENT`, so new ones never change a layout.
   Removed: the `qpx_config`/`qpx_metrics` structs, `struct_size`, `qpx_config_init`,
   `qpx_get_metrics`.
-- `quepaxa` (breaking): only the current durable and snapshot formats are read. Recorder
-  records of kind 2 and core states of versions 2 and 3 are rejected (`CorruptRecord`,
-  `InvalidCoreState`) instead of converted; before 1.0 a replica whose storage predates a
-  format change rejoins as a new replica (new id, empty storage).
+- `examples/kv-tokio`: tokio 1.53.3 (RUSTSEC-2026-0386; `AsyncFd`, which kv-tokio does not use).
 
 ## 0.3.4 — 2026-10-23
 
