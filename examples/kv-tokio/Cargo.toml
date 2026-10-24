@@ -14,7 +14,7 @@ crc32fast = "1.5"
 getrandom = "0.4"
 mimalloc = { version = "0.1.52", default-features = false }
 quepaxa = { path = "../../crates/quepaxa" }
-tokio = { version = "1.53", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.3", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 
 [lints]
 workspace = true
