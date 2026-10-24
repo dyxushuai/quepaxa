@@ -17,8 +17,6 @@ crates/quepaxa/src/rng.rs: replace && with || in ChaCha20::priority
 
 # Liveness and performance tuning only (when to drive, hedge, retry or catch up, how much
 # to send per page); safety never depends on them and simulations converge either way.
-crates/quepaxa/src/replica/log.rs: replace > with == in Replica::advance_committed
-crates/quepaxa/src/replica/log.rs: replace > with >= in Replica::advance_committed
 crates/quepaxa/src/replica/log.rs: replace || with && in Replica::advance_committed
 crates/quepaxa/src/replica/log.rs: replace != with == in Replica::on_request
 crates/quepaxa/src/replica/log.rs: replace || with && in Replica::on_request
@@ -26,12 +24,8 @@ crates/quepaxa/src/replica/log.rs: delete ! in Replica::on_request
 crates/quepaxa/src/replica/log.rs: replace > with >= in Replica::on_catch_up
 crates/quepaxa/src/replica/log.rs: replace Replica::observe_latency with ()
 crates/quepaxa/src/replica/log.rs: replace / with % in Replica::observe_latency
-crates/quepaxa/src/replica/messages.rs: replace > with == in Replica::on_message
-crates/quepaxa/src/replica/messages.rs: replace > with >= in Replica::on_message
 crates/quepaxa/src/replica/messages.rs: replace > with >= in Replica::on_message
 crates/quepaxa/src/replica/messages.rs: replace + with * in Replica::on_message
-crates/quepaxa/src/replica/messages.rs: replace Replica::catch_up_due -> bool with true
-crates/quepaxa/src/replica/messages.rs: replace == with != in Replica::pump
 crates/quepaxa/src/replica/messages.rs: replace > with >= in Replica::pump
 crates/quepaxa/src/replica/messages.rs: replace + with * in Replica::pump
 crates/quepaxa/src/replica/proposing.rs: replace / with * in Replica::hedge_delay
@@ -41,14 +35,12 @@ crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::cut_batc
 crates/quepaxa/src/replica/proposing.rs: replace < with <= in Replica::alloc_slot
 crates/quepaxa/src/replica/proposing.rs: replace + with * in Replica::alloc_slot
 crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::start
-crates/quepaxa/src/replica/proposing.rs: replace > with < in Replica::start
 crates/quepaxa/src/replica/proposing.rs: replace > with >= in Replica::start
 crates/quepaxa/src/replica/proposing.rs: replace + with * in Replica::start
 crates/quepaxa/src/replica/proposing.rs: replace * with + in Replica::start
 crates/quepaxa/src/replica/proposing.rs: replace * with / in Replica::start
 crates/quepaxa/src/replica/proposing.rs: replace > with >= in Replica::fire_timers
 crates/quepaxa/src/replica/proposing.rs: replace + with * in Replica::fire_timers
-crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::fire_timers
 crates/quepaxa/src/replica/snapshot.rs: replace > with < in Replica::install_snapshot
 crates/quepaxa/src/replica/snapshot.rs: replace > with == in Replica::install_snapshot
 crates/quepaxa/src/replica/snapshot.rs: replace > with >= in Replica::install_snapshot
@@ -64,7 +56,6 @@ crates/quepaxa/src/replica/proposing.rs: replace > with >= in Replica::on_forwar
 
 # Counters for observability on rare paths (a split forward, a reply that fails to resolve,
 # what counts as a fast-path decision).
-crates/quepaxa/src/replica/proposing.rs: delete ! in Replica::forward_pending
 crates/quepaxa/src/replica/proposing.rs: replace += with -= in Replica::forward_pending
 crates/quepaxa/src/replica/proposing.rs: replace += with *= in Replica::forward_pending
 crates/quepaxa/src/replica/proposing.rs: replace += with *= in Replica::on_reply
