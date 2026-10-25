@@ -757,4 +757,271 @@ LEMMA AdvanceStep ==
   <2>8. t.step # s.step BY <2>3, <1>1 DEF PstT
   <2> QED BY <2>3, <2>4, <2>5, <2>6, <2>7, <2>8, <1>1, ProposerStep DEF PstT
 <1> QED BY <1>2, <1>3, Assumptions
+\* The proposer stays at its step (recording a reply, or deciding).
+LEMMA SameStep ==
+    ASSUME IndInv, NEW m \in Reps, m.to \in Proposers, NEW s, s = pst[m.to], NEW ns,
+           UNCHANGED <<reg, rec, seen>>,
+           pst' = [pst EXCEPT ![m.to] = ns],
+           msgs' = msgs \ {m},
+           ns \in PstT, ns.step = s.step, ns.sent = s.sent, ns.p = s.p,
+           GotOK(ns), DecOK(ns), SentOK(m.to, ns)
+    PROVE  IndInv'
+<1>1. s \in PstT BY DEF IndInv, TypeInv, PstT
+<1>2. msgs' = (msgs \ {m}) \cup (IF ns.step # pst[m.to].step THEN RequestsOf(m.to, ns) ELSE {})
+  OBVIOUS
+<1> QED BY <1>1, <1>2, ProposerStep DEF PstT
+
+-----------------------------------------------------------------------------
+(* A proposer handles a reply *)
+
+LEMMA DeliverStep ==
+    ASSUME IndInv, NEW m \in msgs, Deliver(m), UNCHANGED <<rec, seen>>
+    PROVE  IndInv'
+<1>0. PICK s : s = pst[m.to] OBVIOUS
+<1> DEFINE q == m.to
+           got == [s.replies EXCEPT ![m.from] = {m}]
+           reps == UNION {got[r] : r \in Recorders}
+           firsts == {x.first : x \in reps}
+           prevs == {x.prev : x \in reps} \ {Nil}
+           best == IF prevs = {} THEN Nil ELSE Max(prevs)
+           QG == {r \in Recorders : got[r] # {}}
+           G == [s EXCEPT !.replies = got]
+<1>1. /\ m \in Reps /\ m \in RepMsg /\ UNCHANGED reg
+      /\ msgs' = (msgs \ {m}) \cup (IF pst'[q].step # s.step THEN RequestsOf(q, pst'[q]) ELSE {})
+  BY <1>0, RepTyped DEF Deliver, OnReply, Reps
+<1>2. /\ q \in Proposers /\ m.from \in Recorders /\ m.req \in Nat /\ m.step \in Nat
+      /\ m.first \in Proposal \cup {Nil} /\ m.prev \in Proposal \cup {Nil}
+  BY <1>1 DEF RepMsg
+<1>3. /\ Entered(m.from, m.step) /\ FirstAt(m.from, m.step) = m.first
+      /\ PrevAt(m.from, m.step) = m.prev
+      /\ m.step >= m.req /\ m.req <= s.step
+      /\ m.req = s.step /\ m.step = m.req => s.sent[m.from] \in RecAt(m.from, m.step)
+  BY <1>0, <1>1 DEF IndInv, RepInv
+<1>4. /\ s \in PstT /\ GotOK(s) /\ DecOK(s) /\ SentOK(q, s)
+  BY <1>0, <1>2, InvForms DEF IndInv, TypeInv, PstT
+<1>5. pst \in [Proposers -> PstT] BY DEF IndInv, TypeInv, PstT
+<1>6. /\ s.step \in Nat /\ s.step >= FirstStep /\ s.p \in Proposal
+      /\ s.sent \in [Recorders -> Proposal] /\ s.replies \in [Recorders -> SUBSET RepMsg]
+  BY <1>4 DEF PstT, SentOK
+\* Staying put.
+<1>7. pst' = pst => IndInv'
+  <2> SUFFICES ASSUME pst' = pst PROVE IndInv' OBVIOUS
+  <2>1. pst' = [pst EXCEPT ![q] = s] BY <1>0, <1>2, <1>5
+  <2>2. msgs' = msgs \ {m} BY <1>0, <1>1
+  <2>3. UNCHANGED <<reg, rec, seen>> BY <1>1
+  <2> QED BY <1>0, <1>1, <1>2, <1>4, <2>1, <2>2, <2>3, SameStep
+\* At a step other than a draw, the proposer's own proposal is one of its requests.
+<1>8. ~Drawing(q, s.step) => \E m0 \in Reqs : m0.step = s.step /\ m0.prop = s.p
+  <2> SUFFICES ASSUME ~Drawing(q, s.step) PROVE \E m0 \in Reqs : m0.step = s.step /\ m0.prop = s.p
+    OBVIOUS
+  <2>1. PICK x \in Recorders : TRUE BY Assumptions
+  <2>2. [type |-> "req", from |-> q, to |-> x, step |-> s.step, prop |-> s.sent[x]] \in msgs
+    BY <1>0, <1>2 DEF IndInv, SentInv
+  <2>3. s.sent[x] = s.p BY <1>4 DEF SentOK
+  <2> QED BY <2>2, <2>3 DEF Reqs
+<1>9. CASE s.decided # Nil \/ m.req # s.step
+  <2>1. pst' = pst BY <1>0, <1>9 DEF Deliver, OnReply
+  <2> QED BY <1>7, <2>1
+<1>10. CASE s.decided = Nil /\ m.req = s.step /\ m.step > s.step /\ m.first = Nil
+  <2>1. pst' = pst BY <1>0, <1>10 DEF Deliver, OnReply
+  <2> QED BY <1>7, <2>1
+\* Catch-up: adopt the recorder's first proposal at its later step.
+<1>11. CASE s.decided = Nil /\ m.req = s.step /\ m.step > s.step /\ m.first # Nil
+  <2>1. PICK t \in Advance(q, s, m.step, m.first) : pst' = [pst EXCEPT ![q] = t]
+    BY <1>0, <1>11 DEF Deliver, OnReply
+  <2>2. m.first \in RecAt(m.from, m.step) /\ m.first \in Proposal BY <1>2, <1>3, EntryFacts, RecProps
+  <2>3. PICK m0 \in Reqs : m0.step = m.step /\ m0.prop = m.first BY <2>2, RecProps, ReqPropsTyped
+  <2>4. Supported(m.step, m.first) BY <2>3, InvForms
+  <2>5. m.first.prio = H => m.first.key = Leader BY <2>3 DEF IndInv, HInv
+  <2>6. msgs' = (msgs \ {m}) \cup (IF t.step # s.step THEN RequestsOf(q, t) ELSE {})
+    BY <1>1, <2>1, <1>2, <1>5
+  <2> QED BY <1>0, <1>1, <1>2, <1>11, <2>1, <2>2, <2>4, <2>5, <2>6, AdvanceStep
+<1>12. CASE s.decided = Nil /\ m.req = s.step /\ m.step = s.step
+  <2>2. /\ G \in PstT /\ G.step = s.step /\ G.sent = s.sent /\ G.p = s.p
+        /\ G.replies = got /\ G.decided = Nil
+    <3>1. got \in [Recorders -> SUBSET RepMsg] BY <1>1, <1>6
+    <3> QED BY <3>1, <1>4, <1>12 DEF PstT
+  \* Every reply now counted is for this step and recorded the request.
+  <2>0. \A y \in Recorders : \A r \in got[y] :
+            /\ r.from = y /\ r.req = s.step /\ r.step = s.step
+            /\ Entered(y, r.step) /\ FirstAt(y, r.step) = r.first
+            /\ PrevAt(y, r.step) = r.prev
+            /\ s.sent[y] \in RecAt(y, r.step)
+    <3> SUFFICES ASSUME NEW y \in Recorders, NEW r \in got[y]
+                 PROVE  /\ r.from = y /\ r.req = s.step /\ r.step = s.step
+                        /\ Entered(y, r.step) /\ FirstAt(y, r.step) = r.first
+                        /\ PrevAt(y, r.step) = r.prev
+                        /\ s.sent[y] \in RecAt(y, r.step)
+      OBVIOUS
+    <3>1. CASE y = m.from
+      <4>1. r = m BY <3>1, <1>6
+      <4> QED BY <4>1, <3>1, <1>3, <1>12, <1>1 DEF Reps
+    <3>2. CASE y # m.from
+      <4>1. r \in s.replies[y] BY <3>2, <1>6
+      <4> QED BY <4>1, <1>4 DEF GotOK
+    <3> QED BY <3>1, <3>2
+  <2>1. GotOK(G) BY <2>0, <2>2 DEF GotOK
+  <2>3. \A y \in QG : \E r \in got[y] : TRUE BY DEF QG
+  <2>4. \A y \in QG : Entered(y, s.step) /\ FirstAt(y, s.step) \in RecAt(y, s.step)
+                      /\ s.sent[y] \in RecAt(y, s.step)
+    <3> SUFFICES ASSUME NEW y \in QG
+                 PROVE  Entered(y, s.step) /\ FirstAt(y, s.step) \in RecAt(y, s.step)
+                        /\ s.sent[y] \in RecAt(y, s.step)
+      OBVIOUS
+    <3>1. PICK r \in got[y] : TRUE BY <2>3
+    <3>2. Entered(y, s.step) /\ s.sent[y] \in RecAt(y, s.step) BY <3>1, <2>0
+    <3> QED BY <3>2, EntryFacts
+  <2>5. firsts = {FirstAt(y, s.step) : y \in QG}
+    <3>1. \A x \in reps : \E y \in QG : x.first = FirstAt(y, s.step) BY <2>0
+    <3>2. \A y \in QG : \E x \in reps : x.first = FirstAt(y, s.step) BY <2>0, <2>3
+    <3> QED BY <3>1, <3>2
+  <2>6. prevs = {PrevAt(y, s.step) : y \in QG} \ {Nil}
+    <3>1. \A x \in reps : \E y \in QG : x.prev = PrevAt(y, s.step) BY <2>0
+    <3>2. \A y \in QG : \E x \in reps : x.prev = PrevAt(y, s.step) BY <2>0, <2>3
+    <3> QED BY <3>1, <3>2
+  <2>c. Cardinality(QG) \in Nat /\ Quorum \in Nat
+    <3>1. IsFiniteSet(QG) BY Assumptions, FS_Subset
+    <3> QED BY <3>1, Assumptions, FS_CardinalityType DEF Quorum
+  <2>7. firsts \subseteq Proposal BY <2>4, <2>5, RecProps
+  <2>8. CASE Cardinality(QG) < Quorum
+    <3>0. pst' = [pst EXCEPT ![q].replies = got] BY <1>0, <1>12, <2>8 DEF Deliver, OnReply
+    <3>1. pst' = [pst EXCEPT ![q] = G] BY <3>0, <1>0, <1>2, <1>5
+    <3>2. DecOK(G) /\ SentOK(q, G) BY <2>2, <1>4 DEF DecOK, SentOK
+    <3>3. msgs' = msgs \ {m} BY <1>1, <3>1, <1>2, <1>5, <2>2
+    <3>4. UNCHANGED <<reg, rec, seen>> BY <1>1
+    <3> QED BY <1>0, <1>1, <1>2, <2>1, <2>2, <3>1, <3>2, <3>3, <3>4, SameStep
+  <2>9. CASE Cardinality(QG) >= Quorum
+    <3>0. QG \in Quorums /\ QG # {}
+      <4>1. QG \in Quorums BY <2>9 DEF Quorums
+      <4>2. QG # {} BY <4>1, QuorumsIntersect
+      <4> QED BY <4>1, <4>2
+    <3>a. firsts # {} BY <3>0, <2>5
+    <3>b. Nil \notin firsts BY <2>7, ProposalFields
+    <3>c. prevs \subseteq Proposal
+      <4> SUFFICES ASSUME NEW y \in QG, PrevAt(y, s.step) # Nil PROVE PrevAt(y, s.step) \in Proposal
+        BY <2>6
+      <4>1. RecAt(y, s.step - 1) # {} BY <2>4, PrevFacts
+      <4> QED BY <2>4, <4>1, PrevFacts
+    \* A `prev` at this step is a proposal of the step before.
+    <3>d. \A w \in prevs : \E m0 \in Reqs : m0.prop = w
+      <4> SUFFICES ASSUME NEW y \in QG, PrevAt(y, s.step) # Nil
+                   PROVE  \E m0 \in Reqs : m0.prop = PrevAt(y, s.step)
+        BY <2>6
+      <4>1. RecAt(y, s.step - 1) # {} BY <2>4, PrevFacts
+      <4>2. PrevAt(y, s.step) \in ReqProps(s.step - 1) BY <2>4, <4>1, PrevFacts, RecProps
+      <4> QED BY <4>2, ReqPropsTyped
+    <3>e. \A f \in firsts : \E m0 \in Reqs : m0.step = s.step /\ m0.prop = f
+      BY <2>4, <2>5, RecProps, ReqPropsTyped
+    <3>f. (s.step + 1) - 1 = s.step /\ s.step + 1 \in Nat /\ s.step + 1 > s.step BY <1>6
+    <3>g. ~(Cardinality(QG) < Quorum) BY <2>9, <2>c
+    \* The cases of OnReply once a quorum answered.
+    <3>1. CASE s.step % 4 = 0 /\ s.step = FirstStep /\ \A f \in firsts : f # Nil /\ f.prio = H
+      <4> DEFINE D == [G EXCEPT !.decided = CHOOSE f \in firsts : TRUE]
+      <4>0. pst' = [pst EXCEPT ![q].replies = got, ![q].decided = CHOOSE f \in firsts : TRUE]
+        BY <1>0, <1>12, <3>g, <3>1 DEF Deliver, OnReply
+      <4>1. pst' = [pst EXCEPT ![q] = D] BY <4>0, <1>0, <1>2, <1>5
+      <4>2. (CHOOSE f \in firsts : TRUE) \in firsts BY <3>a
+      <4>3. /\ D \in PstT /\ D.step = s.step /\ D.sent = s.sent /\ D.p = s.p /\ D.replies = got
+            /\ D.decided \in firsts
+        BY <2>2, <2>7, <4>2 DEF PstT
+      <4>4. GotOK(D) BY <2>0, <4>3 DEF GotOK
+      <4>5. DecOK(D)
+        <5>1. QS(D) = QG /\ RS(D) = reps BY <4>3 DEF QS, RS
+        <5> QED BY <5>1, <3>0, <3>1, <4>3 DEF DecOK
+      <4>6. SentOK(q, D) BY <4>3, <1>4 DEF SentOK
+      <4>7. msgs' = msgs \ {m} BY <1>1, <4>1, <1>2, <1>5, <4>3
+      <4>8. UNCHANGED <<reg, rec, seen>> BY <1>1
+      <4> QED BY <1>0, <1>1, <1>2, <4>1, <4>3, <4>4, <4>5, <4>6, <4>7, <4>8, SameStep
+    <3>2. CASE s.step % 4 = 0 /\ ~(s.step = FirstStep /\ \A f \in firsts : f # Nil /\ f.prio = H)
+      <4> DEFINE cur == Max(firsts)
+      <4>1. firsts \ {Nil} = firsts BY <3>b
+      <4>a. (IF firsts \ {Nil} = {} THEN s.p ELSE Max(firsts \ {Nil})) = cur BY <4>1, <3>a
+      <4>b. \E t \in Advance(q, s, s.step + 1,
+                             IF firsts \ {Nil} = {} THEN s.p ELSE Max(firsts \ {Nil})) :
+                pst' = [pst EXCEPT ![q] = t]
+        BY <1>0, <1>12, <3>g, <3>2 DEF Deliver, OnReply
+      <4>2. PICK t \in Advance(q, s, s.step + 1, cur) : pst' = [pst EXCEPT ![q] = t]
+        BY <4>a, <4>b
+      <4>3. cur \in firsts /\ \A f \in firsts : Leq(f, cur) BY <2>7, <3>a, MaxProps
+      <4>4. Supported(s.step + 1, cur)
+        <5>1. (s.step + 1) % 4 = 1 BY <3>2, <1>6
+        <5>2. \E y \in QG : FirstAt(y, s.step) = cur BY <4>3, <2>5
+        <5>3. \A y \in QG : Leq(FirstAt(y, s.step), cur) BY <4>3, <2>5
+        <5> QED BY <5>1, <5>2, <5>3, <3>0, <3>f, <2>4 DEF Supported
+      <4>5. cur.prio = H => cur.key = Leader BY <4>3, <3>e DEF IndInv, HInv
+      <4>6. msgs' = (msgs \ {m}) \cup (IF t.step # s.step THEN RequestsOf(q, t) ELSE {})
+        BY <1>1, <4>2, <1>2, <1>5
+      <4> QED BY <1>0, <1>1, <1>2, <1>12, <2>7, <3>f, <4>2, <4>3, <4>4, <4>5, <4>6, AdvanceStep
+    <3>3. CASE s.step % 4 = 2 /\ best = s.p
+      <4> DEFINE D == [G EXCEPT !.decided = s.p]
+      <4>0. pst' = [pst EXCEPT ![q].replies = got, ![q].decided = s.p]
+        BY <1>0, <1>12, <3>g, <3>3 DEF Deliver, OnReply
+      <4>1. pst' = [pst EXCEPT ![q] = D] BY <4>0, <1>0, <1>2, <1>5
+      <4>2. /\ D \in PstT /\ D.step = s.step /\ D.sent = s.sent /\ D.p = s.p /\ D.replies = got
+            /\ D.decided = s.p
+        BY <2>2, <1>6 DEF PstT
+      <4>3. prevs # {} /\ Max(prevs) = s.p BY <3>3, <1>6, ProposalFields
+      <4>4. Max(prevs) \in prevs /\ \A o \in prevs : Leq(o, Max(prevs)) BY <3>c, <4>3, MaxProps
+      <4>5. DecOK(D)
+        <5>1. QS(D) = QG /\ RS(D) = reps BY <4>2 DEF QS, RS
+        <5>2. \A r \in reps : r.prev # Nil => Leq(r.prev, s.p) BY <4>3, <4>4
+        <5>3. \E r \in reps : r.prev = s.p BY <4>3, <4>4
+        <5> QED BY <5>1, <5>2, <5>3, <3>0, <3>3, <4>2 DEF DecOK
+      <4>6. GotOK(D) /\ SentOK(q, D) BY <2>0, <4>2, <1>4 DEF GotOK, SentOK
+      <4>7. msgs' = msgs \ {m} BY <1>1, <4>1, <1>2, <1>5, <4>2
+      <4>8. UNCHANGED <<reg, rec, seen>> BY <1>1
+      <4> QED BY <1>0, <1>1, <1>2, <4>1, <4>2, <4>5, <4>6, <4>7, <4>8, SameStep
+    \* Phases 1 and 2 (no decision) carry the proposal on.
+    <3>4. CASE \/ s.step % 4 = 1
+               \/ s.step % 4 = 2 /\ best # s.p
+      <4>1. PICK t \in Advance(q, s, s.step + 1, s.p) : pst' = [pst EXCEPT ![q] = t]
+        BY <1>0, <1>12, <3>g, <3>4 DEF Deliver, OnReply
+      <4>2. ~Drawing(q, s.step) BY <3>4 DEF Drawing
+      <4>3. PICK m0 \in Reqs : m0.step = s.step /\ m0.prop = s.p BY <1>8, <4>2
+      <4>4. s.p \in ReqProps(s.step) BY <4>3 DEF ReqProps
+      <4>5. s.sent = [x \in Recorders |-> s.p] BY <4>2, <1>4 DEF SentOK
+      <4>6. Supported(s.step + 1, s.p)
+        <5>1. CASE s.step % 4 = 1
+          <6>1. (s.step + 1) % 4 = 2 BY <5>1, <1>6
+          <6>2. \A y \in QG : \E u \in RecAt(y, s.step) : Leq(s.p, u)
+            BY <2>4, <4>5, <1>6, Order
+          <6> QED BY <6>1, <6>2, <4>4, <3>0, <3>f DEF Supported
+        <5>2. CASE s.step % 4 = 2
+          <6>1. (s.step + 1) % 4 = 3 BY <5>2, <1>6
+          <6> QED BY <6>1, <4>4, <3>f DEF Supported
+        <5> QED BY <3>4, <5>1, <5>2
+      <4>7. s.p.prio = H => s.p.key = Leader BY <4>3 DEF IndInv, HInv
+      <4>8. msgs' = (msgs \ {m}) \cup (IF t.step # s.step THEN RequestsOf(q, t) ELSE {})
+        BY <1>1, <4>1, <1>2, <1>5
+      <4> QED BY <1>0, <1>1, <1>2, <1>6, <1>12, <3>f, <4>1, <4>6, <4>7, <4>8, AdvanceStep
+    \* Phase 3 adopts the best `prev`, or keeps its own proposal if there is none.
+    <3>5. CASE s.step % 4 = 3
+      <4> DEFINE cur == IF best = Nil THEN s.p ELSE best
+      <4>1. PICK t \in Advance(q, s, s.step + 1, cur) : pst' = [pst EXCEPT ![q] = t]
+        BY <1>0, <1>12, <3>g, <3>5 DEF Deliver, OnReply
+      <4>2. ~Drawing(q, s.step) BY <3>5 DEF Drawing
+      <4>3. PICK m0 \in Reqs : m0.step = s.step /\ m0.prop = s.p BY <1>8, <4>2
+      <4>4. prevs # {} => best = Max(prevs) /\ best \in prevs /\ best \in Proposal
+        BY <3>c, MaxProps
+      <4>5. prevs = {} => cur = s.p BY ProposalFields, <1>6
+      <4>6. prevs # {} => cur = Max(prevs) BY <4>4, ProposalFields
+      <4>7. cur \in Proposal BY <4>4, <4>5, <4>6, <1>6
+      <4>8. Supported(s.step + 1, cur)
+        <5>1. (s.step + 1) % 4 = 0 /\ s.step + 1 > FirstStep BY <3>5, <1>6 DEF FirstStep
+        <5>2. {PrevAt(y, (s.step + 1) - 1) : y \in QG} \ {Nil} = prevs BY <2>6, <3>f
+        <5>3. prevs = {} => \E w2 \in ReqProps(s.step) : w2.key = cur.key
+          BY <4>3, <4>5 DEF ReqProps
+        <5> QED BY <5>1, <5>2, <5>3, <4>6, <3>0, <3>f, <2>4 DEF Supported
+      <4>9. cur.prio = H => cur.key = Leader
+        <5>1. CASE prevs = {} BY <5>1, <4>5, <4>3 DEF IndInv, HInv
+        <5>2. CASE prevs # {}
+          <6>1. PICK m1 \in Reqs : m1.prop = Max(prevs) BY <5>2, <4>4, <3>d
+          <6> QED BY <5>2, <4>6, <6>1 DEF IndInv, HInv
+        <5> QED BY <5>1, <5>2
+      <4>10. msgs' = (msgs \ {m}) \cup (IF t.step # s.step THEN RequestsOf(q, t) ELSE {})
+        BY <1>1, <4>1, <1>2, <1>5
+      <4> QED BY <1>0, <1>1, <1>2, <1>12, <3>f, <4>1, <4>7, <4>8, <4>9, <4>10, AdvanceStep
+    <3> QED BY <3>1, <3>2, <3>3, <3>4, <3>5, <1>6
+  <2> QED BY <2>8, <2>9, <2>c
+<1> QED BY <1>2, <1>3, <1>6, <1>9, <1>10, <1>11, <1>12
 =============================================================================
