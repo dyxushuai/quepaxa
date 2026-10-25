@@ -3,6 +3,12 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- Verification: a TLAPS proof that the one-slot protocol model (`QuePaxa.tla`) never decides
+  two values, for any number of recorders, proposers and rounds
+  (`verification/tla/prove.sh`, nightly). See VERIFICATION.md for what it covers.
+
 ## 0.4.0 — 2026-10-24
 
 - `quepaxa` (breaking): only the current durable and snapshot formats are read. Recorder

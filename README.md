@@ -21,8 +21,9 @@ partitioned or gone. QuePaxa is the algorithm behind Cloudflare Research's
   an event loop, a simulator).
 - **Embeddable anywhere.** A stable C ABI with prebuilt libraries for Linux, macOS,
   Windows, Android and iOS.
-- **Verified continuously.** Deterministic simulation, model checking, a TLA+ model,
-  fuzzing, Miri and mutation testing, all in CI ([details](#guarantees-and-verification)).
+- **Verified continuously.** A machine-checked (TLAPS) proof that the protocol never
+  decides two values, deterministic simulation, model checking, fuzzing, Miri and mutation
+  testing, all in CI ([details](#guarantees-and-verification)).
 
 ## Install
 
@@ -147,7 +148,9 @@ The first three share a small in-memory driver,
 Checked by unit and property tests; a deterministic simulator (loss, duplication,
 reordering, partitions, crash-restart with lost and torn writes, snapshots, membership
 changes) with agreement and linearizability oracles; delay-bounded model checking of the
-real replica; an independent TLA+ model; fuzzing; Miri; mutation testing with a ratchet;
+real replica; an independent TLA+ model, with a TLAPS proof that it never decides two
+values for any number of replicas and rounds, and trace validation of the Rust code against
+it; fuzzing; Miri; mutation testing with a ratchet;
 and seeded-bug canaries that must keep failing. See [VERIFICATION.md](https://github.com/dyxushuai/quepaxa/blob/main/VERIFICATION.md).
 
 ## Performance
