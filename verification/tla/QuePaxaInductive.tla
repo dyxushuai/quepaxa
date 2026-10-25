@@ -482,4 +482,217 @@ LEMMA RecordStep ==
     <3> QED BY <3>1, <3>2, <1>5, <1>9
   <2> QED BY <2>1, <2>2, <2>3, <2>4
 <1> QED BY <1>12, <1>13, <1>14, <1>15, <1>16, <1>17, <1>18, <1>19, <1>20, <1>21 DEF IndInv
+-----------------------------------------------------------------------------
+(* A proposer changes its own state *)
+
+PstT == [step : Nat, p : Proposal, sent : [Recorders -> Proposal],
+         replies : [Recorders -> SUBSET RepMsg], decided : Proposal \cup {Nil}]
+
+\* GotInv, DecInv, SentInv and SupportInv for one proposer state or request.
+GotOK(s) ==
+    \A y \in Recorders : \A r \in s.replies[y] :
+        /\ r.from = y /\ r.req = s.step /\ r.step = s.step
+        /\ Entered(y, r.step) /\ FirstAt(y, r.step) = r.first /\ PrevAt(y, r.step) = r.prev
+        /\ s.sent[y] \in RecAt(y, r.step)
+QS(s) == {y \in Recorders : s.replies[y] # {}}
+RS(s) == UNION {s.replies[y] : y \in Recorders}
+DecOK(s) ==
+    s.decided # Nil =>
+        /\ QS(s) \in Quorums
+        /\ \/ /\ s.step % 4 = 2 /\ s.decided = s.p
+              /\ \A r \in RS(s) : r.prev # Nil => Leq(r.prev, s.p)
+              /\ \E r \in RS(s) : r.prev = s.p
+           \/ /\ s.step = FirstStep
+              /\ \A r \in RS(s) : r.first # Nil /\ r.first.prio = H
+              /\ \E r \in RS(s) : r.first = s.decided
+SentOK(q, s) ==
+    /\ s.step >= FirstStep
+    /\ Drawing(q, s.step) => \A x \in Recorders : s.sent[x].key = s.p.key /\ s.sent[x].prio \in Prios
+    /\ ~Drawing(q, s.step) => s.sent = [x \in Recorders |-> s.p]
+Supported(t, w) ==
+    /\ t % 4 = 1 =>
+           \E Q \in Quorums :
+               /\ \A y \in Q : Entered(y, t - 1)
+               /\ \E y \in Q : FirstAt(y, t - 1) = w
+               /\ \A y \in Q : Leq(FirstAt(y, t - 1), w)
+    /\ t % 4 = 2 =>
+           /\ w \in ReqProps(t - 1)
+           /\ \E Q \in Quorums : \A y \in Q : \E u \in RecAt(y, t - 1) : Leq(w, u)
+    /\ t % 4 = 3 => w \in ReqProps(t - 1)
+    /\ t % 4 = 0 /\ t > FirstStep =>
+           \E Q \in Quorums :
+               /\ \A y \in Q : Entered(y, t - 1)
+               /\ LET P == {PrevAt(y, t - 1) : y \in Q} \ {Nil}
+                  IN IF P # {} THEN w.key = Max(P).key
+                     ELSE \E w2 \in ReqProps(t - 1) : w2.key = w.key
+
+LEMMA RepTyped ==
+    ASSUME IndInv, NEW r \in Reps
+    PROVE  r \in RepMsg
+<1>1. r \in msgs /\ r.type = "rep" BY DEF Reps
+<1>2. r \in ReqMsg \cup RepMsg BY <1>1 DEF IndInv, TypeInv
+<1>3. r \notin ReqMsg BY <1>1 DEF ReqMsg
+<1> QED BY <1>2, <1>3
+
+LEMMA InvForms ==
+    ASSUME IndInv
+    PROVE  /\ \A q \in Proposers : GotOK(pst[q]) /\ DecOK(pst[q]) /\ SentOK(q, pst[q])
+           /\ \A m \in Reqs : Supported(m.step, m.prop)
+BY DEF IndInv, GotInv, DecInv, SentInv, SupportInv, GotOK, DecOK, SentOK, Supported, QS, RS,
+       GotQ, Got
+
+\* At a phase-0 step only the key of a request's proposal matters for its support.
+LEMMA SupportedKey ==
+    ASSUME NEW t, NEW w, NEW w2, Supported(t, w), t % 4 = 0, w2.key = w.key
+    PROVE  Supported(t, w2)
+BY DEF Supported
+
+\* Support survives any step that keeps the history and only adds requests.
+LEMMA SupportedMono ==
+    ASSUME UNCHANGED <<rec, seen>>, Reqs \subseteq Reqs', NEW t, NEW w, Supported(t, w)
+    PROVE  Supported(t, w)'
+<1>1. \A y, u : /\ RecAt(y, u)' = RecAt(y, u) /\ Entered(y, u)' = Entered(y, u)
+                /\ FirstAt(y, u)' = FirstAt(y, u) /\ PrevAt(y, u)' = PrevAt(y, u)
+  BY DEF RecAt, Entered, SeenAt, FirstAt, PrevAt, EntryOf
+<1>2. \A u : ReqProps(u) \subseteq ReqProps(u)' BY DEF ReqProps
+<1>3. \A Q \in Quorums : {PrevAt(y, t - 1)' : y \in Q} = {PrevAt(y, t - 1) : y \in Q} BY <1>1
+<1> QED BY <1>1, <1>2, <1>3 DEF Supported
+
+\* IndInv survives a step in which proposer q moves to `ns`, the reply m is consumed, and
+\* q's requests for a new step are sent, provided `ns` is locally consistent.
+LEMMA ProposerStep ==
+    ASSUME IndInv, NEW m \in Reps, NEW q \in Proposers, NEW ns,
+           UNCHANGED <<reg, rec, seen>>,
+           pst' = [pst EXCEPT ![q] = ns],
+           msgs' = (msgs \ {m}) \cup (IF ns.step # pst[q].step THEN RequestsOf(q, ns) ELSE {}),
+           ns \in PstT,
+           ns.step >= pst[q].step,
+           ns.step = pst[q].step => ns.sent = pst[q].sent /\ ns.p = pst[q].p,
+           GotOK(ns), DecOK(ns), SentOK(q, ns),
+           ns.step # pst[q].step =>
+               \A x \in Recorders : /\ Supported(ns.step, ns.sent[x])
+                                    /\ ns.sent[x].prio = H => ns.sent[x].key = Leader
+    PROVE  IndInv'
+<1> DEFINE NR == IF ns.step # pst[q].step THEN RequestsOf(q, ns) ELSE {}
+<1>1. /\ \A p \in Proposers : GotOK(pst[p]) /\ DecOK(pst[p]) /\ SentOK(p, pst[p])
+      /\ \A m2 \in Reqs : Supported(m2.step, m2.prop)
+  BY InvForms
+<1>2. pst \in [Proposers -> PstT] /\ msgs \subseteq ReqMsg \cup RepMsg BY DEF IndInv, TypeInv, PstT
+<1>3. pst' \in [Proposers -> PstT] /\ pst'[q] = ns /\ \A p \in Proposers \ {q} : pst'[p] = pst[p]
+  BY <1>2
+<1>4. \A r \in NR : r = [type |-> "req", from |-> q, to |-> r.to, step |-> ns.step,
+                         prop |-> ns.sent[r.to]] /\ r.to \in Recorders /\ ns.step # pst[q].step
+  BY DEF RequestsOf
+<1>5. Reqs' = Reqs \cup NR /\ Reps' = Reps \ {m} BY <1>4 DEF Reqs, Reps
+<1>6. \A p \in Proposers : pst'[p].step >= pst[p].step BY <1>2, <1>3 DEF PstT
+<1>a. TypeInv'
+  <2>1. NR \subseteq ReqMsg BY <1>4, <1>3, <1>2 DEF ReqMsg, PstT
+  <2> QED BY <1>3, <2>1 DEF IndInv, TypeInv, PstT
+<1>b. RegInv' /\ SeenInv'
+  <2>1. RegInv' BY DEF IndInv, RegInv, RecAt, Entered, SeenAt, FirstAt, PrevAt, EntryOf
+  <2>2. SeenInv' BY <1>5 DEF IndInv, SeenInv, RecAt, Entered, SeenAt
+  <2> QED BY <2>1, <2>2
+<1>c. ReqInv'
+  <2> SUFFICES ASSUME NEW m2 \in Reqs'
+               PROVE  /\ m2.step >= FirstStep
+                      /\ m2.step <= pst'[m2.from].step
+                      /\ m2.step = pst'[m2.from].step => m2.prop = pst'[m2.from].sent[m2.to]
+    BY DEF ReqInv
+  <2>1. CASE m2 \in Reqs
+    <3>1. /\ m2.step >= FirstStep /\ m2.step <= pst[m2.from].step
+          /\ m2.step = pst[m2.from].step => m2.prop = pst[m2.from].sent[m2.to]
+          /\ m2.from \in Proposers /\ m2.step \in Nat
+      BY <2>1, ReqTyped DEF IndInv, ReqInv
+    <3>2. CASE m2.from = q
+      <4>1. ns.step # pst[q].step => m2.step < ns.step BY <3>1, <3>2, <1>2 DEF PstT
+      <4> QED BY <3>1, <3>2, <4>1, <1>3, <1>6
+    <3>3. CASE m2.from # q BY <3>1, <3>3, <1>3
+    <3> QED BY <3>2, <3>3
+  <2>2. CASE m2 \in NR
+    <3>1. ns.step >= FirstStep BY DEF SentOK
+    <3>2. m2.from = q /\ m2.step = ns.step /\ m2.prop = ns.sent[m2.to] BY <2>2, <1>4
+    <3> QED BY <3>1, <3>2, <1>3 DEF PstT
+  <2> QED BY <1>5, <2>1, <2>2
+<1>d. SentInv'
+  <2> SUFFICES ASSUME NEW p \in Proposers
+               PROVE  /\ SentOK(p, pst'[p])
+                      /\ \A x \in Recorders :
+                             [type |-> "req", from |-> p, to |-> x, step |-> pst'[p].step,
+                              prop |-> pst'[p].sent[x]] \in msgs'
+    BY DEF SentInv, SentOK
+  <2>1. \A x \in Recorders :
+            [type |-> "req", from |-> p, to |-> x, step |-> pst[p].step,
+             prop |-> pst[p].sent[x]] \in msgs
+    BY DEF IndInv, SentInv
+  <2>2. CASE p = q /\ ns.step # pst[q].step
+    <3>1. \A x \in Recorders :
+              [type |-> "req", from |-> q, to |-> x, step |-> ns.step, prop |-> ns.sent[x]] \in NR
+      BY <2>2 DEF RequestsOf
+    <3> QED BY <2>2, <3>1, <1>3
+  <2>3. CASE p = q /\ ns.step = pst[q].step
+    <3>1. \A x \in Recorders :
+              [type |-> "req", from |-> q, to |-> x, step |-> pst[q].step,
+               prop |-> pst[q].sent[x]] # m
+      BY DEF Reps
+    <3> QED BY <2>1, <2>3, <3>1, <1>3
+  <2>4. CASE p # q
+    <3>1. \A x \in Recorders :
+              [type |-> "req", from |-> p, to |-> x, step |-> pst[p].step,
+               prop |-> pst[p].sent[x]] # m
+      BY DEF Reps
+    <3> QED BY <1>1, <2>1, <2>4, <3>1, <1>3
+  <2> QED BY <2>2, <2>3, <2>4
+<1>e. RepInv'
+  <2> SUFFICES ASSUME NEW r \in Reps'
+               PROVE  /\ Entered(r.from, r.step)'
+                      /\ FirstAt(r.from, r.step)' = r.first
+                      /\ PrevAt(r.from, r.step)' = r.prev
+                      /\ r.req >= FirstStep
+                      /\ r.step >= r.req
+                      /\ r.req <= pst'[r.to].step
+                      /\ r.req = pst'[r.to].step /\ r.step = r.req =>
+                             pst'[r.to].sent[r.from] \in RecAt(r.from, r.step)'
+    BY DEF RepInv
+  <2>1. r \in Reps BY <1>5
+  <2>2. /\ Entered(r.from, r.step) /\ FirstAt(r.from, r.step) = r.first
+        /\ PrevAt(r.from, r.step) = r.prev /\ r.req >= FirstStep /\ r.step >= r.req
+        /\ r.req <= pst[r.to].step
+        /\ r.req = pst[r.to].step /\ r.step = r.req =>
+               pst[r.to].sent[r.from] \in RecAt(r.from, r.step)
+        /\ r.to \in Proposers /\ r.req \in Nat
+    <3>1. r \in RepMsg BY <2>1, RepTyped
+    <3> QED BY <2>1, <3>1 DEF IndInv, RepInv, RepMsg
+  <2>3. \A y, u : /\ RecAt(y, u)' = RecAt(y, u) /\ Entered(y, u)' = Entered(y, u)
+                  /\ FirstAt(y, u)' = FirstAt(y, u) /\ PrevAt(y, u)' = PrevAt(y, u)
+    BY DEF RecAt, Entered, SeenAt, FirstAt, PrevAt, EntryOf
+  <2>4. CASE r.to = q
+    <3>1. ns.step # pst[q].step => r.req < ns.step BY <2>2, <2>4, <1>2 DEF PstT
+    <3> QED BY <2>2, <2>3, <2>4, <3>1, <1>3, <1>6
+  <2>5. CASE r.to # q BY <2>2, <2>3, <2>5, <1>3
+  <2> QED BY <2>4, <2>5
+<1>f. GotInv' /\ DecInv'
+  \* GotOK(pst[p])' is GotOK of the new state against the (unchanged) history.
+  <2>1. \A p \in Proposers : GotOK(pst[p])' /\ DecOK(pst[p])'
+    <3> SUFFICES ASSUME NEW p \in Proposers PROVE GotOK(pst[p])' /\ DecOK(pst[p])' OBVIOUS
+    <3>0. PICK sp : sp = pst'[p] OBVIOUS
+    <3>1. GotOK(sp) /\ DecOK(sp) BY <1>1, <1>3, <3>0
+    <3>2. GotOK(sp)' /\ DecOK(sp)'
+      BY <3>1 DEF GotOK, DecOK, QS, RS, RecAt, Entered, SeenAt, FirstAt, PrevAt, EntryOf
+    <3> QED BY <3>0, <3>2 DEF GotOK, DecOK, QS, RS
+  <2> QED BY <2>1 DEF GotInv, DecInv, GotOK, DecOK, QS, RS, GotQ, Got
+<1>g. HInv'
+  <2> SUFFICES ASSUME NEW m2 \in Reqs', m2.prop.prio = H PROVE m2.prop.key = Leader BY DEF HInv
+  <2>1. CASE m2 \in Reqs BY <2>1 DEF IndInv, HInv
+  <2>2. CASE m2 \in NR BY <2>2, <1>4
+  <2> QED BY <1>5, <2>1, <2>2
+<1>h. SupportInv'
+  <2> SUFFICES \A m2 \in Reqs' : Supported(m2.step, m2.prop)' BY DEF SupportInv, Supported
+  <2>0. Reqs \subseteq Reqs' BY <1>5
+  <2> SUFFICES ASSUME NEW m2 \in Reqs' PROVE Supported(m2.step, m2.prop)' OBVIOUS
+  <2>1. Supported(m2.step, m2.prop)
+    <3>1. CASE m2 \in Reqs BY <3>1, <1>1
+    <3>2. CASE m2 \in NR BY <3>2, <1>4
+    <3> QED BY <1>5, <3>1, <3>2
+  <2> QED BY <2>0, <2>1, SupportedMono
+<1> QED BY <1>a, <1>b, <1>c, <1>d, <1>e, <1>f, <1>g, <1>h DEF IndInv
 =============================================================================
