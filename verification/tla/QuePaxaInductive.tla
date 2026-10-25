@@ -695,4 +695,66 @@ LEMMA ProposerStep ==
     <3> QED BY <1>5, <3>1, <3>2
   <2> QED BY <2>0, <2>1, SupportedMono
 <1> QED BY <1>a, <1>b, <1>c, <1>d, <1>e, <1>f, <1>g, <1>h DEF IndInv
+\* What a draw for step st is: drawn priorities with cur's key, or cur itself.
+LEMMA DrawFacts ==
+    ASSUME NEW q \in Proposers, NEW st, NEW cur \in Proposal, NEW d \in Draws(q, st, cur)
+    PROVE  /\ d \in [Recorders -> Proposal]
+           /\ Drawing(q, st) => \A x \in Recorders : d[x].key = cur.key /\ d[x].prio \in Prios
+           /\ ~Drawing(q, st) => d = [x \in Recorders |-> cur]
+<1>1. CASE Drawing(q, st)
+  <2>1. PICK f \in [Recorders -> Prios] : d = [r \in Recorders |-> [prio |-> f[r], key |-> cur.key]]
+    BY <1>1 DEF Draws, DrawPool, Drawing
+  <2> QED BY <1>1, <2>1, ProposalFields DEF Proposal
+<1>2. CASE ~Drawing(q, st)
+  <2>1. d = [x \in Recorders |-> cur] BY <1>2 DEF Draws, DrawPool, Drawing
+  <2> QED BY <1>2, <2>1
+<1> QED BY <1>1, <1>2
+
+\* The proposer moves to step st with proposal cur (or stays, past MaxStep).
+LEMMA AdvanceStep ==
+    ASSUME IndInv, NEW m \in Reps, NEW q \in Proposers, NEW s, s = pst[q],
+           NEW st \in Nat, st > s.step, NEW cur \in Proposal, NEW t \in Advance(q, s, st, cur),
+           s.decided = Nil,
+           UNCHANGED <<reg, rec, seen>>, pst' = [pst EXCEPT ![q] = t],
+           msgs' = (msgs \ {m}) \cup (IF t.step # s.step THEN RequestsOf(q, t) ELSE {}),
+           Supported(st, cur),
+           cur.prio = H => cur.key = Leader
+    PROVE  IndInv'
+<1>1. /\ GotOK(s) /\ DecOK(s) /\ SentOK(q, s) /\ s \in PstT
+  BY InvForms DEF IndInv, TypeInv, PstT
+<1>2. CASE st > MaxStep
+  <2>1. t = s BY <1>2 DEF Advance
+  <2> QED BY <1>1, <2>1, ProposerStep DEF PstT
+<1>3. CASE st <= MaxStep
+  <2>1. PICK d \in Draws(q, st, cur) :
+            t = [s EXCEPT !.step = st, !.p = cur, !.sent = d, !.replies = [r \in Recorders |-> {}]]
+    BY <1>3, Assumptions DEF Advance
+  <2>2. /\ d \in [Recorders -> Proposal]
+        /\ Drawing(q, st) => \A x \in Recorders : d[x].key = cur.key /\ d[x].prio \in Prios
+        /\ ~Drawing(q, st) => d = [x \in Recorders |-> cur]
+    BY DrawFacts
+  <2>3. /\ t.step = st /\ t.p = cur /\ t.sent = d /\ t.replies = [r \in Recorders |-> {}]
+        /\ t.decided = Nil
+    BY <2>1, <1>1 DEF PstT
+  <2>4. t \in PstT BY <2>1, <2>2, <1>1 DEF PstT
+  <2>5. GotOK(t) /\ DecOK(t) BY <2>3 DEF GotOK, DecOK
+  <2>6. SentOK(q, t)
+    <3>1. t.step >= FirstStep BY <2>3, <1>1 DEF SentOK, PstT, FirstStep
+    <3>2. Drawing(q, t.step) = Drawing(q, st) BY <2>3
+    <3> QED BY <2>2, <2>3, <3>1, <3>2 DEF SentOK
+  <2>7. \A x \in Recorders : /\ Supported(st, d[x])
+                             /\ d[x].prio = H => d[x].key = Leader
+    <3> SUFFICES ASSUME NEW x \in Recorders
+                 PROVE  Supported(st, d[x]) /\ (d[x].prio = H => d[x].key = Leader)
+      OBVIOUS
+    <3>1. CASE Drawing(q, st)
+      <4>1. d[x].key = cur.key /\ d[x].prio \in Prios BY <2>2, <3>1
+      <4>2. d[x].prio # H BY <4>1, Assumptions DEF H
+      <4>3. st % 4 = 0 BY <3>1 DEF Drawing
+      <4> QED BY <4>1, <4>2, <4>3, SupportedKey
+    <3>2. CASE ~Drawing(q, st) BY <2>2, <3>2
+    <3> QED BY <3>1, <3>2
+  <2>8. t.step # s.step BY <2>3, <1>1 DEF PstT
+  <2> QED BY <2>3, <2>4, <2>5, <2>6, <2>7, <2>8, <1>1, ProposerStep DEF PstT
+<1> QED BY <1>2, <1>3, Assumptions
 =============================================================================
