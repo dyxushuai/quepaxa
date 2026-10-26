@@ -107,21 +107,24 @@ liveness.
 
 `MembershipProof.tla` and `MembershipRecover.tla` prove `Membership.tla`'s two rules, for
 any number of replicas, slots, members and changes and any `LAG` ≥ 1 (the only other
-assumptions: finitely many replicas, member sets made of them):
+assumptions: finitely many replicas, non-empty member sets made of them):
 
 - **ViewAgree** (the window rule): logs hold only decided slots, views that agree on a
   prefix fold to the same schedule, and a slot within `LAG` before *s* never changes who
   the members of *s* are, change or not.
 - **Recoverable** (retirement): every decided slot is in custody, either of its own
   members' registers while none of them retired, or of a later epoch whose majority,
-  none retired, durably holds it. A retirement hands every slot before the new epoch to
-  that epoch; the hand-over is pinned at a fully decided point of the log, so later
-  decisions never undo it. A tolerable set of replicas down, a minority of every member
-  set from the slot on, leaves a holder.
+  none retired, durably holds it. The latest such hand-over (the frontier) is pinned at a
+  fully decided point of the log, so later decisions never undo it; a retiring replica's
+  epoch becomes the frontier if it is later, and otherwise its slots are already with
+  the frontier's epoch. A tolerable set of replicas down, a minority of every member set
+  from the slot on, leaves a holder.
 
-Two facts the proof needs are now explicit in the model: a retiring replica's applied
-prefix covers every slot decided by then (its read barrier is applied in order), and a
-change never names a retired replica (the operator rule the membership guide states).
+The proof needs the operator rule the membership guide states, now explicit in the
+model: a change never names a retired replica, and a replica a change adds back keeps
+running until it applied that change (it may learn of the change only after retiring,
+so no implementation can rule this out). A retired replica that restarts and rejoins is
+a new replica, outside the model.
 The fault bound is a minority of *every* member set from the slot on, not of the current
 members alone: during a change, losing an old member and a new one can lose an old slot
 (TLC finds it with five replicas), which the membership guide now says.

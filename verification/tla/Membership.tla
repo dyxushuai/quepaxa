@@ -25,10 +25,11 @@
 (*   minority of every member set from the slot on down as well (so one   *)
 (*   durable copy on a new member is not enough).                         *)
 (*                                                                         *)
-(* Assumed: a change never names a retired replica. A replica added back *)
-(* may learn of that only after it retired (the change may be in no       *)
-(* member's durable state yet), so no implementation can rule it out; the *)
-(* operator keeps a replica it adds back.                                 *)
+(* Assumed, the operator rule: a change never names a retired replica,   *)
+(* and a replica a change adds back keeps running until it applied that  *)
+(* change. It may learn of the change only after retiring (the change may *)
+(* be in no member's durable state yet), so no implementation can rule it *)
+(* out. A retired replica that restarts rejoins as a new one.            *)
 (*                                                                         *)
 (* Not modelled: what happens inside a slot (QuePaxa.tla), leader         *)
 (* rotation, snapshots, liveness. run.sh checks that seeded bugs in each  *)
@@ -135,10 +136,11 @@ Crash(r) ==
     /\ log' = [log EXCEPT ![r] = dlog[r]]
     /\ UNCHANGED <<decided, dlog, retired>>
 
-\* Action::Retired: r is not a member of the latest epoch it knows, a majority of that
-\* epoch's members durably know every slot before it, and r's read barrier committed: the
-\* barrier is applied in order, so r's prefix covers every slot decided by then (and a
-\* change adding r back would be in its latest epoch).
+\* Action::Retired: r is not a member of the latest epoch it knows (from the prefix it
+\* applied, as its read barrier commits in order), and a majority of that epoch's members
+\* durably know every slot before it. Later slots may be decided and unknown to r. The
+\* operator rule: a change that adds r back keeps it running, so r does not retire while a
+\* decided change it has not applied names it.
 Retire(r) ==
     LET st == Latest(r)
         caught == {m \in st.nxt : Prefix(dlog[m]) >= st.from}
@@ -146,7 +148,8 @@ Retire(r) ==
        /\ st.from > 0
        /\ r \notin st.nxt
        /\ 2 * Cardinality(caught) > Cardinality(st.nxt)
-       /\ \A t \in Slots : decided[t] # None => t < Prefix(log[r])
+       /\ \A t \in Slots : decided[t] # None /\ Truth[t].k = "change" /\ r \in Truth[t].m =>
+              t < Prefix(log[r])
        /\ retired' = retired \cup {r}
        /\ UNCHANGED <<decided, log, dlog>>
 

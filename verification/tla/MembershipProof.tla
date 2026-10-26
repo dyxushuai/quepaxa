@@ -8,6 +8,7 @@
 (* never change; the rest is about the schedule fold alone: views that     *)
 (* agree on a prefix fold to the same schedule, and a slot within LAG      *)
 (* before s, change or not, does not change who the members of s are.     *)
+(* The fold lemmas here also serve MembershipRecover.tla.                 *)
 (***************************************************************************)
 EXTENDS Membership, TLAPS, NaturalsInduction
 
@@ -154,34 +155,6 @@ LEMMA FromBound ==
 <1>3. \A n \in Nat : P(n) BY <1>1, <1>2, NatInduction
 <1> QED BY <1>3 DEF P
 
-\* Slots that install nothing keep the epoch being installed.
-LEMMA WriteSteps ==
-    ASSUME NEW val, NEW n \in Nat, NEW m \in Nat, n <= m,
-           \A t \in n..(m - 1) : val[t].k # "change"
-    PROVE  Folded(val)[m].nxt = Folded(val)[n].nxt /\ Folded(val)[m].from = Folded(val)[n].from
-<1> DEFINE P(j) == n + j <= m =>
-                       Folded(val)[n + j].nxt = Folded(val)[n].nxt
-                       /\ Folded(val)[n + j].from = Folded(val)[n].from
-<1>1. P(0) OBVIOUS
-<1>2. \A j \in Nat : P(j) => P(j + 1)
-  <2> SUFFICES ASSUME NEW j \in Nat, P(j), n + j + 1 <= m
-               PROVE  Folded(val)[n + j + 1].nxt = Folded(val)[n].nxt
-                      /\ Folded(val)[n + j + 1].from = Folded(val)[n].from
-    OBVIOUS
-  <2>1. Folded(val)[n + j + 1] = FoldStep(Folded(val)[n + j], n + j, val) BY FoldedDef
-  <2>2. IsSt(Folded(val)[n + j]) /\ val[n + j].k # "change" BY FoldedShape
-  <2>3. Folded(val)[n + j + 1].nxt = Folded(val)[n + j].nxt
-        /\ Folded(val)[n + j + 1].from = Folded(val)[n + j].from
-    <3>1. n + j \in Nat OBVIOUS
-    <3> QED BY <2>1, <2>2, <3>1, StepKeeps
-  <2>4. Folded(val)[n + j].nxt = Folded(val)[n].nxt /\ Folded(val)[n + j].from = Folded(val)[n].from
-    OBVIOUS
-  <2> QED BY <2>3, <2>4
-<1> HIDE DEF P
-<1>3. \A j \in Nat : P(j) BY <1>1, <1>2, NatInduction
-<1>4. P(m - n) BY <1>3
-<1> QED BY <1>4 DEF P
-
 \* While an epoch is pending past m, folding up to m changes nothing.
 LEMMA PendingSteps ==
     ASSUME NEW val, NEW n \in Nat, NEW m \in Nat, n <= m, Folded(val)[n].from >= m
@@ -241,6 +214,154 @@ LEMMA InForce ==
   <2> QED BY <1>2, <1>3, <2>1, StepKeeps
 <1> QED BY <1>1, <1>4
 
+\* From a point k at which the epoch being installed is in force, the members of any later
+\* slot are that epoch's or those of a change at a slot from k on.
+LEMMA Sources ==
+    ASSUME NEW val, NEW k \in Nat, Folded(val)[k].from <= k, NEW u \in Nat, k <= u
+    PROVE  /\ Folded(val)[u].nxt \in {Folded(val)[k].nxt} \cup {val[t].m : t \in k..(u - 1)}
+           /\ Eff(Folded(val)[u], u) \in {Folded(val)[k].nxt} \cup {val[t].m : t \in k..(u - 1)}
+<1> DEFINE S(n) == {Folded(val)[k].nxt} \cup {val[t].m : t \in k..(n - 1)}
+           C(j) == /\ Folded(val)[k + j].nxt \in S(k + j)
+                   /\ Folded(val)[k + j].from > k + j => Folded(val)[k + j].cur \in S(k + j)
+<1>1. C(0)
+  <2>1. k + 0 = k OBVIOUS
+  <2>2. Folded(val)[k].nxt \in S(k) OBVIOUS
+  <2>3. ~(Folded(val)[k].from > k) BY FoldedShape DEF IsSt
+  <2> QED BY <2>1, <2>2, <2>3
+<1>2. \A j \in Nat : C(j) => C(j + 1)
+  <2> SUFFICES ASSUME NEW j \in Nat, C(j) PROVE C(j + 1) OBVIOUS
+  <2> DEFINE n == k + j  st == Folded(val)[n]
+             act == IF st.from <= n THEN [st EXCEPT !.cur = st.nxt] ELSE st
+  <2>1. Folded(val)[n + 1] = FoldStep(st, n, val) /\ IsSt(st) /\ n \in Nat BY FoldedDef, FoldedShape
+  <2>2. S(n) \subseteq S(n + 1) /\ val[n].m \in S(n + 1) OBVIOUS
+  <2>3. act.nxt \in S(n) /\ act.from = st.from /\ (act.from > n => act.cur \in S(n))
+        /\ (st.from <= n => act.cur \in S(n))
+    BY <2>1 DEF IsSt
+  <2>4. act.cur \in S(n) BY <2>3, <2>1 DEF IsSt
+  <2>5. CASE val[n].k = "change" /\ act.from <= n
+    <3>1. Folded(val)[n + 1] = [act EXCEPT !.nxt = val[n].m, !.from = n + LAG]
+      BY <2>1, <2>5 DEF FoldStep
+    <3> QED BY <3>1, <2>2, <2>4, <2>1 DEF IsSt
+  <2>6. CASE ~(val[n].k = "change" /\ act.from <= n)
+    <3>1. Folded(val)[n + 1] = act BY <2>1, <2>6 DEF FoldStep
+    <3>2. Folded(val)[n + 1].from > n + 1 => st.from > n BY <3>1, <2>3, <2>1 DEF IsSt
+    <3> QED BY <3>1, <3>2, <2>2, <2>3, <2>1 DEF IsSt
+  <2> QED BY <2>5, <2>6
+<1> HIDE DEF C
+<1>3. \A j \in Nat : C(j) BY <1>1, <1>2, NatInduction
+<1>4. C(u - k) BY <1>3
+<1>5. Folded(val)[u].nxt \in S(u) /\ (Folded(val)[u].from > u => Folded(val)[u].cur \in S(u))
+  BY <1>4 DEF C
+<1>6. IsSt(Folded(val)[u]) BY FoldedShape
+<1> QED BY <1>5, <1>6 DEF Eff, IsSt
+
+\* After point k, the current members also come from those sources.
+LEMMA CurSources ==
+    ASSUME NEW val, NEW k \in Nat, Folded(val)[k].from <= k, NEW u \in Nat, k < u
+    PROVE  Folded(val)[u].cur \in {Folded(val)[k].nxt} \cup {val[t].m : t \in k..(u - 1)}
+<1> DEFINE S(n) == {Folded(val)[k].nxt} \cup {val[t].m : t \in k..(n - 1)}
+           C(j) == Folded(val)[k + 1 + j].cur \in S(k + 1 + j)
+\* One step from any state: the new current members are the old current or next ones.
+<1>0. \A n \in Nat : Folded(val)[n + 1].cur \in {Folded(val)[n].cur, Folded(val)[n].nxt}
+  <2> SUFFICES ASSUME NEW n \in Nat PROVE Folded(val)[n + 1].cur \in {Folded(val)[n].cur, Folded(val)[n].nxt}
+    OBVIOUS
+  <2>1. Folded(val)[n + 1] = FoldStep(Folded(val)[n], n, val) /\ IsSt(Folded(val)[n])
+    BY FoldedDef, FoldedShape
+  <2> QED BY <2>1 DEF FoldStep, IsSt
+<1>1. C(0)
+  <2>1. Folded(val)[k + 1] = FoldStep(Folded(val)[k], k, val) /\ IsSt(Folded(val)[k])
+    BY FoldedDef, FoldedShape
+  <2>2. Folded(val)[k + 1].cur = Folded(val)[k].nxt BY <2>1 DEF FoldStep, IsSt
+  <2> QED BY <2>2
+<1>2. \A j \in Nat : C(j) => C(j + 1)
+  <2> SUFFICES ASSUME NEW j \in Nat, C(j) PROVE C(j + 1) OBVIOUS
+  <2>1. Folded(val)[k + 1 + j].nxt \in S(k + 1 + j) BY Sources
+  <2>2. S(k + 1 + j) \subseteq S(k + 1 + j + 1) OBVIOUS
+  <2>3. k + 1 + j \in Nat OBVIOUS
+  <2> QED BY <1>0, <2>1, <2>2, <2>3
+<1> HIDE DEF C
+<1>3. \A j \in Nat : C(j) BY <1>1, <1>2, NatInduction
+<1>4. C(u - k - 1) BY <1>3
+<1> QED BY <1>4 DEF C
+
+\* The epoch being installed only ever gets later.
+LEMMA FromMono ==
+    ASSUME NEW val, NEW n \in Nat, NEW m \in Nat, n <= m
+    PROVE  Folded(val)[n].from <= Folded(val)[m].from
+<1> DEFINE P(j) == Folded(val)[n].from <= Folded(val)[n + j].from
+<1>1. P(0) BY FoldedShape DEF IsSt
+<1>2. \A j \in Nat : P(j) => P(j + 1)
+  <2> SUFFICES ASSUME NEW j \in Nat, P(j) PROVE P(j + 1) OBVIOUS
+  <2>1. Folded(val)[n + j + 1] = FoldStep(Folded(val)[n + j], n + j, val) /\ IsSt(Folded(val)[n + j])
+    BY FoldedDef, FoldedShape
+  <2>2. Folded(val)[n + j].from <= Folded(val)[n + j + 1].from
+    BY <2>1, MAssumptions DEF FoldStep, IsSt
+  <2> QED BY <2>2, FoldedShape DEF IsSt
+<1> HIDE DEF P
+<1>3. \A j \in Nat : P(j) BY <1>1, <1>2, NatInduction
+<1>4. P(m - n) BY <1>3
+<1> QED BY <1>4 DEF P
+
+\* The members of slot s and after, and of a pending change: the sets Tolerable bounds.
+Later(val, s) == {MembersAt(t, val) : t \in s..N} \cup {Folded(val)[N].cur, Folded(val)[N].nxt}
+
+\* A custody witness's epoch is one of them.
+LEMMA WitnessEpoch ==
+    ASSUME NEW val, NEW s \in Nat, NEW k \in 0..N,
+           s < Folded(val)[k].from, Folded(val)[k].from < k + LAG
+    PROVE  Folded(val)[k].nxt \in Later(val, s)
+<1> DEFINE sk == Folded(val)[k]  f == sk.from
+<1>0. IsSt(sk) /\ f \in Nat /\ N \in Nat BY FoldedShape, MAssumptions DEF IsSt
+<1>1. CASE f <= k
+  <2>1. MembersAt(k, val) = sk.nxt BY <1>1 DEF MembersAt
+  <2> QED BY <1>0, <1>1, <2>1 DEF Later
+<1>2. CASE k < f /\ f <= N
+  <2>1. Eff(Folded(val)[f], f) = Eff(Folded(val)[k], f) BY <1>0, <1>2, WindowEff
+  <2>2. MembersAt(f, val) = sk.nxt BY <2>1, <1>0 DEF MembersAt, Eff
+  <2> QED BY <1>0, <1>2, <2>2 DEF Later
+<1>3. CASE f > N
+  <2>1. Folded(val)[N] = sk BY <1>0, <1>3, PendingSteps
+  <2> QED BY <2>1 DEF Later
+<1> QED BY <1>0, <1>1, <1>2, <1>3
+
+\* A replica out of the epoch in force at k, and named by no change from k on, is in no
+\* member set from that epoch's first slot on.
+LEMMA LaterAvoid ==
+    ASSUME NEW val, NEW k \in 0..N, Folded(val)[k].from <= k,
+           NEW x, x \notin Folded(val)[k].nxt, \A t \in k..(N - 1) : x \notin val[t].m,
+           NEW s \in Nat, Folded(val)[k].from <= s, s < N
+    PROVE  \A E \in Later(val, s) : x \notin E
+<1> DEFINE f == Folded(val)[k].from
+<1>0. IsSt(Folded(val)[k]) /\ f \in Nat /\ N \in Nat /\ k \in Nat BY FoldedShape, MAssumptions DEF IsSt
+\* No source of member sets from k on names x.
+<1>a. \A u \in Nat : k <= u /\ u <= N =>
+          \A E \in {Folded(val)[k].nxt} \cup {val[t].m : t \in k..(u - 1)} : x \notin E
+  BY MAssumptions
+<1>1. \A j \in s..N : x \notin MembersAt(j, val)
+  <2> SUFFICES ASSUME NEW j \in s..N PROVE x \notin MembersAt(j, val) OBVIOUS
+  <2>1. CASE j <= k
+    <3>1. Folded(val)[j].nxt = Folded(val)[k].nxt /\ Folded(val)[j].from = f BY <1>0, <2>1, Mono
+    <3> QED BY <3>1, <1>0 DEF MembersAt
+  <2>2. CASE j > k
+    <3>1. Eff(Folded(val)[j], j) \in {Folded(val)[k].nxt} \cup {val[t].m : t \in k..(j - 1)}
+      BY <1>0, <2>2, Sources
+    <3> QED BY <3>1, <1>a, <1>0, <2>2 DEF MembersAt, Eff
+  <2> QED BY <2>1, <2>2, <1>0
+<1>2. x \notin Folded(val)[N].nxt
+  <2>1. Folded(val)[N].nxt \in {Folded(val)[k].nxt} \cup {val[t].m : t \in k..(N - 1)}
+    BY <1>0, Sources
+  <2> QED BY <2>1, <1>a, <1>0
+<1>3. x \notin Folded(val)[N].cur
+  <2>1. CASE k < N
+    <3>1. Folded(val)[N].cur \in {Folded(val)[k].nxt} \cup {val[t].m : t \in k..(N - 1)}
+      BY <1>0, <2>1, CurSources
+    <3> QED BY <3>1, <1>a, <1>0
+  <2>2. CASE k = N
+    <3>1. Folded(val)[N].cur = Folded(val)[N].nxt BY <1>0, <2>2, InForce
+    <3> QED BY <3>1, <1>2
+  <2> QED BY <2>1, <2>2, <1>0
+<1> QED BY <1>1, <1>2, <1>3 DEF Later
+
 -----------------------------------------------------------------------------
 (* The commit index *)
 
@@ -248,6 +369,7 @@ LEMMA PrefixProps ==
     ASSUME NEW L \in SUBSET Slots
     PROVE  /\ Prefix(L) \in 0..N
            /\ \A t \in 0..(Prefix(L) - 1) : t \in L
+           /\ Prefix(L) = N \/ Prefix(L) \notin L
 <1> DEFINE Stop(n) == n \in 0..N /\ (n = N \/ n \notin L)
 <1>1. Stop(N) BY MAssumptions
 <1>2. \E m \in Nat : Stop(m) /\ \A j \in 0..(m - 1) : ~Stop(j)
@@ -258,8 +380,21 @@ LEMMA PrefixProps ==
 <1>5. \E n \in 0..N : (\A t \in 0..n-1 : t \in L) /\ (n = N \/ n \notin L) BY <1>3, <1>4
 <1>6. /\ Prefix(L) \in 0..N
       /\ \A t \in 0..Prefix(L) - 1 : t \in L
+      /\ Prefix(L) = N \/ Prefix(L) \notin L
   BY <1>5 DEF Prefix
 <1> QED BY <1>6
+
+\* A longer log has at least as long a prefix.
+LEMMA PrefixMono ==
+    ASSUME NEW L1 \in SUBSET Slots, NEW L2 \in SUBSET Slots, L1 \subseteq L2
+    PROVE  Prefix(L1) <= Prefix(L2)
+<1>1. /\ Prefix(L1) \in 0..N /\ \A t \in 0..(Prefix(L1) - 1) : t \in L1
+      /\ Prefix(L2) \in 0..N /\ (Prefix(L2) = N \/ Prefix(L2) \notin L2)
+  BY PrefixProps
+<1> SUFFICES ASSUME Prefix(L2) < Prefix(L1) PROVE FALSE BY <1>1, MAssumptions
+<1>2. Prefix(L2) \in 0..(Prefix(L1) - 1) BY <1>1, MAssumptions
+<1>3. Prefix(L2) \in L2 /\ Prefix(L2) # N BY <1>1, <1>2, MAssumptions
+<1> QED BY <1>1, <1>3
 
 -----------------------------------------------------------------------------
 (* ViewAgree *)
