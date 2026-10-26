@@ -14,7 +14,7 @@ lemmas, checked on the real code — there is no second model to drift from it.
 | Model checking | `crates/quepaxa-sim/src/model.rs` (`tests/model_check.rs`) | every schedule within *k* deviations from a fair default (reorder, loss, duplication, early timer, partition) plus crash-restarts losing any suffix of the write in progress, with client retries: the same invariants in every state, liveness after the partition heals | every PR (exhaustive), nightly (+1 deviation, exhaustive) |
 | Independent models | `verification/tla/` (TLA+, TLC) | `QuePaxa.tla`: one slot of the paper's algorithms written apart from the Rust code, Agreement and Validity over random behaviours with loss and reordering. `Membership.tla`: changes across slots, crash-recovery and retirement, **exhaustively** for 4 replicas and 3 slots, in two configurations (a change removing two of three members; a change to three members; 4.3M states each): every replica that may drive a slot computes its true members (the window rule), and no decided slot is lost when removed replicas retire, even with a further minority of the members down. Seven seeded bugs (two protocol, five membership) must be found | nightly (~35 min) |
 | Trace validation | `verification/tla/QuePaxaTrace.tla`, `traces.sh`; logs from `crates/quepaxa/src/slot_sim.rs` | the real `Register` and `SlotProposer` under a hostile network (3 or 5 recorders, 2 or 3 proposers): every delivered message must be the spec's action for a message the spec allows to exist, leading to the logged state; 30 traces must all be accepted, and a planted deviation (phase 0 adopting the first reply) must be rejected | nightly; its canary every PR |
-| **Safety proof** | `verification/tla/QuePaxaProof.tla` (inductive invariant), `QuePaxaSafety.tla`, `QuePaxaRecordStep.tla`, `QuePaxaInductive.tla` (TLAPS) | `QuePaxa.tla` never decides two values (G1), for **any** number of recorders and proposers, any number of rounds and any message loss, duplication and reordering: the invariant holds initially and after every step, and implies Agreement (1,912 obligations, all machine-checked). TLC also checks the invariant on reachable states | proof nightly (~3 min), invariant with the TLA+ models |
+| **Safety proof** | `verification/tla/QuePaxaProof.tla` (inductive invariant), `QuePaxaSafety.tla`, `QuePaxaRecordStep.tla`, `QuePaxaInductive.tla` (TLAPS) | `QuePaxa.tla` never decides two values (G1), for **any** number of recorders and proposers, every step bound (so any number of rounds) and any message loss, duplication and reordering: the invariant holds initially and after every step, and implies Agreement (1,919 obligations, all machine-checked). TLC also checks the invariant on reachable states and evaluates the proof's assumptions on the model's constants | proof nightly (~3 min), invariant with the TLA+ models |
 | Bounded proof | `#[cfg(kani)]` harness in `crates/quepaxa/src/recorder.rs` (Kani) | recorder invariants R1–R6 for one `record` from **every** register state, step and value, payload bytes included (the property test samples steps 4–11 and cannot see payloads, which equality ignores); a seeded bug (`verification/kani-canary.patch`) must fail it | nightly |
 | Fuzzing | bolero targets in `crates/quepaxa/src` | decoding of messages, batches, durable records, core state | corpus replay every PR, 20 min/target nightly |
 | Unsafe code | `crates/quepaxa-ffi` | Miri; ASan/UBSan on the C smoke test | every PR |
@@ -80,14 +80,18 @@ applied twice, and proposers using the configured members instead of the slot's.
 
 `QuePaxaSafety.tla`, `QuePaxaRecordStep.tla` and `QuePaxaInductive.tla` prove, with TLAPS, that every behaviour of
 `QuePaxa.tla` (one slot: recorders, proposers, the leader's fast path, priorities drawn at
-random, catch-up, a network that loses, duplicates and reorders) satisfies Agreement. The
-only assumptions are finitely many recorders, proposers numbered from 1, and drawn
-priorities below the leader's (`Assumptions`; TLC evaluates them on the model's constants,
-so they are satisfiable). The argument:
+random, catch-up, a network that loses, duplicates and reorders) satisfies Agreement. It holds
+for every step bound `MaxStep`: a violation of Agreement would show in a finite prefix,
+which some bound covers, so it holds for any number of rounds. The only assumptions are
+finitely many recorders, proposers numbered from 1, and drawn priorities below the
+leader's (`Assumptions` in `QuePaxaProof.tla`; `run.sh` evaluates them with TLC on the
+model's constants, so they are satisfiable). The argument:
 
 - `QuePaxaProof.tla` adds two history variables, what each recorder recorded at each step
-  and its `first`/`prev` on entering a step. They only record (`HSpecRefinesSpec`), so the
-  behaviours are `QuePaxa.tla`'s.
+  and its `first`/`prev` on entering a step. TLAPS checks that every step of the extended
+  spec is a step of `QuePaxa.tla` (`HSpecRefinesSpec`); the converse holds by construction,
+  since each step of `QuePaxa.tla` determines the history's update and nothing constrains
+  it, so every behaviour of `QuePaxa.tla` is covered.
 - `IndInv` holds only local facts: registers and replies agree with the history; requests,
   replies and decisions are what proposers sent and saw; only the leader's value carries
   the top priority (G5); and every proposal at a step is backed by a quorum of the step

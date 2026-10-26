@@ -35,6 +35,15 @@ RecordH(m) ==
                                 prev |-> IF g.step + 1 = m.step THEN g.agg ELSE Nil]}
                ELSE seen
 
+\* The proof's only assumptions (QuePaxaSafety.tla): finitely many recorders, proposers
+\* numbered from 1, drawn priorities below H. Stated so that TLC evaluates it too.
+ASSUME Assumptions ==
+    /\ IsFiniteSet(Recorders) /\ Recorders # {}
+    /\ \E n \in Proposers \cup {0} : Proposers \subseteq 1..n
+    /\ Leader \in Proposers
+    /\ Prios \subseteq 1..(H - 1)
+    /\ MaxStep \in Nat
+
 HInit == Init /\ rec = {} /\ seen = {}
 HNext == \E m \in msgs : RecordH(m) \/ (Deliver(m) /\ UNCHANGED <<rec, seen>>)
 HSpec == HInit /\ [][HNext]_hvars

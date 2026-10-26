@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The project follows
 ## Unreleased
 
 - Verification: a TLAPS proof that the one-slot protocol model (`QuePaxa.tla`) never decides
-  two values, for any number of recorders, proposers and rounds
+  two values, for any number of recorders and proposers and every step bound
   (`verification/tla/prove.sh`, nightly). See VERIFICATION.md for what it covers.
 
 ## 0.4.0 — 2026-10-24

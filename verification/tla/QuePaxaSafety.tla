@@ -8,13 +8,11 @@
 (***************************************************************************)
 EXTENDS QuePaxaProof, TLAPS, NaturalsInduction, FiniteSetTheorems
 
-\* Finitely many recorders; proposers numbered from 1; drawn priorities below H.
-ASSUME Assumptions ==
-    /\ IsFiniteSet(Recorders) /\ Recorders # {}
-    /\ \E n \in Nat : Proposers \subseteq 1..n
-    /\ Leader \in Proposers
-    /\ Prios \subseteq 1..(H - 1)
-    /\ MaxStep \in Nat
+\* Assumptions (QuePaxaProof.tla) bounds the proposers' numbers.
+LEMMA ProposersBounded == \E n \in Nat : Proposers \subseteq 1..n
+<1>1. PICK n \in Proposers \cup {0} : Proposers \subseteq 1..n BY Assumptions
+<1>2. n \in Nat BY <1>1
+<1> QED BY <1>1, <1>2
 
 -----------------------------------------------------------------------------
 (* The order on proposals *)
@@ -26,7 +24,7 @@ LEMMA ProposalFields ==
            /\ a = [prio |-> a.prio, key |-> a.key]
            /\ a # Nil
 <1>1. a.prio \in 1..H BY Assumptions DEF Proposal, H
-<1>2. a.key \in Nat \ {0} BY Assumptions DEF Proposal
+<1>2. a.key \in Nat \ {0} BY ProposersBounded DEF Proposal
 <1>3. a = [prio |-> a.prio, key |-> a.key] BY DEF Proposal
 <1>4. a # Nil BY <1>1 DEF Nil
 <1> QED BY <1>1, <1>2, <1>3, <1>4
@@ -71,7 +69,7 @@ LEMMA MaxProps ==
     PROVE  /\ Max(S) \in S
            /\ \A o \in S : Leq(o, Max(S))
 <1> USE ProposalFields
-<1>1. PICK kn \in Nat : Proposers \subseteq 1..kn BY Assumptions
+<1>1. PICK kn \in Nat : Proposers \subseteq 1..kn BY ProposersBounded
 <1>2. PICK mp \in {w.prio : w \in S} : \A y \in {w.prio : w \in S} : y <= mp
   <2>1. {w.prio : w \in S} \in SUBSET (0..H) BY DEF H
   <2> QED BY <2>1, NatMax, H \in Nat DEF H
