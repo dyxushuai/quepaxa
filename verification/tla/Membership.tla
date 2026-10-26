@@ -22,15 +22,20 @@
 (*   decided before that point.                                           *)
 (*   Recoverable: every decided slot is durably known by a live replica,  *)
 (*   or recoverable from a live majority of its members, even with a      *)
-(*   minority of the current members down as well (so one durable copy   *)
-(*   on a new member is not enough).                                      *)
+(*   minority of every member set from the slot on down as well (so one   *)
+(*   durable copy on a new member is not enough).                         *)
+(*                                                                         *)
+(* Retire is a replica shutting down for good after it reports Retired.  *)
+(* Assumed: the guide's operator rule, that a replica a change adds back  *)
+(* keeps running until it applied that change (it may learn of the change *)
+(* only after reporting Retired, so no implementation can rule it out);   *)
+(* and, beyond the guide, that a change never names a replica that shut   *)
+(* down. The guide also lets an operator restart a replica a change adds  *)
+(* back; that is not covered.                                             *)
 (*                                                                         *)
 (* Not modelled: what happens inside a slot (QuePaxa.tla), leader         *)
-(* rotation, snapshots, liveness. Nor a replica retiring from an epoch    *)
-(* after a later change added it back: it may learn of that change only   *)
-(* after it retired (the change may be in no member's durable state yet), *)
-(* so no implementation can rule it out; the operator keeps a replica it  *)
-(* added back. run.sh checks that seeded bugs in each rule are found.     *)
+(* rotation, snapshots, liveness. run.sh checks that seeded bugs in each  *)
+(* rule are found; MembershipProof.tla proves the rules.                  *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -39,9 +44,6 @@ CONSTANTS Replicas,     \* e.g. 1..4
           Changes,      \* member sets a change may install
           N,            \* slots 0..N-1
           LAG           \* slots between deciding a change and its effect
-
-\* Recoverable tries at most one member down, which is all a minority of three allows.
-ASSUME \A S \in Changes \cup {InitMembers} : Cardinality(S) <= 3
 
 Slots == 0..N-1
 \* A slot's value: nothing decided yet, a write, or a change to members m.
@@ -62,19 +64,20 @@ Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 \* Length of the contiguous prefix of slots in L (the commit index).
 Prefix(L) == CHOOSE n \in 0..N : (\A t \in 0..n-1 : t \in L) /\ (n = N \/ n \notin L)
 
-\* The schedule after folding slots t..last, where val(t) is what a slot holds as far as
-\* the folding replica knows (Write if it does not know it).
-RECURSIVE Fold(_, _, _, _)
-Fold(t, last, st, val) ==
-    IF t > last THEN st
-    ELSE LET act == IF st.from <= t THEN [st EXCEPT !.cur = st.nxt] ELSE st
-             v == val[t]
-             next == IF v.k = "change" /\ act.from <= t
-                     THEN [act EXCEPT !.nxt = v.m, !.from = t + LAG]
-                     ELSE act
-         IN Fold(t + 1, last, next, val)
-
 Start == [cur |-> InitMembers, nxt |-> InitMembers, from |-> 0]
+
+\* Slot t folded into the schedule st, where val[t] is what the slot holds as far as the
+\* folding replica knows (Write if it does not know it).
+FoldStep(st, t, val) ==
+    LET act == IF st.from <= t THEN [st EXCEPT !.cur = st.nxt] ELSE st
+        v == val[t]
+    IN IF v.k = "change" /\ act.from <= t
+       THEN [act EXCEPT !.nxt = v.m, !.from = t + LAG]
+       ELSE act
+
+\* The schedule after folding slots 0..n-1 of val (a recursive function, which TLAPS can
+\* reason about, unlike a recursive operator).
+Folded(val) == LET f[n \in Nat] == IF n = 0 THEN Start ELSE FoldStep(f[n - 1], n - 1, val) IN f
 
 \* What replica r knows of every slot, and the truth.
 Known(r) == [t \in Slots |-> IF t \in log[r] THEN decided[t] ELSE Write]
@@ -83,10 +86,10 @@ Truth == [t \in Slots |-> IF decided[t] = None THEN Write ELSE decided[t]]
 \* Members of slot s from every slot before it, as given by val. Only the window rule
 \* makes a replica's partial view agree with the truth.
 MembersAt(s, val) ==
-    LET st == Fold(0, s - 1, Start, val) IN IF st.from <= s THEN st.nxt ELSE st.cur
+    LET st == Folded(val)[s] IN IF st.from <= s THEN st.nxt ELSE st.cur
 
 \* The latest epoch r knows of: its members and first slot.
-Latest(r) == Fold(0, Prefix(log[r]) - 1, Start, Known(r))
+Latest(r) == Folded(Known(r))[Prefix(log[r])]
 
 CanDrive(r, s) ==
     /\ r \notin retired
@@ -99,13 +102,15 @@ Init ==
     /\ dlog = [r \in Replicas |-> {}]
     /\ retired = {}
 
-\* r drives s to v with a live majority of the members it computes for s.
+\* r drives s to v with a live majority of the members it computes for s. A change never
+\* names a retired replica: the operator does not add back a replica that shut down.
 Decide(r, s, v) ==
     LET M == MembersAt(s, Known(r))
     IN /\ CanDrive(r, s)
        /\ decided[s] = None
        /\ r \in M
        /\ \E Q \in Maj(M) : Q \cap retired = {}
+       /\ v.m \cap retired = {}
        /\ decided' = [decided EXCEPT ![s] = v]
        /\ log' = [log EXCEPT ![r] = @ \cup {s}]
        /\ UNCHANGED <<dlog, retired>>
@@ -133,9 +138,12 @@ Crash(r) ==
     /\ log' = [log EXCEPT ![r] = dlog[r]]
     /\ UNCHANGED <<decided, dlog, retired>>
 
-\* Action::Retired: r is not a member of the latest epoch it knows, a majority of that
-\* epoch's members durably know every slot before it, and r's read barrier committed: it
-\* knows every slot decided by then (so a change adding it back would be known).
+\* r shuts down for good after Action::Retired: r is not a member of the latest epoch it
+\* knows (from the prefix it applied, as its read barrier commits in order), and a majority
+\* of that epoch's members durably know every slot before it. Later slots may be decided
+\* and unknown to r. The operator rule: a change that adds r back keeps it running, so r
+\* does not shut down while a decided change it has not applied names it (it may still
+\* have reported Retired).
 Retire(r) ==
     LET st == Latest(r)
         caught == {m \in st.nxt : Prefix(dlog[m]) >= st.from}
@@ -143,7 +151,8 @@ Retire(r) ==
        /\ st.from > 0
        /\ r \notin st.nxt
        /\ 2 * Cardinality(caught) > Cardinality(st.nxt)
-       /\ \A t \in Slots : decided[t] # None => t \in log[r]
+       /\ \A t \in Slots : decided[t] # None /\ Truth[t].k = "change" /\ r \in Truth[t].m =>
+              t < Prefix(log[r])
        /\ retired' = retired \cup {r}
        /\ UNCHANGED <<decided, log, dlog>>
 
@@ -161,25 +170,28 @@ ViewAgree ==
         CanDrive(r, s) => MembersAt(s, Known(r)) = MembersAt(s, Truth)
 
 \* The members in force after the last slot, and those of a change still pending.
-Current == Fold(0, N - 1, Start, Truth)
+Current == Folded(Truth)[N]
 
-\* Replicas the cluster may lose on top of the retired ones: a minority of the members in
-\* force and of any pending ones (during a change, the weaker epoch bounds it).
-Tolerable(D) ==
-    /\ 2 * Cardinality(D \cap Current.cur) < Cardinality(Current.cur)
-    /\ 2 * Cardinality(D \cap Current.nxt) < Cardinality(Current.nxt)
+\* The member sets from slot s on, a pending one included: the ones that may hold slot s,
+\* its own members by their registers or, after some of them retired, a later epoch's
+\* majority by durable copies.
+LaterEpochs(s) == {MembersAt(t, Truth) : t \in s..N} \cup {Current.cur, Current.nxt}
 
-\* No decided slot is lost, even with a tolerable set of members down as well. Recovery
-\* only gets harder as more are down, and every epoch of the configuration has at most
-\* three members, so it is enough to try no member and each single member down.
+\* Replicas the cluster may lose on top of the retired ones, as far as slot s is concerned:
+\* a minority of each of those sets. (A minority of the current members alone is not
+\* enough: until a majority of a new epoch durably holds the old slots, losing an old member
+\* and a new one can lose an old slot.)
+Tolerable(s, D) == \A E \in LaterEpochs(s) : 2 * Cardinality(D \cap E) < Cardinality(E)
+
+\* No decided slot is lost, even with a tolerable set of replicas down as well.
 Recoverable ==
-    LET downs == {D \in {{}} \cup {{x} : x \in Current.cur \cup Current.nxt} : Tolerable(D)}
-    IN \A s \in Slots : decided[s] # None =>
+    \A s \in Slots : decided[s] # None =>
         LET M == MembersAt(s, Truth)
-        IN \A D \in downs :
-            LET gone == retired \cup D
-            IN \/ \E r \in Replicas \ gone : s \in dlog[r]
-               \/ 2 * Cardinality(M \ gone) > Cardinality(M)
+        IN \A D \in SUBSET Replicas :
+            Tolerable(s, D) =>
+                LET gone == retired \cup D
+                IN \/ \E r \in Replicas \ gone : s \in dlog[r]
+                   \/ 2 * Cardinality(M \ gone) > Cardinality(M)
 
 TypeOK ==
     /\ \A s \in Slots : decided[s] \in Values \cup {None}

@@ -53,15 +53,23 @@ takes effect without traffic.
   when the barrier commits and no change decided before it has added the replica back.
   Only a change decided after that can still add it back: whoever proposes one keeps the
   replica running (or restarts it). A replica that was down for its whole removal learns
-  of it when it restarts (it asks every known replica where the log is, until a
-  majority of the members it then knows of have answered); one that kept running but was cut off learns only when it hears from a
-  member, so restart it.
+  of it when it restarts (it asks every known replica where the log is, until a majority
+  of the members it then knows of have answered); one that kept running but was cut off
+  learns only when it hears from a member, so restart it.
 - **Retiring a replica that cannot report it.** What `Retired { epoch }` waits for —
   a majority of that epoch's members durably holding the slots before it — is the same
   for every replica the change removed. So once any of them reports it, all replicas
   removed by that epoch may shut down, unless a later change added one back. This covers
   a removed replica that is down for good, or one whose known peers were all replaced
   while it was down (it cannot find the new members on its own).
+- **Fault tolerance during a change.** Until a majority of the new members durably hold
+  the slots before `from` (what `Retired` waits for), those slots still rest on a majority
+  of the old members. Through that window the cluster tolerates losing a minority of the
+  old members *and* a minority of the new ones, not a minority of the new ones alone:
+  changing `{1, 2, 3}` to `{1, 4, 5}`, losing 1 and 2 for good before 4 and 5 caught up can
+  lose an old slot. 2 is no longer a member and 1 is a minority of the new members, but
+  together they are a majority of the old ones. Replace one member at a time, or wait for
+  `Retired` (or the new members' progress) before taking more replicas down.
 - **Replacing the leader.** Put the new leader first in the new order.
 
 ```no_run

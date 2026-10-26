@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- Verification: TLAPS proofs of the membership model's window rule (every replica that
+  may drive a slot computes its true members) and of retirement (no decided slot is lost),
+  for any number of replicas, slots, members and changes. Assumed: a replica a change
+  adds back keeps running until it applied the change (the guide's rule), and no change
+  names a replica that shut down (restarting a re-added replica is not covered).
+- Guide (membership): during a change the cluster tolerates losing a minority of the old
+  members and of the new ones, not of the new ones alone, until a majority of the new
+  members durably hold the old slots.
 - Verification: a TLAPS proof that the one-slot protocol model (`QuePaxa.tla`) never decides
   two values, for any number of recorders and proposers and every step bound
   (`verification/tla/prove.sh`, nightly). See VERIFICATION.md for what it covers.
