@@ -12,9 +12,9 @@ lemmas, checked on the real code — there is no second model to drift from it.
 | Single-slot simulation | `crates/quepaxa/src/slot_sim.rs` | G1–G5 on proposer/recorder state after every event under loss, duplication, reordering, partitions | every PR |
 | Replica simulation | `crates/quepaxa-sim` (`tests/replica_sim.rs`) | agreement, validity, at-most-once, ordered commits, KV linearizability, convergence after heal, and **G1/G3/G4/G5 on every replica's recorder state after every event**; crash-restart losing unsynced or torn writes; snapshots; membership changes and retirement | every PR (40 seeds; membership 120), nightly (100k seeds, 8 shards) |
 | Model checking | `crates/quepaxa-sim/src/model.rs` (`tests/model_check.rs`) | every schedule within *k* deviations from a fair default (reorder, loss, duplication, early timer, partition) plus crash-restarts losing any suffix of the write in progress, with client retries: the same invariants in every state, liveness after the partition heals | every PR (exhaustive), nightly (+1 deviation, exhaustive) |
-| Independent models | `verification/tla/` (TLA+, TLC) | `QuePaxa.tla`: one slot of the paper's algorithms written apart from the Rust code, Agreement and Validity over random behaviours with loss and reordering. `Membership.tla`: changes across slots, crash-recovery and retirement, **exhaustively** for 4 replicas and 3 slots, in two configurations (a change removing two of three members; a change to three members; 4.3M states each): every replica that may drive a slot computes its true members (the window rule), and no decided slot is lost when removed replicas retire, even with a further minority of the members down. Seven seeded bugs (two protocol, five membership) must be found | nightly (~35 min) |
+| Independent models | `verification/tla/` (TLA+, TLC) | `QuePaxa.tla`: one slot of the paper's algorithms written apart from the Rust code, Agreement and Validity over random behaviours with loss and reordering. `Membership.tla`: changes across slots, crash-recovery and retirement, **exhaustively** for 4 replicas and 3 slots, in two configurations (a change removing two of three members; a change to three members; 4.3M states each): every replica that may drive a slot computes its true members (the window rule), and no decided slot is lost when removed replicas retire, even with a minority of every member set from the slot on down as well (both proved below). Seven seeded bugs (two protocol, five membership) must be found | nightly (~35 min) |
 | Trace validation | `verification/tla/QuePaxaTrace.tla`, `traces.sh`; logs from `crates/quepaxa/src/slot_sim.rs` | the real `Register` and `SlotProposer` under a hostile network (3 or 5 recorders, 2 or 3 proposers): every delivered message must be the spec's action for a message the spec allows to exist, leading to the logged state; 30 traces must all be accepted, and a planted deviation (phase 0 adopting the first reply) must be rejected | nightly; its canary every PR |
-| **Safety proof** | `verification/tla/QuePaxaProof.tla` (inductive invariant), `QuePaxaSafety.tla`, `QuePaxaRecordStep.tla`, `QuePaxaInductive.tla` (TLAPS) | `QuePaxa.tla` never decides two values (G1), for **any** number of recorders and proposers, every step bound (so any number of rounds) and any message loss, duplication and reordering: the invariant holds initially and after every step, and implies Agreement (1,919 obligations, all machine-checked). TLC also checks the invariant on reachable states and evaluates the proof's assumptions on the model's constants | proof nightly (~3 min), invariant with the TLA+ models |
+| **Safety proofs** | `verification/tla/QuePaxaProof.tla` (inductive invariant), `QuePaxaSafety.tla`, `QuePaxaRecordStep.tla`, `QuePaxaInductive.tla`; `MembershipProof.tla`, `MembershipRecover.tla` (TLAPS) | `QuePaxa.tla` never decides two values (G1), for **any** number of recorders and proposers, every step bound (so any number of rounds) and any message loss, duplication and reordering: the invariant holds initially and after every step, and implies Agreement (1,919 obligations, all machine-checked). TLC also checks the invariant on reachable states and evaluates the proof's assumptions on the model's constants. `Membership.tla`'s window rule (`ViewAgree`) and retirement (`Recoverable`), for any number of replicas, slots, members and changes and any `LAG` ≥ 1 | proofs nightly (~4 min), invariant with the TLA+ models |
 | Bounded proof | `#[cfg(kani)]` harness in `crates/quepaxa/src/recorder.rs` (Kani) | recorder invariants R1–R6 for one `record` from **every** register state, step and value, payload bytes included (the property test samples steps 4–11 and cannot see payloads, which equality ignores); a seeded bug (`verification/kani-canary.patch`) must fail it | nightly |
 | Fuzzing | bolero targets in `crates/quepaxa/src` | decoding of messages, batches, durable records, core state | corpus replay every PR, 20 min/target nightly |
 | Unsafe code | `crates/quepaxa-ffi` | Miri; ASan/UBSan on the C smoke test | every PR |
@@ -102,8 +102,29 @@ model's constants, so they are satisfiable). The argument:
 
 It does not cover, and the other layers do: the Rust code itself (trace validation checks
 it against this model, and the simulator and model checker check G1–G5 on it directly);
-crash-recovery, durability, multiple slots, leader rotation and membership changes
-(`Membership.tla` is model-checked, not proved); and liveness.
+crash-recovery and durability inside a slot, multiple slots and leader rotation; and
+liveness.
+
+`MembershipProof.tla` and `MembershipRecover.tla` prove `Membership.tla`'s two rules, for
+any number of replicas, slots, members and changes and any `LAG` ≥ 1 (the only other
+assumptions: finitely many replicas, member sets made of them):
+
+- **ViewAgree** (the window rule): logs hold only decided slots, views that agree on a
+  prefix fold to the same schedule, and a slot within `LAG` before *s* never changes who
+  the members of *s* are, change or not.
+- **Recoverable** (retirement): every decided slot is in custody, either of its own
+  members' registers while none of them retired, or of a later epoch whose majority,
+  none retired, durably holds it. A retirement hands every slot before the new epoch to
+  that epoch; the hand-over is pinned at a fully decided point of the log, so later
+  decisions never undo it. A tolerable set of replicas down, a minority of every member
+  set from the slot on, leaves a holder.
+
+Two facts the proof needs are now explicit in the model: a retiring replica's applied
+prefix covers every slot decided by then (its read barrier is applied in order), and a
+change never names a retired replica (the operator rule the membership guide states).
+The fault bound is a minority of *every* member set from the slot on, not of the current
+members alone: during a change, losing an old member and a new one can lose an old slot
+(TLC finds it with five replicas), which the membership guide now says.
 
 ## Where Kani does not reach
 
@@ -112,6 +133,6 @@ durability gate (persist-before-send over 4–7 operations) and the leader sched
 64-slot window rule, by induction over one decided slot) did not finish in 10–20 minutes
 and grew past 40 GB: their state is `Vec`s of `Vec`s, and symbolic copies, drains and
 rotations dominate the formula. Those properties stay with the property tests, the
-simulator and the model checker of the real replica; `Membership.tla` checks the schedule's
-window rule and retirement exhaustively at the model level instead.
+simulator and the model checker of the real replica; `Membership.tla` proves the schedule's
+window rule and retirement at the model level instead.
 
