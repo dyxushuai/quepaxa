@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks the independent TLA+ models with TLC:
 # - QuePaxa.tla, one slot: too large to exhaust, so TLC runs random behaviours (simulation
-#   mode) for TLA_SECONDS and must find no violation.
+#   mode) for TLA_SECONDS and must find no violation; so must QuePaxaProof.tla, the proof's
+#   inductive invariant on the same model (prove.sh checks the proof itself).
 # - Membership.tla, changes across slots, durability and retirement: checked exhaustively.
 # Then every seeded bug must be found (within TLA_BUG_SECONDS), so the check cannot
 # silently stop checking anything.
@@ -24,19 +25,30 @@ failed=0
 
 simulate=(-simulate -depth 300)
 
-mkdir "$work/model"
-cp "$here/QuePaxa.tla" "$here/QuePaxa.cfg" "$work/model/"
-out=$(tlc "$work/model" "$seconds" QuePaxa "${simulate[@]}" 2>&1)
-status=$?
-if [[ $status -ne 124 ]] || ! grep -q "Running Random Simulation" <<< "$out"; then
-  echo "FAIL    QuePaxa.tla: TLC ended with status $status instead of running out of time:"; tail -40 <<< "$out"
-  failed=1
-elif grep -qE "violated|^Error" <<< "$out"; then
-  echo "FAIL    QuePaxa.tla:"; grep -E -A30 "violated|^Error" <<< "$out" | head -60
-  failed=1
-else
-  echo "OK      QuePaxa.tla: no violation in ${seconds}s ($(grep -oE '[0-9,]+ states checked' <<< "$out" | tail -1 || echo 'progress is printed every minute'))"
-fi
+# simulate <label> <spec> <files...>: random behaviours for $seconds, no violation allowed.
+simulate_ok() {
+  local label=$1 spec=$2 dir=$work/$2
+  mkdir "$dir"
+  cp "${@:3}" "$dir/"
+  local out status
+  out=$(tlc "$dir" "$seconds" "$spec" -config "$spec.cfg" "${simulate[@]}" 2>&1)
+  status=$?
+  if [[ $status -ne 124 ]] || ! grep -q "Running Random Simulation" <<< "$out"; then
+    echo "FAIL    $label: TLC ended with status $status instead of running out of time:"; tail -40 <<< "$out"
+    failed=1
+  elif grep -qE "violated|^Error" <<< "$out"; then
+    echo "FAIL    $label:"; grep -E -A30 "violated|^Error" <<< "$out" | head -60
+    failed=1
+  else
+    echo "OK      $label: no violation in ${seconds}s ($(grep -oE '[0-9,]+ states checked' <<< "$out" | tail -1 || echo 'progress is printed every minute'))"
+  fi
+}
+
+simulate_ok QuePaxa.tla QuePaxa "$here/QuePaxa.tla" "$here/QuePaxa.cfg"
+# The proof's inductive invariant (prove.sh) on reachable states: a change to QuePaxa.tla
+# that breaks it shows up here in minutes.
+simulate_ok "QuePaxaProof.tla (IndInv)" QuePaxaProof \
+  "$here/QuePaxa.tla" "$here/QuePaxaProof.tla" "$here/QuePaxaProof.cfg"
 
 for cfg in Membership MembershipQuorum; do
   mkdir "$work/$cfg"

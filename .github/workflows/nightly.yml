@@ -102,6 +102,14 @@ jobs:
           TLA_BUG_SECONDS: "300"
         run: verification/tla/run.sh
 
+  tlaps:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: TLAPS proof that QuePaxa.tla never decides two values (tlapm pinned, every obligation re-proved)
+        run: verification/tla/prove.sh --cleanfp
+
   kani:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -212,7 +220,7 @@ jobs:
           path: mutants.out/
 
   report:
-    needs: [fuzz, simulation, deep, tla, kani, bench, coverage, mutants]
+    needs: [fuzz, simulation, deep, tla, tlaps, kani, bench, coverage, mutants]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     permissions:
