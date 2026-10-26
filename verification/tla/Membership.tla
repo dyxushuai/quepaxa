@@ -62,19 +62,20 @@ Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 \* Length of the contiguous prefix of slots in L (the commit index).
 Prefix(L) == CHOOSE n \in 0..N : (\A t \in 0..n-1 : t \in L) /\ (n = N \/ n \notin L)
 
-\* The schedule after folding slots t..last, where val(t) is what a slot holds as far as
-\* the folding replica knows (Write if it does not know it).
-RECURSIVE Fold(_, _, _, _)
-Fold(t, last, st, val) ==
-    IF t > last THEN st
-    ELSE LET act == IF st.from <= t THEN [st EXCEPT !.cur = st.nxt] ELSE st
-             v == val[t]
-             next == IF v.k = "change" /\ act.from <= t
-                     THEN [act EXCEPT !.nxt = v.m, !.from = t + LAG]
-                     ELSE act
-         IN Fold(t + 1, last, next, val)
-
 Start == [cur |-> InitMembers, nxt |-> InitMembers, from |-> 0]
+
+\* Slot t folded into the schedule st, where val[t] is what the slot holds as far as the
+\* folding replica knows (Write if it does not know it).
+FoldStep(st, t, val) ==
+    LET act == IF st.from <= t THEN [st EXCEPT !.cur = st.nxt] ELSE st
+        v == val[t]
+    IN IF v.k = "change" /\ act.from <= t
+       THEN [act EXCEPT !.nxt = v.m, !.from = t + LAG]
+       ELSE act
+
+\* The schedule after folding slots 0..n-1 of val (a recursive function, which TLAPS can
+\* reason about, unlike a recursive operator).
+Folded(val) == LET f[n \in Nat] == IF n = 0 THEN Start ELSE FoldStep(f[n - 1], n - 1, val) IN f
 
 \* What replica r knows of every slot, and the truth.
 Known(r) == [t \in Slots |-> IF t \in log[r] THEN decided[t] ELSE Write]
@@ -83,10 +84,10 @@ Truth == [t \in Slots |-> IF decided[t] = None THEN Write ELSE decided[t]]
 \* Members of slot s from every slot before it, as given by val. Only the window rule
 \* makes a replica's partial view agree with the truth.
 MembersAt(s, val) ==
-    LET st == Fold(0, s - 1, Start, val) IN IF st.from <= s THEN st.nxt ELSE st.cur
+    LET st == Folded(val)[s] IN IF st.from <= s THEN st.nxt ELSE st.cur
 
 \* The latest epoch r knows of: its members and first slot.
-Latest(r) == Fold(0, Prefix(log[r]) - 1, Start, Known(r))
+Latest(r) == Folded(Known(r))[Prefix(log[r])]
 
 CanDrive(r, s) ==
     /\ r \notin retired
@@ -161,7 +162,7 @@ ViewAgree ==
         CanDrive(r, s) => MembersAt(s, Known(r)) = MembersAt(s, Truth)
 
 \* The members in force after the last slot, and those of a change still pending.
-Current == Fold(0, N - 1, Start, Truth)
+Current == Folded(Truth)[N]
 
 \* Replicas the cluster may lose on top of the retired ones: a minority of the members in
 \* force and of any pending ones (during a change, the weaker epoch bounds it).

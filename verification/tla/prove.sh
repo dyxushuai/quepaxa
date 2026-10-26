@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Checks the TLAPS proof that QuePaxa.tla is safe (QuePaxaSafety.tla, QuePaxaRecordStep.tla,
-# QuePaxaInductive.tla) with tlapm 1.6, fetched (pinned, checksum verified) into
-# target/tlapm-<digest>. On Linux x86_64 it runs directly; elsewhere, in a linux/amd64
-# ubuntu:24.04 container (needs Docker). Arguments go to tlapm, e.g. --cleanfp to re-prove
-# every obligation instead of reusing proved ones.
+# Checks the TLAPS proofs: QuePaxa.tla is safe (QuePaxaSafety.tla, QuePaxaRecordStep.tla,
+# QuePaxaInductive.tla) and Membership.tla's window rule holds (MembershipProof.tla). Uses
+# tlapm 1.6, fetched (pinned, checksum verified) into target/tlapm-<digest>. On Linux
+# x86_64 it runs directly; elsewhere, in a linux/amd64 ubuntu:24.04 container (needs
+# Docker). Arguments go to tlapm, e.g. --cleanfp to re-prove every obligation instead of
+# reusing proved ones.
 #
 # tlapm 1.6 is only published as the rolling `1.6.0-pre` release (the only one that bundles
 # its provers): if upstream replaces the archive, the checksum fails loudly; pin the new
@@ -33,8 +34,8 @@ if [[ ! -x $tools/bin/tlapm ]]; then
 fi
 
 mkdir -p "$work"
-modules=(QuePaxaSafety.tla QuePaxaRecordStep.tla QuePaxaInductive.tla)
-cp "$here"/QuePaxa.tla "$here"/QuePaxaProof.tla "${modules[@]/#/$here/}" "$work/"
+modules=(QuePaxaSafety.tla QuePaxaRecordStep.tla QuePaxaInductive.tla MembershipProof.tla)
+cp "$here"/QuePaxa.tla "$here"/QuePaxaProof.tla "$here"/Membership.tla "${modules[@]/#/$here/}" "$work/"
 if [[ $(uname -sm) == "Linux x86_64" ]]; then
   cd "$work" && exec "$tools/bin/tlapm" "$@" "${modules[@]}"
 fi
