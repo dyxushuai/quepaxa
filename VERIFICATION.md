@@ -67,6 +67,8 @@ that matters, and every test stays green. The canaries make that loud.
   `verification/mutants-accepted.txt` lists it with the reason it cannot or need not be
   killed (equivalent, liveness or performance only). Prefer a test; shrink the list when
   you can.
+- A TLAPS module that states a theorem or lemma must be listed in `verification/tla/prove.sh`,
+  which refuses to run otherwise, so a new proof cannot go unchecked.
 - When you change an oracle, run the canaries: a stronger oracle may catch a canary with a
   different message; update the expected pattern, never drop the canary.
 
@@ -130,6 +132,23 @@ does not cover.
 The fault bound is a minority of *every* member set from the slot on, not of the current
 members alone: during a change, losing an old member and a new one can lose an old slot
 (TLC finds it with five replicas), which the membership guide now says.
+
+## From the models to the code
+
+A proof covers the model; what it says about the code rests on each action meaning what
+its Rust counterpart does. When you change one side, check the other against this table.
+
+| Model action | Code | Differences the model makes |
+|---|---|---|
+| `QuePaxa.tla` `Record` | `Register::record` (`recorder.rs`), reached through `on_request` (`replica/log.rs`) | the reply leaves at once; the code holds it until the register is durable (`Gate::send_after_durable`) |
+| `QuePaxa.tla` `OnReply`, `Advance` | `SlotProposer::on_reply`, `advance` (`proposer.rs`) | priorities are any values in `Prios`, below the leader's `H`; the step bound `MaxStep` stops proposers (the proof holds for every bound) |
+| `QuePaxa.tla` `Deliver` | the runtime's network | none checked: trace validation replays `slot_sim`'s deliveries against it |
+| `Membership.tla` `CanDrive` | `alloc_slot` (`replica/proposing.rs`): slots below `committed + max_in_flight_slots`, with `max_in_flight_slots ≤ LAG` (`Config::validate`) | `Prefix(log[r])` is the applied prefix, the code's `committed` |
+| `Membership.tla` `MembersAt`, `Folded` | `Schedule::members`, `Schedule::reconfigure` (`schedule.rs`): a change decided at `s` takes effect at `s + LAG` | one change at a time is modelled; leader rotation is not |
+| `Membership.tla` `Decide` | a proposer deciding its slot (`replica/proposing.rs`) with the slot's members | what happens inside the slot is `QuePaxa.tla`'s |
+| `Membership.tla` `Learn` | `learn` (`replica/log.rs`) from `Decided` and catch-up, or driving the slot again from the members' registers | — |
+| `Membership.tla` `Persist`, `Crash` | `Input::Persisted` (`Gate::persisted`); `Replica::new` from the durable records | a crash keeps a durable prefix of the log; torn writes are the simulator's |
+| `Membership.tla` `Retire` | `check_retired`, `confirm_retired` (`replica/retire.rs`), then the operator shutting the replica down | `Retire` is the shutdown, not `Action::Retired`; it assumes the operator rules stated above |
 
 ## Where Kani does not reach
 

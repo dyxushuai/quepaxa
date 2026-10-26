@@ -36,6 +36,12 @@ fi
 mkdir -p "$work"
 modules=(QuePaxaSafety.tla QuePaxaRecordStep.tla QuePaxaInductive.tla MembershipProof.tla
   MembershipRecover.tla)
+# A module that states a theorem and is not listed here would never be checked.
+for f in "$here"/*.tla; do
+  if grep -Eq '^[[:space:]]*(THEOREM|LEMMA|PROPOSITION|COROLLARY)\b' "$f" && [[ " ${modules[*]} " != *" $(basename "$f") "* ]]; then
+    echo "prove.sh: $(basename "$f") states a theorem but is not in modules"; exit 1
+  fi
+done
 cp "$here"/QuePaxa.tla "$here"/QuePaxaProof.tla "$here"/Membership.tla "${modules[@]/#/$here/}" "$work/"
 if [[ $(uname -sm) == "Linux x86_64" ]]; then
   cd "$work" && exec "$tools/bin/tlapm" "$@" "${modules[@]}"
