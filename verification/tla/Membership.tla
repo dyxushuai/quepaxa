@@ -22,15 +22,17 @@
 (*   decided before that point.                                           *)
 (*   Recoverable: every decided slot is durably known by a live replica,  *)
 (*   or recoverable from a live majority of its members, even with a      *)
-(*   minority of the current members down as well (so one durable copy   *)
-(*   on a new member is not enough).                                      *)
+(*   minority of every member set from the slot on down as well (so one   *)
+(*   durable copy on a new member is not enough).                         *)
+(*                                                                         *)
+(* Assumed: a change never names a retired replica. A replica added back *)
+(* may learn of that only after it retired (the change may be in no       *)
+(* member's durable state yet), so no implementation can rule it out; the *)
+(* operator keeps a replica it adds back.                                 *)
 (*                                                                         *)
 (* Not modelled: what happens inside a slot (QuePaxa.tla), leader         *)
-(* rotation, snapshots, liveness. Nor a replica retiring from an epoch    *)
-(* after a later change added it back: it may learn of that change only   *)
-(* after it retired (the change may be in no member's durable state yet), *)
-(* so no implementation can rule it out; the operator keeps a replica it  *)
-(* added back. run.sh checks that seeded bugs in each rule are found.     *)
+(* rotation, snapshots, liveness. run.sh checks that seeded bugs in each  *)
+(* rule are found; MembershipProof.tla proves the rules.                  *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -39,9 +41,6 @@ CONSTANTS Replicas,     \* e.g. 1..4
           Changes,      \* member sets a change may install
           N,            \* slots 0..N-1
           LAG           \* slots between deciding a change and its effect
-
-\* Recoverable tries at most one member down, which is all a minority of three allows.
-ASSUME \A S \in Changes \cup {InitMembers} : Cardinality(S) <= 3
 
 Slots == 0..N-1
 \* A slot's value: nothing decided yet, a write, or a change to members m.
@@ -100,13 +99,15 @@ Init ==
     /\ dlog = [r \in Replicas |-> {}]
     /\ retired = {}
 
-\* r drives s to v with a live majority of the members it computes for s.
+\* r drives s to v with a live majority of the members it computes for s. A change never
+\* names a retired replica: the operator does not add back a replica that shut down.
 Decide(r, s, v) ==
     LET M == MembersAt(s, Known(r))
     IN /\ CanDrive(r, s)
        /\ decided[s] = None
        /\ r \in M
        /\ \E Q \in Maj(M) : Q \cap retired = {}
+       /\ v.m \cap retired = {}
        /\ decided' = [decided EXCEPT ![s] = v]
        /\ log' = [log EXCEPT ![r] = @ \cup {s}]
        /\ UNCHANGED <<dlog, retired>>
@@ -135,8 +136,9 @@ Crash(r) ==
     /\ UNCHANGED <<decided, dlog, retired>>
 
 \* Action::Retired: r is not a member of the latest epoch it knows, a majority of that
-\* epoch's members durably know every slot before it, and r's read barrier committed: it
-\* knows every slot decided by then (so a change adding it back would be known).
+\* epoch's members durably know every slot before it, and r's read barrier committed: the
+\* barrier is applied in order, so r's prefix covers every slot decided by then (and a
+\* change adding r back would be in its latest epoch).
 Retire(r) ==
     LET st == Latest(r)
         caught == {m \in st.nxt : Prefix(dlog[m]) >= st.from}
@@ -144,7 +146,7 @@ Retire(r) ==
        /\ st.from > 0
        /\ r \notin st.nxt
        /\ 2 * Cardinality(caught) > Cardinality(st.nxt)
-       /\ \A t \in Slots : decided[t] # None => t \in log[r]
+       /\ \A t \in Slots : decided[t] # None => t < Prefix(log[r])
        /\ retired' = retired \cup {r}
        /\ UNCHANGED <<decided, log, dlog>>
 
@@ -164,23 +166,26 @@ ViewAgree ==
 \* The members in force after the last slot, and those of a change still pending.
 Current == Folded(Truth)[N]
 
-\* Replicas the cluster may lose on top of the retired ones: a minority of the members in
-\* force and of any pending ones (during a change, the weaker epoch bounds it).
-Tolerable(D) ==
-    /\ 2 * Cardinality(D \cap Current.cur) < Cardinality(Current.cur)
-    /\ 2 * Cardinality(D \cap Current.nxt) < Cardinality(Current.nxt)
+\* The member sets from slot s on, a pending one included: the ones that may hold slot s,
+\* its own members by their registers or, after some of them retired, a later epoch's
+\* majority by durable copies.
+LaterEpochs(s) == {MembersAt(t, Truth) : t \in s..N} \cup {Current.cur, Current.nxt}
 
-\* No decided slot is lost, even with a tolerable set of members down as well. Recovery
-\* only gets harder as more are down, and every epoch of the configuration has at most
-\* three members, so it is enough to try no member and each single member down.
+\* Replicas the cluster may lose on top of the retired ones, as far as slot s is concerned:
+\* a minority of each of those sets. (A minority of the current members alone is not
+\* enough: until a majority of a new epoch durably holds the old slots, losing an old member
+\* and a new one can lose an old slot.)
+Tolerable(s, D) == \A E \in LaterEpochs(s) : 2 * Cardinality(D \cap E) < Cardinality(E)
+
+\* No decided slot is lost, even with a tolerable set of replicas down as well.
 Recoverable ==
-    LET downs == {D \in {{}} \cup {{x} : x \in Current.cur \cup Current.nxt} : Tolerable(D)}
-    IN \A s \in Slots : decided[s] # None =>
+    \A s \in Slots : decided[s] # None =>
         LET M == MembersAt(s, Truth)
-        IN \A D \in downs :
-            LET gone == retired \cup D
-            IN \/ \E r \in Replicas \ gone : s \in dlog[r]
-               \/ 2 * Cardinality(M \ gone) > Cardinality(M)
+        IN \A D \in SUBSET Replicas :
+            Tolerable(s, D) =>
+                LET gone == retired \cup D
+                IN \/ \E r \in Replicas \ gone : s \in dlog[r]
+                   \/ 2 * Cardinality(M \ gone) > Cardinality(M)
 
 TypeOK ==
     /\ \A s \in Slots : decided[s] \in Values \cup {None}
