@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- Verification: VERIFICATION.md maps each TLA+ action to the Rust code it stands for and
+  what the model leaves out; `prove.sh` refuses to run if a module stating a theorem is
+  not in its list.
 - Verification: TLAPS proofs of the membership model's window rule (every replica that
   may drive a slot computes its true members) and of retirement (no decided slot is lost),
   for any number of replicas, slots, members and changes. Assumed: a replica a change
