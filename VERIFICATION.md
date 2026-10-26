@@ -67,7 +67,7 @@ that matters, and every test stays green. The canaries make that loud.
   `verification/mutants-accepted.txt` lists it with the reason it cannot or need not be
   killed (equivalent, liveness or performance only). Prefer a test; shrink the list when
   you can.
-- A TLAPS module that states a `THEOREM` must be listed in `verification/tla/prove.sh`,
+- A TLAPS module that states a theorem or lemma must be listed in `verification/tla/prove.sh`,
   which refuses to run otherwise, so a new proof cannot go unchecked.
 - When you change an oracle, run the canaries: a stronger oracle may catch a canary with a
   different message; update the expected pattern, never drop the canary.

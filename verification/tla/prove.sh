@@ -38,8 +38,8 @@ modules=(QuePaxaSafety.tla QuePaxaRecordStep.tla QuePaxaInductive.tla Membership
   MembershipRecover.tla)
 # A module that states a theorem and is not listed here would never be checked.
 for f in "$here"/*.tla; do
-  if grep -q '^THEOREM' "$f" && [[ " ${modules[*]} " != *" $(basename "$f") "* ]]; then
-    echo "prove.sh: $(basename "$f") states a THEOREM but is not in modules"; exit 1
+  if grep -Eq '^[[:space:]]*(THEOREM|LEMMA|PROPOSITION|COROLLARY)\b' "$f" && [[ " ${modules[*]} " != *" $(basename "$f") "* ]]; then
+    echo "prove.sh: $(basename "$f") states a theorem but is not in modules"; exit 1
   fi
 done
 cp "$here"/QuePaxa.tla "$here"/QuePaxaProof.tla "$here"/Membership.tla "${modules[@]/#/$here/}" "$work/"
