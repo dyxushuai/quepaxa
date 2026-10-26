@@ -25,11 +25,13 @@
 (*   minority of every member set from the slot on down as well (so one   *)
 (*   durable copy on a new member is not enough).                         *)
 (*                                                                         *)
-(* Assumed, the operator rule: a change never names a retired replica,   *)
-(* and a replica a change adds back keeps running until it applied that  *)
-(* change. It may learn of the change only after retiring (the change may *)
-(* be in no member's durable state yet), so no implementation can rule it *)
-(* out. A retired replica that restarts rejoins as a new one.            *)
+(* Retire is a replica shutting down for good after it reports Retired.  *)
+(* Assumed: the guide's operator rule, that a replica a change adds back  *)
+(* keeps running until it applied that change (it may learn of the change *)
+(* only after reporting Retired, so no implementation can rule it out);   *)
+(* and, beyond the guide, that a change never names a replica that shut   *)
+(* down. The guide also lets an operator restart a replica a change adds  *)
+(* back; that is not covered.                                             *)
 (*                                                                         *)
 (* Not modelled: what happens inside a slot (QuePaxa.tla), leader         *)
 (* rotation, snapshots, liveness. run.sh checks that seeded bugs in each  *)
@@ -136,11 +138,12 @@ Crash(r) ==
     /\ log' = [log EXCEPT ![r] = dlog[r]]
     /\ UNCHANGED <<decided, dlog, retired>>
 
-\* Action::Retired: r is not a member of the latest epoch it knows (from the prefix it
-\* applied, as its read barrier commits in order), and a majority of that epoch's members
-\* durably know every slot before it. Later slots may be decided and unknown to r. The
-\* operator rule: a change that adds r back keeps it running, so r does not retire while a
-\* decided change it has not applied names it.
+\* r shuts down for good after Action::Retired: r is not a member of the latest epoch it
+\* knows (from the prefix it applied, as its read barrier commits in order), and a majority
+\* of that epoch's members durably know every slot before it. Later slots may be decided
+\* and unknown to r. The operator rule: a change that adds r back keeps it running, so r
+\* does not shut down while a decided change it has not applied names it (it may still
+\* have reported Retired).
 Retire(r) ==
     LET st == Latest(r)
         caught == {m \in st.nxt : Prefix(dlog[m]) >= st.from}

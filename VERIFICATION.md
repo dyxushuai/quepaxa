@@ -120,11 +120,13 @@ assumptions: finitely many replicas, non-empty member sets made of them):
   the frontier's epoch. A tolerable set of replicas down, a minority of every member set
   from the slot on, leaves a holder.
 
+In the model, retiring is a replica shutting down for good after it reports `Retired`.
 The proof needs the operator rule the membership guide states, now explicit in the
-model: a change never names a retired replica, and a replica a change adds back keeps
-running until it applied that change (it may learn of the change only after retiring,
-so no implementation can rule this out). A retired replica that restarts and rejoins is
-a new replica, outside the model.
+model: a replica a change adds back keeps running until it applied that change (it may
+learn of the change only after reporting `Retired`, so no implementation can rule this
+out). It also assumes, beyond the guide, that a change never names a replica that shut
+down: the guide lets an operator restart a replica a change adds back, which the proof
+does not cover.
 The fault bound is a minority of *every* member set from the slot on, not of the current
 members alone: during a change, losing an old member and a new one can lose an old slot
 (TLC finds it with five replicas), which the membership guide now says.
