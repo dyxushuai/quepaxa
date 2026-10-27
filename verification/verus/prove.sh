@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Checks the Verus proof that the durability gate (gate.rs, a port of
-# crates/quepaxa/src/replica/gate.rs) never lets a send or effect overtake the writes it
-# depends on, then plants known bugs that the proof must reject. Uses Verus, fetched
+# Checks the Verus proofs on ports of the replica's code, then plants known bugs that the
+# proofs must reject: the durability gate (gate.rs, from crates/quepaxa/src/replica/gate.rs)
+# never lets a send or effect overtake the writes it depends on; commit-time deduplication
+# (dedup.rs, from crates/quepaxa/src/dedup.rs) applies an entry at most once. Uses Verus, fetched
 # (pinned, checksum verified) into target/verus-<digest>, and the Rust toolchain that
 # release requires (installed with rustup if missing). Linux x86_64 only.
 #
@@ -33,21 +34,27 @@ rustup run "$toolchain" rustc --version >/dev/null 2>&1 ||
 verus() { "$tools/verus" --crate-type=lib "$@"; }
 
 verus "$here/gate.rs"
+verus "$here/dedup.rs"
 
-# Each bug: name, then a sed expression that plants it. The proof must fail on every one.
+# Each bug: the file, a name, then a sed expression that plants it. The proof must fail on
+# every one.
 bugs=(
-  reply-before-own-writes-durable  '0,/if self\.idle\(\)/s//if self.ready()/'
-  park-behind-oldest-persist       's/self\.in_flight\[n - 1\]\./self.in_flight[0]./g'
-  release-one-persist-too-many     's/self\.in_flight\[0\]\.id > id \{/self.in_flight[0].id > id + 1 {/'
-  persist-drops-its-records        's/actions\.push\(Action::Persist \{ id, records,/actions.push(Action::Persist { id, records: Vec::new(),/'
-  checkpoint-appends               's/        self\.replace = true;/        self.replace = false;/'
+  gate  reply-before-own-writes-durable  '0,/if self\.idle\(\)/s//if self.ready()/'
+  gate  park-behind-oldest-persist       's/self\.in_flight\[n - 1\]\./self.in_flight[0]./g'
+  gate  release-one-persist-too-many     's/self\.in_flight\[0\]\.id > id \{/self.in_flight[0].id > id + 1 {/'
+  gate  persist-drops-its-records        's/actions\.push\(Action::Persist \{ id, records,/actions.push(Action::Persist { id, records: Vec::new(),/'
+  gate  checkpoint-appends               's/        self\.replace = true;/        self.replace = false;/'
+  dedup evicted-incarnation-reapplied    's/            if min_key_gt\(incs, incarnation\) \{/            if false \&\& min_key_gt(incs, incarnation) {/'
+  dedup id-below-window-reapplied        's/let fresh = id >= w\.below \&\& /let fresh = /'
+  dedup window-skips-an-id               's/w\.below = w\.below \+ 1;/w.below = w.below + 2;/'
+  dedup contains-forgets-evictions       's/None => incs\.len\(\) >= INCARNATIONS_KEPT \&\& min_key_gt\(incs, incarnation\),/None => false,/'
 )
 mkdir -p "$work"
 status=0
-for ((i = 0; i < ${#bugs[@]}; i += 2)); do
-  name=${bugs[i]}
-  sed -E "${bugs[i + 1]}" "$here/gate.rs" > "$work/$name.rs"
-  if cmp -s "$here/gate.rs" "$work/$name.rs"; then
+for ((i = 0; i < ${#bugs[@]}; i += 3)); do
+  file=${bugs[i]} name=${bugs[i + 1]}
+  sed -E "${bugs[i + 2]}" "$here/$file.rs" > "$work/$name.rs"
+  if cmp -s "$here/$file.rs" "$work/$name.rs"; then
     echo "STALE   $name (the bug no longer applies: refresh it against gate.rs)"; status=1
   elif verus "$work/$name.rs" > "$work/$name.log" 2>&1; then
     echo "MISSED  $name"; status=1

@@ -115,7 +115,7 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
-      - name: Verus proof of the durability gate (Verus pinned), and its seeded bugs
+      - name: Verus proofs of the durability gate and dedup (Verus pinned), and their seeded bugs
         run: verification/verus/prove.sh
 
   kani:
