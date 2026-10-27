@@ -16,6 +16,7 @@ lemmas, checked on the real code — there is no second model to drift from it.
 | Trace validation | `verification/tla/QuePaxaTrace.tla`, `traces.sh`; logs from `crates/quepaxa/src/slot_sim.rs` | the real `Register` and `SlotProposer` under a hostile network (3 or 5 recorders, 2 or 3 proposers): every delivered message must be the spec's action for a message the spec allows to exist, leading to the logged state; 30 traces must all be accepted, and a planted deviation (phase 0 adopting the first reply) must be rejected | nightly; its canary every PR |
 | **Safety proofs** | `verification/tla/QuePaxaProof.tla` (inductive invariant), `QuePaxaSafety.tla`, `QuePaxaRecordStep.tla`, `QuePaxaInductive.tla`; `MembershipProof.tla`, `MembershipRecover.tla` (TLAPS) | `QuePaxa.tla` never decides two values (G1), for **any** number of recorders and proposers, every step bound (so any number of rounds) and any message loss, duplication and reordering: the invariant holds initially and after every step, and implies Agreement (1,919 obligations, all machine-checked). TLC also checks the invariant on reachable states and evaluates the proof's assumptions on the model's constants. `Membership.tla`'s window rule (`ViewAgree`) and retirement (`Recoverable`), for any number of replicas, slots, members and changes and any `LAG` ≥ 1 | proofs nightly (~4 min), invariant with the TLA+ models |
 | Bounded proof | `#[cfg(kani)]` harness in `crates/quepaxa/src/recorder.rs` (Kani) | recorder invariants R1–R6 for one `record` from **every** register state, step and value, payload bytes included (the property test samples steps 4–11 and cannot see payloads, which equality ignores); a seeded bug (`verification/kani-canary.patch`) must fail it | nightly |
+| Code-level proof | `verification/verus/gate.rs` (Verus), a port of `crates/quepaxa/src/replica/gate.rs` | persist-before-send for **every** sequence of calls: no send or effect leaves before the writes it depends on are durable, and every `Persist`'s `then` waits only on that persist; three seeded bugs (a reply sent before its own writes are durable, work parked behind the oldest persist instead of the newest, one persist too many released) must fail it | nightly |
 | Fuzzing | bolero targets in `crates/quepaxa/src` | decoding of messages, batches, durable records, core state | corpus replay every PR, 20 min/target nightly |
 | Unsafe code | `crates/quepaxa-ffi` | Miri; ASan/UBSan on the C smoke test | every PR |
 | Mutation testing | `.cargo/mutants.toml`, `verification/mutants-check.sh` | test strength over the whole workspace; fails on any missed mutant not in `verification/mutants-accepted.txt` | weekly |
@@ -44,6 +45,7 @@ TLA_SECONDS=120 verification/tla/run.sh                          # TLA+ models, 
 verification/tla/prove.sh                                        # TLAPS safety proof (fetches tlapm 1.6; Docker off Linux x86_64)
 verification/tla/traces.sh                                       # trace validation only
 cargo kani -p quepaxa                                            # bounded proofs (cargo install --locked kani-verifier; cargo kani setup)
+verification/verus/prove.sh                                      # Verus proof of the durability gate and its seeded bugs (fetches Verus; Linux x86_64)
 cargo mutants -p quepaxa -f crates/quepaxa/src/dedup.rs          # mutants of one file (whole workspace tested)
 cargo +nightly bolero test -p quepaxa 'codec::tests::decode_never_panics_on_arbitrary_input' --target x86_64-unknown-linux-gnu -T 60s
 ```
@@ -156,7 +158,21 @@ Kani (CBMC) proves the recorder register in under a minute, but harnesses for th
 durability gate (persist-before-send over 4–7 operations) and the leader schedule (the
 64-slot window rule, by induction over one decided slot) did not finish in 10–20 minutes
 and grew past 40 GB: their state is `Vec`s of `Vec`s, and symbolic copies, drains and
-rotations dominate the formula. Those properties stay with the property tests, the
-simulator and the model checker of the real replica; `Membership.tla` proves the schedule's
-window rule and retirement at the model level instead.
+rotations dominate the formula. `Membership.tla` proves the schedule's window rule and
+retirement at the model level instead, and Verus proves the gate on a port of its code.
+
+The gate proof needs a deductive verifier: an invariant over the queues, not a search of
+states. Verus and Creusot both proved it (and the recorder's R1–R6) with similar effort.
+Neither verifies the crate in place: Verus needs the code inside its `verus!` macro, and
+Creusot needs a `DeepModel` for every type with a derived `PartialEq` or `Ord` across the
+crate (its derive rejects `pub(crate)` items) and a separate nightly. So the proof runs on
+a port, like the TLA+ models: Verus, as it installs from one archive, proves the gate in a
+second, and needed fewer hints.
+
+`verification/verus/gate.rs` keeps `gate.rs`'s logic line for line. Records, messages and
+effects become ids carrying a ghost `need` (the writes they wait for). Where vstd has no
+specification it departs from the code, marked `DEV`: `len() == 0` for `is_empty()`;
+`mem::swap` for `mem::take`; indexing for `back_mut()` and `front()`; index loops for
+`while let` and `extend(map(..))`; and `persisted` parks before recording the ack (`park`
+reads neither the ack nor the ids). A change to `gate.rs` must be ported to it.
 

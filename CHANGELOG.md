@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- Verification: a Verus proof that the durability gate never lets a send or effect overtake
+  the writes it depends on, for every sequence of calls, on a port of `gate.rs`
+  (`verification/verus/`); three seeded bugs must fail it. Run nightly.
 - Verification: VERIFICATION.md maps each TLA+ action to the Rust code it stands for and
   what the model leaves out; `prove.sh` refuses to run if a module stating a theorem is
   not in its list.
