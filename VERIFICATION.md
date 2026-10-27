@@ -16,7 +16,7 @@ lemmas, checked on the real code — there is no second model to drift from it.
 | Trace validation | `verification/tla/QuePaxaTrace.tla`, `traces.sh`; logs from `crates/quepaxa/src/slot_sim.rs` | the real `Register` and `SlotProposer` under a hostile network (3 or 5 recorders, 2 or 3 proposers): every delivered message must be the spec's action for a message the spec allows to exist, leading to the logged state; 30 traces must all be accepted, and a planted deviation (phase 0 adopting the first reply) must be rejected | nightly; its canary every PR |
 | **Safety proofs** | `verification/tla/QuePaxaProof.tla` (inductive invariant), `QuePaxaSafety.tla`, `QuePaxaRecordStep.tla`, `QuePaxaInductive.tla`; `MembershipProof.tla`, `MembershipRecover.tla` (TLAPS) | `QuePaxa.tla` never decides two values (G1), for **any** number of recorders and proposers, every step bound (so any number of rounds) and any message loss, duplication and reordering: the invariant holds initially and after every step, and implies Agreement (1,927 obligations, all machine-checked). TLC also checks the invariant on reachable states and evaluates the proof's assumptions on the model's constants. `Membership.tla`'s window rule (`ViewAgree`) and retirement (`Recoverable`), for any number of replicas, slots, members and changes and any `LAG` ≥ 1 | proofs nightly (~4 min), invariant with the TLA+ models |
 | Bounded proof | `#[cfg(kani)]` harness in `crates/quepaxa/src/recorder.rs` (Kani) | recorder invariants R1–R6 for one `record` from **every** register state, step and value, payload bytes included (the property test samples steps 4–11 and cannot see payloads, which equality ignores); a seeded bug (`verification/kani-canary.patch`) must fail it | nightly |
-| Code-level proof | `verification/verus/gate.rs` (Verus), a port of `crates/quepaxa/src/replica/gate.rs` | persist-before-send for every sequence of calls the replica makes, fencing included: no send or effect leaves before the writes it depends on are durable, every `Persist`'s `then` waits only on that persist, and the `Persist`s carry exactly the records written (appended, or replaced by a checkpoint); five seeded bugs (a reply sent before its own writes are durable, work parked behind the oldest persist, one persist too many released, a persist without its records, a checkpoint appended instead of replacing) must fail it | nightly |
+| Code-level proof | `verification/verus/` (Verus): ports of `crates/quepaxa/src/replica/gate.rs` and `crates/quepaxa/src/dedup.rs` | **gate**: persist-before-send for every sequence of calls the replica makes, fencing included: no send or effect leaves before the writes it depends on are durable, every `Persist`'s `then` waits only on that persist, and the `Persist`s carry exactly the records written (appended, or replaced by a checkpoint). **dedup**: for any reachable state, an entry is *covered* when its id is in its incarnation's window, or its incarnation is older than every one kept once four are; `first_time` is true exactly when the entry was not covered, covers it, and nothing covered is ever uncovered, so each entry is applied at most once; `contains` answers whether it is covered. Nine seeded bugs must fail them (gate: a reply before its own writes are durable, work parked behind the oldest persist, one persist too many released, a persist without its records, a checkpoint appended; dedup: an evicted incarnation re-applied, an id below the window re-applied, the window skipping an id, `contains` forgetting evictions) | nightly |
 | Fuzzing | bolero targets in `crates/quepaxa/src` | decoding of messages, batches, durable records, core state | corpus replay every PR, 20 min/target nightly |
 | Unsafe code | `crates/quepaxa-ffi` | Miri; ASan/UBSan on the C smoke test | every PR |
 | Mutation testing | `.cargo/mutants.toml`, `verification/mutants-check.sh` | test strength over the whole workspace; fails on any missed mutant not in `verification/mutants-accepted.txt` | weekly |
@@ -45,7 +45,7 @@ TLA_SECONDS=120 verification/tla/run.sh                          # TLA+ models, 
 verification/tla/prove.sh                                        # TLAPS safety proof (fetches tlapm 1.6; Docker off Linux x86_64)
 verification/tla/traces.sh                                       # trace validation only
 cargo kani -p quepaxa                                            # bounded proofs (cargo install --locked kani-verifier; cargo kani setup)
-verification/verus/prove.sh                                      # Verus proof of the durability gate and its seeded bugs (fetches Verus; Linux x86_64)
+verification/verus/prove.sh                                      # Verus proofs of the durability gate and dedup, and their seeded bugs (fetches Verus; Linux x86_64)
 cargo mutants -p quepaxa -f crates/quepaxa/src/dedup.rs          # mutants of one file (whole workspace tested)
 cargo +nightly bolero test -p quepaxa 'codec::tests::decode_never_panics_on_arbitrary_input' --target x86_64-unknown-linux-gnu -T 60s
 ```
@@ -181,4 +181,12 @@ What it assumes: the replica's calls (after `fence`, only `send` and `flush`, as
 `Replica::handle`), fewer than `u64::MAX - 1` persists, and that a checkpoint's records
 reflect every write before it; it proves the persists carry those records, not what they
 mean.
+
+`verification/verus/dedup.rs` ports `first_time` and `contains` (not the encoding).
+Departures, marked `DEV`: remove-then-insert for `entry(..).or_default()` (the state, and
+so what every replica filters, is the same); the smallest key from `keys()` for
+`pop_first()` and `keys().next()`; and a `loop` with the `remove` in its body for
+`while w.above.remove(&w.below)`. It assumes ids below `u64::MAX`: decoding rejects a batch
+or dedup state carrying that id, and a replica's own ids count up from 0 per incarnation
+(2^64 proposals is out of reach). A change to `dedup.rs` must be ported to it.
 

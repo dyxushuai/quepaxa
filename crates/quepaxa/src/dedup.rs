@@ -56,7 +56,8 @@ impl Dedup {
                 let mut above = BTreeSet::new();
                 for _ in 0..r.u32()? {
                     let id = r.u64()?;
-                    if id <= below {
+                    // Ids stop below u64::MAX (batch::decode), so `below` never overflows.
+                    if id <= below || id == u64::MAX {
                         return Err(DecodeError::BadTag);
                     }
                     above.insert(id);
@@ -161,5 +162,18 @@ mod tests {
         }
         assert!(seen(&mut d, 1, 7));
         assert!(!seen(&mut d, 6, 0));
+    }
+
+    #[test]
+    fn decode_rejects_the_largest_id() {
+        let mut d = Dedup::default();
+        d.first_time(NodeId(1), 1, ProposalId(5));
+        let mut bytes = Vec::new();
+        d.encode(&mut bytes);
+        assert_eq!(Dedup::decode(&mut Reader::new(&bytes::Bytes::from(bytes.clone()))), Ok(d));
+        // The last 8 bytes are the one id above the watermark.
+        let at = bytes.len() - 8;
+        bytes[at..].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(Dedup::decode(&mut Reader::new(&bytes::Bytes::from(bytes))), Err(DecodeError::BadTag));
     }
 }
