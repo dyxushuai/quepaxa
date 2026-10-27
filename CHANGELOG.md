@@ -11,6 +11,8 @@ All notable changes to this project are documented here. The project follows
   five seeded bugs must fail it. Run nightly.
 - Verification: a Verus proof that commit-time deduplication applies each entry at most once,
   incarnation eviction included, on a port of `dedup.rs`; four seeded bugs must fail it.
+- `quepaxa`: a batch or snapshot carrying the entry id `u64::MAX` is rejected as corrupt;
+  a member sending one could otherwise wrap a dedup watermark and re-apply entries.
 - Verification: VERIFICATION.md maps each TLA+ action to the Rust code it stands for and
   what the model leaves out; `prove.sh` refuses to run if a module stating a theorem is
   not in its list.

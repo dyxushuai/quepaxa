@@ -129,7 +129,7 @@ pub(crate) fn changes(buf: &Bytes) -> Vec<((NodeId, u64, ProposalId), Bytes)> {
         if r.take(len as usize).is_err() {
             return Vec::new();
         }
-        if !matches!(kind, ENTRY_APP | ENTRY_BARRIER | ENTRY_RECONFIGURE) {
+        if !matches!(kind, ENTRY_APP | ENTRY_BARRIER | ENTRY_RECONFIGURE) || id == u64::MAX {
             return Vec::new();
         }
         if kind == ENTRY_RECONFIGURE {
@@ -150,7 +150,11 @@ pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
     for _ in 0..n {
         let origin = NodeId(r.u32()?);
         let incarnation = r.u64()?;
-        let id = ProposalId(r.u64()?);
+        // Ids stop below u64::MAX, so a dedup window's watermark never overflows.
+        let id = match r.u64()? {
+            u64::MAX => return Err(DecodeError::BadTag),
+            id => ProposalId(id),
+        };
         let kind = match r.u8()? {
             ENTRY_APP => Kind::App,
             ENTRY_BARRIER => Kind::Barrier,
@@ -218,6 +222,19 @@ mod tests {
         let mut bad = good.to_vec();
         let at = bad.len() - 4 - 1;
         bad[at] = 9;
+        let bad = Bytes::from(bad);
+        assert!(decode(&bad).is_err());
+        assert!(changes(&bad).is_empty());
+    }
+
+    #[test]
+    fn the_largest_id_is_rejected() {
+        let ok = encode(&[entry(1, u64::MAX - 1, b"\x01\0\0\0\x05\0\0\0")]);
+        assert!(decode(&ok).is_ok());
+        assert_eq!(changes(&ok).len(), 1);
+        let mut bad = ok.to_vec();
+        // The id follows the entry count (4 bytes), origin (4) and incarnation (8).
+        bad[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
         let bad = Bytes::from(bad);
         assert!(decode(&bad).is_err());
         assert!(changes(&bad).is_empty());
