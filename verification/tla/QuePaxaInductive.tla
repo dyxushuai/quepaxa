@@ -63,8 +63,12 @@ LEMMA InvForms ==
     ASSUME IndInv
     PROVE  /\ \A q \in Proposers : GotOK(pst[q]) /\ DecOK(pst[q]) /\ SentOK(q, pst[q])
            /\ \A m \in Reqs : Supported(m.step, m.prop)
-BY DEF IndInv, GotInv, DecInv, SentInv, SupportInv, GotOK, DecOK, SentOK, Supported, QS, RS,
-       GotQ, Got
+\* One step per conjunct: unfolding all of them at once is too slow for the CI runners.
+<1>1. \A q \in Proposers : GotOK(pst[q]) BY DEF IndInv, GotInv, GotOK
+<1>2. \A q \in Proposers : DecOK(pst[q]) BY DEF IndInv, DecInv, DecOK, QS, RS, GotQ, Got
+<1>3. \A q \in Proposers : SentOK(q, pst[q]) BY DEF IndInv, SentInv, SentOK
+<1>4. \A m \in Reqs : Supported(m.step, m.prop) BY DEF IndInv, SupportInv, Supported
+<1> QED BY <1>1, <1>2, <1>3, <1>4
 
 \* At a phase-0 step only the key of a request's proposal matters for its support.
 LEMMA SupportedKey ==
