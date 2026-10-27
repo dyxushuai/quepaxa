@@ -39,6 +39,8 @@ bugs=(
   reply-before-own-writes-durable  '0,/if self\.idle\(\)/s//if self.ready()/'
   park-behind-oldest-persist       's/self\.in_flight\[n - 1\]\./self.in_flight[0]./g'
   release-one-persist-too-many     's/self\.in_flight\[0\]\.id > id \{/self.in_flight[0].id > id + 1 {/'
+  persist-drops-its-records        's/actions\.push\(Action::Persist \{ id, records,/actions.push(Action::Persist { id, records: Vec::new(),/'
+  checkpoint-appends               's/        self\.replace = true;/        self.replace = false;/'
 )
 mkdir -p "$work"
 status=0
