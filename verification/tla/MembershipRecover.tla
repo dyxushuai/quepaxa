@@ -697,4 +697,8 @@ THEOREM RetireSafe == Spec => []Recoverable
 <1>2. RInv /\ [Next]_vars => RInv' BY RInvNext
 <1>3. RInv => Recoverable BY InvRecoverable
 <1> QED BY <1>1, <1>2, <1>3, PTL DEF Spec
+
+\* What TLC checks is the same invariant.
+THEOREM FastAgree == Recoverable <=> RecoverableFast
+BY DEF Recoverable, RecoverableFast, Tolerable
 =============================================================================
