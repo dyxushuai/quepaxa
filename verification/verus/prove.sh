@@ -2,7 +2,9 @@
 # Checks the Verus proofs on ports of the replica's code, then plants known bugs that the
 # proofs must reject: the durability gate (gate.rs, from crates/quepaxa/src/replica/gate.rs)
 # never lets a send or effect overtake the writes it depends on; commit-time deduplication
-# (dedup.rs, from crates/quepaxa/src/dedup.rs) applies an entry at most once. Uses Verus, fetched
+# (dedup.rs, from crates/quepaxa/src/dedup.rs) applies an entry at most once; the leader
+# schedule (schedule.rs, from crates/quepaxa/src/schedule.rs) never changes the order of a
+# slot within LAG of the slots fed. Uses Verus, fetched
 # (pinned, checksum verified) into target/verus-<digest>, and the Rust toolchain that
 # release requires (installed with rustup if missing). Linux x86_64 only.
 #
@@ -35,6 +37,7 @@ verus() { "$tools/verus" --crate-type=lib "$@"; }
 
 verus "$here/gate.rs"
 verus "$here/dedup.rs"
+verus "$here/schedule.rs"
 
 # Each bug: the file, a name, then a sed expression that plants it. The proof must fail on
 # every one.
@@ -48,6 +51,9 @@ bugs=(
   dedup id-below-window-reapplied        's/let fresh = id >= w\.below \&\& /let fresh = /'
   dedup window-skips-an-id               's/w\.below = w\.below \+ 1;/w.below = w.below + 2;/'
   dedup contains-forgets-evictions       's/None => incs\.len\(\) >= INCARNATIONS_KEPT \&\& min_key_gt\(incs, incarnation\),/None => false,/'
+  schedule rotation-takes-effect-early   '0,/let from = slot \+ LAG;/s//let from = slot + LAG - 1;/'
+  schedule change-takes-effect-early     '/fn reconfigure/,$ s/let from = slot \+ LAG;/let from = slot + LAG - 1;/'
+  schedule prune-drops-the-window        's/let keep_from = self\.order_index\(slot\);/let keep_from = self.order_index(slot + LAG);/'
 )
 mkdir -p "$work"
 status=0
