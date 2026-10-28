@@ -11,6 +11,13 @@ All notable changes to this project are documented here. The project follows
   five seeded bugs must fail it. Run nightly.
 - Verification: a Verus proof that commit-time deduplication applies each entry at most once,
   incarnation eviction included, on a port of `dedup.rs`; four seeded bugs must fail it.
+- Verification: a Verus proof of the window rule in the leader schedule's code: feeding a
+  decided slot never changes the order of a slot within `LAG` of it (a port of
+  `schedule.rs`; three seeded bugs must fail it).
+- `quepaxa`: a snapshot whose leader schedule could not result from the slots it covers is
+  rejected (`InvalidCoreState`, or a corrupt record on restart); such a schedule let a
+  membership change replace members inside the window. A durable decision beyond the last
+  valid slot is now a corrupt record on restart, as it already was over the network.
 - `quepaxa`: a batch or snapshot carrying the entry id `u64::MAX` is rejected as corrupt;
   a member sending one could otherwise wrap a dedup watermark and re-apply entries.
 - Verification: VERIFICATION.md maps each TLA+ action to the Rust code it stands for and

@@ -16,7 +16,7 @@ lemmas, checked on the real code — there is no second model to drift from it.
 | Trace validation | `verification/tla/QuePaxaTrace.tla`, `traces.sh`; logs from `crates/quepaxa/src/slot_sim.rs` | the real `Register` and `SlotProposer` under a hostile network (3 or 5 recorders, 2 or 3 proposers): every delivered message must be the spec's action for a message the spec allows to exist, leading to the logged state; 30 traces must all be accepted, and a planted deviation (phase 0 adopting the first reply) must be rejected | nightly; its canary every PR |
 | **Safety proofs** | `verification/tla/QuePaxaProof.tla` (inductive invariant), `QuePaxaSafety.tla`, `QuePaxaRecordStep.tla`, `QuePaxaInductive.tla`; `MembershipProof.tla`, `MembershipRecover.tla` (TLAPS) | `QuePaxa.tla` never decides two values (G1), for **any** number of recorders and proposers, every step bound (so any number of rounds) and any message loss, duplication and reordering: the invariant holds initially and after every step, and implies Agreement (1,927 obligations, all machine-checked). TLC also checks the invariant on reachable states and evaluates the proof's assumptions on the model's constants. `Membership.tla`'s window rule (`ViewAgree`) and retirement (`Recoverable`), for any number of replicas, slots, members and changes and any `LAG` ≥ 1 | proofs nightly (~4 min), invariant with the TLA+ models |
 | Bounded proof | `#[cfg(kani)]` harness in `crates/quepaxa/src/recorder.rs` (Kani) | recorder invariants R1–R6 for one `record` from **every** register state, step and value, payload bytes included (the property test samples steps 4–11 and cannot see payloads, which equality ignores); a seeded bug (`verification/kani-canary.patch`) must fail it | nightly |
-| Code-level proof | `verification/verus/` (Verus): ports of `crates/quepaxa/src/replica/gate.rs` and `crates/quepaxa/src/dedup.rs` | **gate**: persist-before-send for every sequence of calls the replica makes, fencing included: no send or effect leaves before the writes it depends on are durable, every `Persist`'s `then` waits only on that persist, and the `Persist`s carry exactly the records written (appended, or replaced by a checkpoint). **dedup**: for any reachable state, an entry is *covered* when its id is in its incarnation's window, or its incarnation is older than every one kept once four are; `first_time` is true exactly when the entry was not covered, covers it, and nothing covered is ever uncovered, so each entry is applied at most once; `contains` answers whether it is covered. Nine seeded bugs must fail them (gate: a reply before its own writes are durable, work parked behind the oldest persist, one persist too many released, a persist without its records, a checkpoint appended; dedup: an evicted incarnation re-applied, an id below the window re-applied, the window skipping an id, `contains` forgetting evictions) | nightly |
+| Code-level proof | `verification/verus/` (Verus): ports of `crates/quepaxa/src/replica/gate.rs`, `crates/quepaxa/src/dedup.rs` and `crates/quepaxa/src/schedule.rs` | **gate**: persist-before-send for every sequence of calls the replica makes, fencing included: no send or effect leaves before the writes it depends on are durable, every `Persist`'s `then` waits only on that persist, and the `Persist`s carry exactly the records written (appended, or replaced by a checkpoint). **dedup**: for any reachable state, an entry is *covered* when its id is in its incarnation's window, or its incarnation is older than every one kept once four are; `first_time` is true exactly when the entry was not covered, covers it, and nothing covered is ever uncovered, so each entry is applied at most once; `contains` answers whether it is covered. **schedule** (the window rule in code): feeding decided slot *s* (`observe`, then its `reconfigure`s) never changes the order of a slot in [*s*, *s* + `LAG`), and every slot has a non-empty order. Twelve seeded bugs must fail them (gate: a reply before its own writes are durable, work parked behind the oldest persist, one persist too many released, a persist without its records, a checkpoint appended; dedup: an evicted incarnation re-applied, an id below the window re-applied, the window skipping an id, `contains` forgetting evictions; schedule: a rotation or a membership change taking effect one slot early, pruning an order the window still uses) | nightly |
 | Fuzzing | bolero targets in `crates/quepaxa/src` | decoding of messages, batches, durable records, core state | corpus replay every PR, 20 min/target nightly |
 | Unsafe code | `crates/quepaxa-ffi` | Miri; ASan/UBSan on the C smoke test | every PR |
 | Mutation testing | `.cargo/mutants.toml`, `verification/mutants-check.sh` | test strength over the whole workspace; fails on any missed mutant not in `verification/mutants-accepted.txt` | weekly |
@@ -45,7 +45,7 @@ TLA_SECONDS=120 verification/tla/run.sh                          # TLA+ models, 
 verification/tla/prove.sh                                        # TLAPS safety proof (fetches tlapm 1.6; Docker off Linux x86_64)
 verification/tla/traces.sh                                       # trace validation only
 cargo kani -p quepaxa                                            # bounded proofs (cargo install --locked kani-verifier; cargo kani setup)
-verification/verus/prove.sh                                      # Verus proofs of the durability gate and dedup, and their seeded bugs (fetches Verus; Linux x86_64)
+verification/verus/prove.sh                                      # Verus proofs of the durability gate, dedup and the leader schedule, and their seeded bugs (fetches Verus; Linux x86_64)
 cargo mutants -p quepaxa -f crates/quepaxa/src/dedup.rs          # mutants of one file (whole workspace tested)
 cargo +nightly bolero test -p quepaxa 'codec::tests::decode_never_panics_on_arbitrary_input' --target x86_64-unknown-linux-gnu -T 60s
 ```
@@ -160,7 +160,8 @@ durability gate (persist-before-send over 4–7 operations) and the leader sched
 64-slot window rule, by induction over one decided slot) did not finish in 10–20 minutes
 and grew past 40 GB: their state is `Vec`s of `Vec`s, and symbolic copies, drains and
 rotations dominate the formula. `Membership.tla` proves the schedule's window rule and
-retirement at the model level instead, and Verus proves the gate on a port of its code.
+retirement at the model level, and Verus proves the gate, dedup and the schedule's window
+rule on ports of their code.
 
 The gate proof needs a deductive verifier: an invariant over the queues, not a search of
 states. Verus and Creusot both proved it (and the recorder's R1–R6) with similar effort.
@@ -190,4 +191,16 @@ so what every replica filters, is the same); the smallest key from `keys()` for
 `while w.above.remove(&w.below)`. It assumes ids below `u64::MAX`: decoding rejects a batch
 or dedup state carrying that id, and a replica's own ids count up from 0 per incarnation
 (2^64 proposals is out of reach). A change to `dedup.rs` must be ported to it.
+
+`verification/verus/schedule.rs` ports `with_order`, `leader`, `observe`, `reconfigure`
+and `prune` (not the encoding, `knows`, `everyone` or `position`). Departures, marked
+`DEV`: a scan for `partition_point`; `split_off` for `drain(..keep_from)`; a hand-built
+rotation for `to_vec()` and `rotate_left(1)`; a loop for `settled.contains`; and the epoch
+counter is not ported (it only names epochs). It covers every schedule built by
+`with_order` and fed decided slots in order, at most `MAX_SLOT` (as `log.rs` does, and as
+restart now checks for every decided record). A schedule restored from a snapshot must
+satisfy the proof's invariant for the slots the snapshot covers (`Schedule::fits`, checked
+by `CoreState::decode`); a review found that decoding had accepted one whose first order
+started after them, which a change could then replace inside the window. A change to `schedule.rs`
+must be ported to it.
 

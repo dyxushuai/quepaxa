@@ -230,6 +230,22 @@ impl Schedule {
         Ok(Self { history, streak, quiet_until, epoch, epoch_from, settled })
     }
 
+    /// Whether this could be the schedule after feeding every slot below `next`: the
+    /// invariant verification/verus/schedule.rs proves the window rule under. Entries start
+    /// in increasing slots, the first at or before the last slot fed and every one at most
+    /// `LAG` after it.
+    pub fn fits(&self, next: u64) -> bool {
+        let increasing = self.history.windows(2).all(|w| w[0].0 < w[1].0);
+        match next.checked_sub(1) {
+            Some(fed) => {
+                increasing
+                    && self.history[0].0 <= fed
+                    && self.history.iter().all(|(from, _)| *from <= fed.saturating_add(LAG))
+            }
+            None => self.history.len() == 1 && self.history[0].0 == 0,
+        }
+    }
+
     /// Feeds each decided slot exactly once, in slot order, with its value's origin.
     pub fn observe(&mut self, slot: Slot, origin: NodeId) {
         if slot.0 < self.quiet_until {
@@ -459,5 +475,22 @@ mod tests {
                 proptest::prop_assert_eq!(a.leader(Slot(k)), b.leader(Slot(k)));
             }
         }
+    }
+
+    #[test]
+    fn fits_only_what_feeding_the_slots_below_next_can_build() {
+        let s = Schedule::new(&ids(&[0, 1, 2]));
+        assert!(s.fits(0) && s.fits(10));
+        // The first order starting after the last slot fed: a change at slot 10 would then
+        // replace the only order, and slot 11 would change members at once.
+        let ahead = Schedule { history: alloc::vec![(74, ids(&[0, 1, 2]))], ..s.clone() };
+        assert!(!ahead.fits(10) && ahead.fits(75));
+        let tied = Schedule {
+            history: alloc::vec![(0, ids(&[0, 1, 2])), (5, ids(&[1, 2, 0])), (5, ids(&[2, 0, 1]))],
+            ..s.clone()
+        };
+        assert!(!tied.fits(10));
+        let far = Schedule { history: alloc::vec![(0, ids(&[0, 1, 2])), (10 + LAG, ids(&[1, 2, 0]))], ..s };
+        assert!(!far.fits(10) && far.fits(11));
     }
 }
