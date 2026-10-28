@@ -122,7 +122,8 @@ assumptions: finitely many replicas, non-empty member sets made of them):
   fully decided point of the log, so later decisions never undo it; a retiring replica's
   epoch becomes the frontier if it is later, and otherwise its slots are already with
   the frontier's epoch. A tolerable set of replicas down, a minority of every member set
-  from the slot on, leaves a holder.
+  from the slot on, leaves a holder. TLC checks `RecoverableFast`, the same invariant
+  arranged to evaluate quickly (`FastAgree` proves them equal).
 
 In the model, retiring is a replica shutting down for good after it reports `Retired`.
 The proof needs the operator rule the membership guide states, now explicit in the

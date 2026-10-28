@@ -193,6 +193,19 @@ Recoverable ==
                 IN \/ \E r \in Replicas \ gone : s \in dlog[r]
                    \/ 2 * Cardinality(M \ gone) > Cardinality(M)
 
+\* Recoverable arranged for TLC, which checks it in every state: the later member sets once
+\* per slot, not once per D, and the cheap outcomes before them. MembershipRecover.tla
+\* proves the two equal.
+RecoverableFast ==
+    \A s \in Slots : decided[s] # None =>
+        LET M == MembersAt(s, Truth)
+            L == LaterEpochs(s)
+        IN \A D \in SUBSET Replicas :
+            LET gone == retired \cup D
+            IN \/ \E r \in Replicas \ gone : s \in dlog[r]
+               \/ 2 * Cardinality(M \ gone) > Cardinality(M)
+               \/ \E E \in L : ~(2 * Cardinality(D \cap E) < Cardinality(E))
+
 TypeOK ==
     /\ \A s \in Slots : decided[s] \in Values \cup {None}
     /\ \A r \in Replicas : dlog[r] \subseteq Slots /\ log[r] \subseteq Slots
