@@ -7,7 +7,9 @@
 // k - LAG is fed, slot k's members and leader are fixed: every replica that drives k
 // (only below its commit index + LAG) computes the same ones. Every slot has an order, and
 // every order is non-empty, so `leader` never indexes out of bounds.
-// Assumed: slots stay at most MAX_SLOT (the replica rejects larger ones).
+// Assumed: slots stay at most MAX_SLOT (the replica rejects larger ones), and a schedule
+// restored from a snapshot satisfies `inv` for the slots it covers (Schedule::fits, checked
+// when the snapshot's core state is decoded).
 //
 // Nodes are u32 and change keys u64. Departures from the original's code, forced by what
 // vstd specifies, are marked DEV; VERIFICATION.md lists them. When schedule.rs changes,

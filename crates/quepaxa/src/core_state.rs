@@ -57,6 +57,9 @@ impl CoreState {
             return Err(DecodeError::BadTag);
         }
         let schedule = Schedule::decode(&mut r, members)?;
+        if !schedule.fits(next) {
+            return Err(DecodeError::BadTag);
+        }
         let dedup = Dedup::decode(&mut r)?;
         r.finish()?;
         Ok(Self { next, leaders, schedule, dedup })
@@ -85,6 +88,23 @@ mod tests {
         let state =
             CoreState { next: 20, leaders: alloc::vec![NodeId(2), NodeId(0), NodeId(1)], schedule, dedup };
         assert_eq!(CoreState::decode(&state.encode(), &members()), Ok(state));
+    }
+
+    #[test]
+    fn rejects_a_schedule_ahead_of_its_snapshot() {
+        let mut schedule = Schedule::new(&members());
+        for slot in 0..20 {
+            schedule.observe(Slot(slot), NodeId(2));
+        }
+        let state = |next| CoreState {
+            next,
+            leaders: members(),
+            schedule: schedule.clone(),
+            dedup: Dedup::default(),
+        };
+        // A rotation counted at slot 7 starts at 7 + LAG: not yet decided by slot 5.
+        assert!(CoreState::decode(&state(20).encode(), &members()).is_ok());
+        assert_eq!(CoreState::decode(&state(5).encode(), &members()), Err(DecodeError::BadTag));
     }
 
     #[test]

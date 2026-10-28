@@ -206,6 +206,9 @@ impl Replica {
                 }
                 Record::Reservation { through } => reservation = reservation.max(Some(through.0)),
                 Record::Decided { slot, proposal } => {
+                    if slot.0 > MAX_SLOT {
+                        return Err(Error::CorruptRecord { index });
+                    }
                     log.insert(slot, Decision { proposal });
                 }
                 Record::Compacted { through, core_state } => {

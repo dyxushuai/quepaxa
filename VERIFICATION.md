@@ -197,7 +197,10 @@ and `prune` (not the encoding, `knows`, `everyone` or `position`). Departures, m
 `DEV`: a scan for `partition_point`; `split_off` for `drain(..keep_from)`; a hand-built
 rotation for `to_vec()` and `rotate_left(1)`; a loop for `settled.contains`; and the epoch
 counter is not ported (it only names epochs). It covers every schedule built by
-`with_order` and fed decided slots in order, at most `MAX_SLOT` (as `log.rs` does); a
-schedule restored from a snapshot is trusted to be one of them. A change to `schedule.rs`
+`with_order` and fed decided slots in order, at most `MAX_SLOT` (as `log.rs` does, and as
+restart now checks for every decided record). A schedule restored from a snapshot must
+satisfy the proof's invariant for the slots the snapshot covers (`Schedule::fits`, checked
+by `CoreState::decode`); a review found that decoding had accepted one whose first order
+started after them, which a change could then replace inside the window. A change to `schedule.rs`
 must be ported to it.
 
