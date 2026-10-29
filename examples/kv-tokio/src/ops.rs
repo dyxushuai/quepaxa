@@ -20,6 +20,13 @@ pub struct RangeReq {
     pub keys_only: bool,
 }
 
+impl RangeReq {
+    /// One key, its value included.
+    pub fn key(key: &[u8]) -> Self {
+        Self { key: key.to_vec(), end: Vec::new(), limit: 0, count_only: false, keys_only: false }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Value(Vec<u8>),
@@ -271,6 +278,11 @@ fn range(kv: &Kv, r: &RangeReq) -> Response {
         }
     }
     Response::Range { kvs, more, count }
+}
+
+/// A range against the current state, without a write.
+pub fn read(kv: &Kv, r: &RangeReq) -> Applied {
+    Applied { revision: kv.revision(), response: range(kv, r) }
 }
 
 /// Applies `req`; a request that writes anything takes one new revision for all its writes.

@@ -23,6 +23,7 @@
 //! peer id is whatever the connecting side claims. Put replicas on a private network or
 //! behind mTLS (e.g. a mesh sidecar) before exposing them.
 
+mod client;
 mod kv;
 mod node;
 mod ops;
@@ -46,7 +47,9 @@ use tokio::sync::{mpsc as tmpsc, oneshot};
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use node::{Cmd, Ev, MAX_FRAME, Node, PeerFrame};
+use client::{Cmd, Reply};
+use node::{Ev, MAX_FRAME, Node, PeerFrame};
+use ops::{RangeReq, Request};
 use storage::Disk;
 
 struct Args {
@@ -191,9 +194,9 @@ fn parse_cmd(line: &str) -> Option<Cmd> {
     let ids = |s: &str| s.split(',').map(|i| i.parse().map(NodeId)).collect::<Result<Vec<_>, _>>().ok();
     let words: Vec<&str> = line.split_whitespace().collect();
     match words[..] {
-        ["PUT", k, v] => Some(Cmd::Put(k.to_owned(), v.to_owned())),
-        ["GET", k] => Some(Cmd::Get(k.to_owned())),
-        ["STALE", k] => Some(Cmd::Stale(k.to_owned())),
+        ["PUT", k, v] => Some(Cmd::Write(Request::Put { key: k.into(), value: v.into(), prev_kv: false })),
+        ["GET", k] => Some(Cmd::Read { range: RangeReq::key(k.as_bytes()), linearizable: true }),
+        ["STALE", k] => Some(Cmd::Read { range: RangeReq::key(k.as_bytes()), linearizable: false }),
         ["STATS"] => Some(Cmd::Stats),
         ["RECONFIGURE", members] => Some(Cmd::Reconfigure(ids(members)?, Vec::new())),
         ["RECONFIGURE", members, "LEADERS", order] => Some(Cmd::Reconfigure(ids(members)?, ids(order)?)),
@@ -213,19 +216,19 @@ const MAX_PIPELINE: usize = 1024;
 async fn client(s: TcpStream, events: SyncSender<Ev>) {
     let _ = s.set_nodelay(true);
     let (r, w) = s.into_split();
-    let (tx, mut replies) = tmpsc::channel::<oneshot::Receiver<String>>(MAX_PIPELINE);
+    let (tx, mut replies) = tmpsc::channel::<oneshot::Receiver<Reply>>(MAX_PIPELINE);
     let writer = tokio::spawn(async move {
         // Replies already available are written together; the buffer is flushed before
         // waiting on one that is not.
         let mut w = BufWriter::new(w);
         while let Some(mut rx) = replies.recv().await {
             let line = match rx.try_recv() {
-                Ok(line) => line,
+                Ok(reply) => client::line(reply),
                 Err(TryRecvError::Empty) => {
                     if w.flush().await.is_err() {
                         return;
                     }
-                    rx.await.unwrap_or_else(|_| "ERR node stopped".to_owned())
+                    rx.await.map_or_else(|_| "ERR node stopped".to_owned(), client::line)
                 }
                 Err(TryRecvError::Closed) => "ERR node stopped".to_owned(),
             };
@@ -244,7 +247,7 @@ async fn client(s: TcpStream, events: SyncSender<Ev>) {
         }
         let (reply, rx) = oneshot::channel();
         if line.len() > MAX_LINE && line.last() != Some(&b'\n') {
-            let _ = reply.send(format!("ERR line longer than {MAX_LINE} bytes"));
+            let _ = reply.send(Reply::Text(format!("ERR line longer than {MAX_LINE} bytes")));
             let _ = tx.send(rx).await;
             drop(tx);
             // The writer closes its side once the error is out; the rest of the input is
@@ -263,10 +266,10 @@ async fn client(s: TcpStream, events: SyncSender<Ev>) {
                 }
             }
             None => {
-                let _ = reply.send(
+                let _ = reply.send(Reply::Text(
                     "ERR expected PUT <k> <v> | GET <k> | STALE <k> | STATS | RECONFIGURE <ids> [LEADERS <ids>]"
                         .to_owned(),
-                );
+                ));
             }
         }
         if tx.send(rx).await.is_err() {
