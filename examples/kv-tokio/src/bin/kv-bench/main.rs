@@ -5,7 +5,7 @@
 //! ```text
 //! kv-bench --targets 127.0.0.1:7200,127.0.0.1:7201 --rate 20000 --secs 10 --conns 16 [--gets 0.5]
 //! kv-bench --protocol etcd --targets 127.0.0.1:2379 --rate 5000 --secs 60 \
-//!          [--timeline 100] [--fault-at 20] [--samples out.csv]
+//!          [--timeline 100] [--fault-at 20] [--samples out.csv] [--start-at UNIX_MS]
 //! ```
 //!
 //! Prints achieved throughput and latency percentiles. Results are measurements of one
@@ -15,8 +15,9 @@
 //! a range for each GET and a put for each PUT. There latency runs from each request's
 //! intended send time, and late arrivals are still sent: `--timeline MS` prints per-interval
 //! latency, `--fault-at SECS` the longest stretch without a completion after that time and
-//! how long throughput took to come back, and `--samples FILE` writes every request as
-//! `due_us,done_us,outcome`.
+//! how long throughput was down, and `--samples FILE` writes every request as
+//! `due_us,done_us,outcome`. `--start-at` starts the run at that wall-clock time (Unix
+//! milliseconds), so a fault injector on the same host can share its time zero.
 
 mod etcd;
 #[path = "../../pb.rs"]
@@ -164,9 +165,10 @@ fn report(
     );
     if let Some(at) = fault_at {
         let fault_us = (at * 1e6) as u64;
-        let gap = timeline::longest_gap_us(samples, fault_us, end_us);
         // Up to the last arrival: completions fall off after it whatever the cluster does.
-        let degraded = timeline::degraded_us(samples, fault_us, (secs * 1e6) as u64, 250_000);
+        let last_arrival = end_us.min((secs * 1e6) as u64);
+        let gap = timeline::longest_gap_us(samples, fault_us, last_arrival);
+        let degraded = timeline::degraded_us(samples, fault_us, last_arrival, 250_000);
         println!("fault_at={at}s longest_gap={}ms degraded={}ms", gap / 1000, degraded / 1000);
     }
     if let Some(ms) = timeline_ms {
@@ -188,8 +190,8 @@ fn report(
 async fn main() {
     let mut targets: Vec<SocketAddr> = Vec::new();
     let (mut rate, mut secs, mut conns, mut gets) = (1000.0, 10.0, 8usize, 0.5);
-    let (mut protocol, mut samples_path, mut timeline_ms, mut fault_at) =
-        (String::from("lines"), None, None, None);
+    let (mut protocol, mut samples_path, mut timeline_ms, mut fault_at, mut start_at) =
+        (String::from("lines"), None, None, None, None);
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let v = it.next().unwrap_or_default();
@@ -205,14 +207,18 @@ async fn main() {
             "--samples" => samples_path = Some(v),
             "--timeline" => timeline_ms = Some(v.parse::<u64>().expect("--timeline: milliseconds")),
             "--fault-at" => fault_at = Some(v.parse::<f64>().expect("--fault-at: seconds")),
+            "--start-at" => {
+                let ms = v.parse().expect("--start-at: Unix milliseconds");
+                start_at = Some(std::time::UNIX_EPOCH + Duration::from_millis(ms));
+            }
             other => panic!("unknown flag {other}"),
         }
     }
     assert!(!targets.is_empty(), "--targets is required");
     match protocol.as_str() {
-        "lines" => {}
+        "lines" => assert!(start_at.is_none(), "--start-at needs --protocol etcd"),
         "etcd" => {
-            let load = etcd::Load { targets, rate, secs, conns, gets };
+            let load = etcd::Load { targets, rate, secs, conns, gets, start_at };
             let (samples, end_us) = etcd::run(&load).await;
             report(&samples, end_us, rate, secs, timeline_ms, fault_at, samples_path.as_deref());
             return;

@@ -139,9 +139,18 @@ sidecar() {
 }
 
 cgroup_of() {
-  local id
+  local id cg
   id=$(docker inspect -f '{{.Id}}' "$1")
-  find /sys/fs/cgroup -maxdepth 3 -type d \( -name "docker-$id.scope" -o -name "$id" \) | head -1
+  cg=$(find /sys/fs/cgroup -maxdepth 3 -type d \( -name "docker-$id.scope" -o -name "$id" \) | head -1)
+  # Without it the fault would silently not happen.
+  [ -n "$cg" ] || { echo "no cgroup v2 directory for $1" >&2; exit 1; }
+  echo "$cg"
+}
+
+# sleep_until <Unix ms>
+sleep_until() {
+  local ms=$(($1 - $(date +%s%3N)))
+  [ "$ms" -le 0 ] || sleep "$((ms / 1000)).$(printf %03d $((ms % 1000)))"
 }
 
 inject() {
@@ -151,7 +160,9 @@ inject() {
     partition)
       sidecar "for f in $f1 $f2; do iptables -A INPUT -s \$f -j DROP; iptables -A OUTPUT -d \$f -j DROP; done" ;;
     slow-disk)
-      sidecar "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=$slow_iops' > $(cgroup_of "$leader")/io.max" ;;
+      local cg
+      cg=$(cgroup_of "$leader")
+      sidecar "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=$slow_iops' > $cg/io.max" ;;
     far-leader) sidecar "tc qdisc add dev eth0 root netem delay ${far_ms}ms" ;;
   esac
 }
@@ -160,7 +171,10 @@ heal() {
   case $1 in
     crash) ;;
     partition) sidecar "iptables -F" ;;
-    slow-disk) sidecar "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=max' > $(cgroup_of "$leader")/io.max" ;;
+    slow-disk)
+      local cg
+      cg=$(cgroup_of "$leader")
+      sidecar "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=max' > $cg/io.max" ;;
     far-leader) sidecar "tc qdisc del dev eth0 root" ;;
   esac
 }
@@ -168,13 +182,17 @@ heal() {
 # The fault scenarios: open-loop load on the followers, fault, heal, recovery.
 faulted() {
   local system=$1 scenario=$2 out="$results/$1-$2"
+  # One time zero for the generator and the injector (containers share the host clock),
+  # far enough ahead for the generator's container to start.
+  local t0=$(($(date +%s%3N) + 5000))
   docker run --rm --name qpx-gen --network "$net" --cpuset-cpus "$gen_cpus" -v "$results:/out" "$image" \
     kv-bench --protocol etcd --targets "${followers[0]}:2379,${followers[1]}:2379" --rate "$rate" \
-    --secs "$secs" --conns 16 --fault-at "$fault" --timeline 250 --samples "/out/$1-$2.csv" > "$out.txt" &
+    --secs "$secs" --conns 16 --start-at "$t0" --fault-at "$fault" --timeline 250 \
+    --samples "/out/$1-$2.csv" > "$out.txt" &
   local gen=$!
-  sleep "$fault"
+  sleep_until $((t0 + fault * 1000))
   inject "$scenario"
-  sleep $((heal - fault))
+  sleep_until $((t0 + heal * 1000))
   heal "$scenario"
   wait $gen
   head -2 "$out.txt" | sed 's/^/    /'
@@ -187,7 +205,8 @@ steady() {
   {
     echo "## put, unlimited"; "${bench[@]}" put --total "$total" --key-space-size 100000
     echo "## put, $rate/s"; "${bench[@]}" put --total $((rate * steady_secs)) --rate "$rate" --key-space-size 100000
-    "${bench[@]}" put --total 1 >/dev/null # the key the ranges read
+    # The key the ranges read (etcd's benchmark writes random keys).
+    docker run --rm --network "$net" "$etcd_image" etcdctl --endpoints="$endpoints" put foo bar >/dev/null
     echo "## range linearizable"; "${bench[@]}" range foo --total "$total" --consistency l
     echo "## range serializable"; "${bench[@]}" range foo --total "$total" --consistency s
     echo "## txn-put"; "${bench[@]}" txn-put --total "$total"

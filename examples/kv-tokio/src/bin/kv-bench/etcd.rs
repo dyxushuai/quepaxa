@@ -4,7 +4,7 @@
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use tonic::transport::{Channel, Endpoint};
 
@@ -19,6 +19,9 @@ pub struct Load {
     pub secs: f64,
     pub conns: usize,
     pub gets: f64,
+    /// When the run starts on the wall clock, so another process can time faults against
+    /// it; `None`: as soon as the clients exist.
+    pub start_at: Option<SystemTime>,
 }
 
 /// Runs the load; returns every request's sample and the run's end (microseconds from start),
@@ -33,7 +36,16 @@ pub async fn run(load: &Load) -> (Vec<Sample>, u64) {
         })
         .collect();
     let samples = Arc::new(Mutex::new(Vec::new()));
-    let start = Instant::now();
+    // Time zero is `start_at` even when the clients were ready late: arrivals then due are
+    // sent at once and their delay counts.
+    let start = match load.start_at {
+        Some(at) => match at.duration_since(SystemTime::now()) {
+            Ok(ahead) => Instant::now() + ahead,
+            Err(late) => Instant::now() - late.duration(),
+        },
+        None => Instant::now(),
+    };
+    tokio::time::sleep_until(start.into()).await;
     let until = start + Duration::from_secs_f64(load.secs);
     let mut rng = SplitMix(1);
     let mut next = start;
