@@ -5,7 +5,11 @@ use crate::codec::reply_proposal;
 use proptest::prelude::*;
 
 fn replica() -> Replica {
-    let cfg = Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    replica_as(0)
+}
+
+fn replica_as(me: u32) -> Replica {
+    let cfg = Config::new([3; 16], NodeId(me), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
     let mut r = Replica::new(cfg, [], Timestamp(0)).unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
@@ -627,4 +631,44 @@ fn a_snapshot_over_a_decided_but_unapplied_local_batch_releases_it() {
     r.poll_actions(&mut out);
     assert!(r.batches.values().all(|b| b.key != key), "a covered, committed batch is released");
     assert_eq!(open(&r), 1, "a batch past the snapshot keeps its slot");
+}
+
+#[test]
+fn a_follower_hands_a_hedged_batch_that_lost_its_slot_back_to_the_leader() {
+    let mut r = replica_as(1);
+    let mut out = Vec::new();
+    let forwards = |out: &[Action]| {
+        out.iter()
+            .filter(|a| match a {
+                Action::Send(o) => {
+                    o.to == NodeId(0)
+                        && matches!(
+                            Message::decode(&o.bytes, &r_wire()),
+                            Ok(Message { body: Body::Forward { .. }, .. })
+                        )
+                }
+                _ => false,
+            })
+            .count()
+    };
+    let id = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards(&out), 1);
+    // The leader never commits it: the follower hedges, proposing it in a slot of its own.
+    while r.forwarded.contains_key(&id) {
+        let at = r.next_deadline().expect("the hedge is scheduled");
+        r.handle_timeout(at).unwrap();
+    }
+    r.poll_actions(&mut out);
+    let slot = r.batches.values().find_map(|b| b.slot).expect("the hedged batch has a slot");
+    out.clear();
+    // The leader's value takes the slot.
+    let env =
+        Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(0), to: NodeId(1), commit_index: 0 };
+    let decided = Message { env, body: Body::Decided { slot, proposal: proposal(1, 0, 0) } }.encode();
+    r.handle(r.now, Input::Message(decided)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(r.batches.is_empty(), "the follower does not compete with the leader again");
+    assert_eq!(forwards(&out), 1, "the entry goes back to the leader");
+    assert!(r.forwarded.contains_key(&id), "and is hedged again if the leader stays silent");
 }

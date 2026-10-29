@@ -154,6 +154,26 @@ impl Replica {
         self.metrics.forwarded += 1;
     }
 
+    /// A local batch lost its slot. The leader proposes it again in another slot; a follower
+    /// hands its entries back to the leader instead, since a follower's proposal loses to a
+    /// live leader's in slot after slot, and hedges them again only if the leader stays silent.
+    pub(super) fn lost_slot(&mut self, seq: u64) {
+        if self.leads_now() {
+            if let Some(b) = self.batches.get_mut(&seq) {
+                b.slot = None;
+            }
+            return;
+        }
+        let Some(b) = self.batches.remove(&seq) else { return };
+        // Our own encoding: it decodes.
+        let entries = batch::decode(&b.value).unwrap_or_default();
+        let dedup = &self.dedup;
+        self.pending.extend(entries.into_iter().filter(|e| {
+            let (o, inc, id) = e.key();
+            !dedup.contains(o, inc, id)
+        }));
+    }
+
     /// Cuts the next batch: hedged entries always, pending ones only while leading.
     fn cut_batch(&mut self) -> Option<u64> {
         let lead = self.leads_now();

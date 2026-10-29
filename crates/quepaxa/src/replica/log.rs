@@ -86,12 +86,10 @@ impl Replica {
         }
         self.metrics.slots_decided += 1;
         self.gate.write(Record::Decided { slot, proposal: proposal.clone() }.encode());
-        // A local batch that lost its slot goes back to be proposed elsewhere.
         if let Some(a) = self.proposers.remove(&slot)
-            && let Some(b) = self.batches.get_mut(&a.batch)
-            && b.key != proposal.key
+            && self.batches.get(&a.batch).is_some_and(|b| b.key != proposal.key)
         {
-            b.slot = None;
+            self.lost_slot(a.batch);
         }
         if broadcast {
             // Everyone in the current or a pending epoch: joining replicas catch up early.
