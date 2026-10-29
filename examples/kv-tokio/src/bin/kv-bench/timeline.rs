@@ -1,5 +1,5 @@
 //! What an open-loop run looked like over time: per-interval latency, the longest stretch
-//! without a completed request, and how long throughput took to come back after a fault.
+//! without a completed request, and how long throughput was down after a fault.
 //!
 //! Latency runs from a request's intended send time, so a generator that falls behind, or
 //! a server that stalls, shows the full delay (no coordinated omission).
@@ -74,27 +74,22 @@ pub fn longest_gap_us(samples: &[Sample], from_us: u64, end_us: u64) -> u64 {
     gap
 }
 
-/// Time from `fault_us` until throughput stays back: the end of the last one-second window
-/// (starting at the fault, in 100 ms steps) whose completions fall below 80% of the rate in
-/// the `fault_us` before it. `Some(0)` if none does; `None` if the run ends below it.
-pub fn recovery_us(samples: &[Sample], fault_us: u64, end_us: u64) -> Option<u64> {
-    const SEC: u64 = 1_000_000;
+/// How long throughput was down after `fault_us`: the total of the `width_us` buckets,
+/// from the fault to `end_us`, in which fewer requests completed than 80% of the rate in
+/// the `fault_us` before it. A brief stall long after the fault adds little; a cluster that
+/// stays degraded adds every bucket.
+pub fn degraded_us(samples: &[Sample], fault_us: u64, end_us: u64, width_us: u64) -> u64 {
     let ok: Vec<u64> = samples.iter().filter(|s| s.outcome == Outcome::Ok).map(|s| s.done_us).collect();
-    let before = ok.iter().filter(|&&t| t < fault_us).count() as f64 / (fault_us as f64 / SEC as f64);
-    let mut last_low = None;
+    let per_bucket = ok.iter().filter(|&&t| t < fault_us).count() as f64 * width_us as f64 / fault_us as f64;
+    let mut low = 0;
     let mut t = fault_us;
-    while t + SEC <= end_us {
-        let in_window = ok.iter().filter(|&&d| d >= t && d < t + SEC).count() as f64;
-        if in_window < 0.8 * before {
-            last_low = Some(t + SEC);
+    while t + width_us <= end_us {
+        if (ok.iter().filter(|&&d| d >= t && d < t + width_us).count() as f64) < 0.8 * per_bucket {
+            low += width_us;
         }
-        t += SEC / 10;
+        t += width_us;
     }
-    match last_low {
-        None => Some(0),
-        Some(end) if end + SEC / 10 > end_us => None,
-        Some(end) => Some(end - fault_us),
-    }
+    low
 }
 
 #[cfg(test)]
@@ -140,11 +135,14 @@ mod tests {
     }
 
     #[test]
-    fn recovery_is_measured_from_the_fault() {
-        // 1000/s before the fault at 3 s; nothing completes until 5 s, when the backlog does.
+    fn degraded_time_counts_the_buckets_below_the_pre_fault_rate() {
+        const MS: u64 = 1000;
+        // 1000/s before the fault at 3 s; nothing completes until 5 s, when the backlog does:
+        // the stall is degraded, the burst that ends it is not.
         let s = run(10, 3_000_000, 5_000_000);
-        assert_eq!(recovery_us(&s, 3_000_000, 10_000_000), Some(2_000_000));
-        assert_eq!(recovery_us(&run(10, u64::MAX, u64::MAX), 3_000_000, 10_000_000), Some(0));
-        assert_eq!(recovery_us(&run(4, 3_000_000, 9_000_000), 3_000_000, 4_000_000), None);
+        assert_eq!(degraded_us(&s, 3_000_000, 10_000_000, 250 * MS), 2_000_000);
+        assert_eq!(degraded_us(&run(10, u64::MAX, u64::MAX), 3_000_000, 10_000_000, 250 * MS), 0);
+        // A run that ends stalled is degraded to its end.
+        assert_eq!(degraded_us(&run(9, 3_000_000, 9_000_000), 3_000_000, 8_000_000, 250 * MS), 5_000_000);
     }
 }

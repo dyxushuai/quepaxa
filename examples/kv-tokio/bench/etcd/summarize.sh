@@ -23,7 +23,7 @@ done
 echo
 echo "### Faults (open-loop load on the followers; latency from each request's due time)"
 echo
-echo "| System | Scenario | p50 | p99 | max | Errors | Unanswered | Longest gap | Back to 80% after |"
+echo "| System | Scenario | p50 | p99 | max | Errors | Unanswered | Longest gap | Degraded |"
 echo "|---|---|---|---|---|---|---|---|---|"
 for f in "$dir"/*.txt; do
   case $f in *-steady.txt | */env.txt) continue ;; esac
@@ -39,6 +39,6 @@ for f in "$dir"/*.txt; do
     NR == 2 {
       printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n", sys, scenario, ms(field(line, "p50")),
         ms(field(line, "p99")), ms(field(line, "max")), field(line, "errors"), field(line, "unanswered"),
-        field($0, "longest_gap"), field($0, "recovered_after")
+        field($0, "longest_gap"), field($0, "degraded")
     }' "$f"
 done

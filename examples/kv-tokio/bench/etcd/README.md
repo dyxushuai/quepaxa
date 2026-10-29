@@ -47,7 +47,9 @@ replica 0; etcd's is whoever it elects, found from `etcdctl endpoint status`.
 
 ## Reading the fault table
 
-`Longest gap` is the longest time after the fault with no request completing; `Back to
-80% after` is when throughput last dipped below 80% of its pre-fault rate (`never` if the
-run ended low); `Errors` are requests the server answered with an error, which etcd's
-client would retry.
+`Longest gap` is the longest time after the fault with no request completing; `Degraded`
+is how long, in 250 ms steps from the fault to the end of the load, fewer requests
+completed than 80% of the pre-fault rate (a brief stall late in the run adds little, a
+cluster that stays slow adds every step); `Errors` are requests the server answered with
+an error, which etcd's client would retry. Latency percentiles cover successful requests
+only: a request etcd fails after its 7 s internal timeout is an error, not a 7 s sample.

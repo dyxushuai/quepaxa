@@ -165,9 +165,9 @@ fn report(
     if let Some(at) = fault_at {
         let fault_us = (at * 1e6) as u64;
         let gap = timeline::longest_gap_us(samples, fault_us, end_us);
-        let recovery = timeline::recovery_us(samples, fault_us, end_us)
-            .map_or_else(|| "never".to_owned(), |us| format!("{}ms", us / 1000));
-        println!("fault_at={at}s longest_gap={}ms recovered_after={recovery}", gap / 1000);
+        // Up to the last arrival: completions fall off after it whatever the cluster does.
+        let degraded = timeline::degraded_us(samples, fault_us, (secs * 1e6) as u64, 250_000);
+        println!("fault_at={at}s longest_gap={}ms degraded={}ms", gap / 1000, degraded / 1000);
     }
     if let Some(ms) = timeline_ms {
         println!("interval_start_ms,completed,errors,p50_us,p99_us,max_us");
