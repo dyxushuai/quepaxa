@@ -137,11 +137,93 @@ p99 reached 6-17 s. The library defaults (50 ms retransmit, 1 s hedge cap) are t
 LAN: on a WAN set `retransmit_interval` above the round trip to the farthest member of a
 majority, and `hedge_max` above the slowest client commit path.
 
+## Against etcd
+
+`examples/kv-tokio/bench/etcd/run.sh` (method, fairness rules and how to read each column:
+[its README](../examples/kv-tokio/bench/etcd/README.md)). Three `kv-tokio` replicas and
+three etcd v3.7.2 members, one system at a time, each node in its own container with
+three cores, data on the VM's ext4 disk (one 512-byte append + `fsync`: 1.7 ms mean). Both
+are driven through etcd's v3 KV gRPC API by the same clients, which `kv-tokio` serves with
+`--etcd`; QuePaxa runs its default `Config`. Measured 2026-10-29 at commit `6dba864`; raw
+results in `target/bench-etcd/20261029-210608/` of that run.
+
+### Steady state
+
+etcd's own `benchmark` tool (closed loop, 256 clients over 16 connections, all three
+members):
+
+| Workload | etcd req/s | etcd p50 / p99 | QuePaxa req/s | QuePaxa p50 / p99 |
+|---|---|---|---|---|
+| put, unlimited | 24,525 | 10.1 / 19.1 ms | 32,154 | 7.2 / 13.9 ms |
+| put, 5,000/s | 4,998 | 8.1 / 15.5 ms | 4,998 | 5.9 / 11.2 ms |
+| txn-put | 23,303 | 10.6 / 20.9 ms | 30,776 | 7.4 / 19.9 ms |
+| range, linearizable | 99,409 | 1.6 / 12.4 ms | 33,916 | 6.9 / 11.8 ms |
+| range, serializable | 146,246 | 0.9 / 6.7 ms | 159,978 | 0.8 / 5.1 ms |
+
+Writes: QuePaxa commits in fewer `fsync`s on the path (a decision is applied before its
+local record is durable), so 30% more throughput at lower latency. Linearizable reads are
+QuePaxa's weak spot: etcd confirms leadership with a heartbeat round and reads locally
+(ReadIndex), while `kv-tokio` puts every linearizable read through a read barrier, a slot
+in the log, so it costs about what a write does: a third of etcd's throughput.
+
+### Leader faults
+
+Open-loop load (`kv-bench --protocol etcd`, 5,000 puts/s, Poisson arrivals) on the two
+followers for 40 s; the fault starts at 10 s and is undone at 25 s (a crashed leader stays
+down). Latency runs from each request's due time; percentiles cover successful requests
+only, so a request etcd fails after its internal 7 s timeout is an error, not a 7 s sample.
+etcd runs with its default timeouts (heartbeat 100 ms, election 1 s) and tuned for a fast
+local network (10 ms, 100 ms).
+
+| Fault | System | p99 | max | Errors | Longest gap | Degraded |
+|---|---|---|---|---|---|---|
+| crash (`SIGKILL`) | etcd | 856 ms | 1,645 ms | 3,245 | 1,612 ms | 1,750 ms |
+| | etcd, tuned | 16 ms | 137 ms | 296 | 125 ms | 250 ms |
+| | QuePaxa | 495 ms | 788 ms | 0 | 561 ms | 3,000 ms |
+| partition (15 s) | etcd | 1,097 ms | 1,869 ms | 4,368 | 1,824 ms | 1,750 ms |
+| | etcd, tuned | 17 ms | 182 ms | 429 | 170 ms | 250 ms |
+| | QuePaxa | 624 ms | 1,042 ms | 0 | 405 ms | 1,000 ms |
+| slow disk (50 write IOPS, 15 s) | etcd | 396 ms | 509 ms | 0 | 203 ms | 4,250 ms |
+| | etcd, tuned | 243 ms | 401 ms | 914 | 119 ms | 500 ms |
+| | QuePaxa | 12.5 ms | 96 ms | 0 | 48 ms | 250 ms |
+| far leader (+50 ms, 15 s) | etcd | 203 ms | 218 ms | 0 | 56 ms | 250 ms |
+| | etcd, tuned | 622 ms | 960 ms | 0 | 418 ms | 1,250 ms |
+| | QuePaxa | 327 ms | 619 ms | 0 | 196 ms | 750 ms |
+
+What the table says, and what it does not:
+
+- **No request failed on QuePaxa** in any scenario. etcd answers clients with errors while
+  it has no leader (its client retries them); tuned etcd fails a few hundred requests
+  even on a slow disk, because 100 ms elections fire while the leader is merely slow.
+- **A dead or cut-off leader** costs etcd with default timeouts one election: 1.6-1.8 s
+  without completions. Tuned etcd recovers in about 150 ms. QuePaxa needs no election, but
+  its followers wait one hedge delay before proposing themselves, so its gap (0.4-0.6 s) is
+  between the two. Its hedge delay adapts to the commit latency but is capped by
+  `hedge_max` (1 s); it is not tuned here.
+- **A slow leader disk** barely touches QuePaxa: the two other recorders form the
+  majority, so commits never wait for the slow one. Every etcd write goes through the
+  leader, whose raft loop waits on its own log write before taking the next batch, so its
+  p99 follows the slow disk for the whole fault.
+- **A distant leader**: with default timeouts every etcd commit pays the added delay and
+  nothing else changes. Tuned etcd does worse (p99 622 ms): 50 ms each way is close to
+  its 100 ms election timeout. Which mechanism costs it the time was not traced.
+  QuePaxa's followers hedge around the slow leader; its p99 lies between the two.
+- **QuePaxa's weakness after a crash**: with one replica dead for the rest of the run, it
+  stalled briefly (250-500 ms, several times) long after recovering, which is most of its
+  3 s of degraded time; etcd did not. The cause is not yet diagnosed; the leader rotation
+  is one candidate: with a member down, a rotation can hand leadership back to it, and
+  slots then wait for a takeover again.
+- Before the fix in #118, the same runs showed QuePaxa tails of 10-29 s after every fault:
+  a follower's hedged writes lost slot after slot to a healthy new leader. The numbers
+  above are after it.
+- One host and one configuration: hypotheses to check on your own hardware, not
+  production claims. All six nodes share the host's disk and CPU sockets, and the
+  network is a Docker bridge.
+
 ## Not measured
 
-- No comparison against the Go reference implementation or Raft libraries yet: running
-  the Go code was out of scope of the research (it was read, not built). The workload above
-  mirrors its shape so a comparison can be added on the same machine.
-- Leader-failure recovery time and heterogeneous WAN placements are covered functionally by
-  the simulator (`leader_crash_stalls_commits_only_briefly`) and the `kv-tokio` cluster test,
-  not benchmarked here.
+- No comparison against the Go reference implementation: running the Go code was out of
+  scope of the research (it was read, not built). The workload above mirrors its shape so
+  a comparison can be added on the same machine.
+- Heterogeneous WAN placements are covered by the simulator (`wan_leaders`) and one added
+  delay in the etcd comparison, not by a multi-region deployment.

@@ -159,6 +159,8 @@ and seeded-bug canaries that must keep failing. See [VERIFICATION.md](https://gi
 virtual disk before it is acknowledged, half writes and half linearizable reads: 250,000
 operations/s with p50 7.2 ms and p99 14 ms; at 5,000 operations/s, p50 5.9 ms. Latency is a few `fsync`s and barely depends on load. Setup, in-memory numbers and
 simulated WAN placements: [docs/benchmarks.md](https://github.com/dyxushuai/quepaxa/blob/main/docs/benchmarks.md).
+Against etcd v3.7.2 through etcd's own API and tools, including leader crashes,
+partitions, slow disks and distant leaders: [docs/benchmarks.md#against-etcd](https://github.com/dyxushuai/quepaxa/blob/main/docs/benchmarks.md#against-etcd).
 
 ## Platforms
 

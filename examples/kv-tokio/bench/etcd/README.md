@@ -41,7 +41,9 @@ replica 0; etcd's is whoever it elects, found from `etcdctl endpoint status`.
   privileged sidecar in the leader's network namespace (etcd's image has no shell), the
   same for both systems.
 - The open-loop generator (`kv-bench --protocol etcd`) times each request from when it
-  was due, so a stall counts in full. etcd's own `benchmark` is closed loop: it is used for
+  was due, so a stall counts in full. It starts at a wall-clock time `run.sh` picks
+  (`--start-at`), and faults are timed from the same instant, so a fault lands at
+  `--fault-at` on the generator's timeline. etcd's own `benchmark` is closed loop: it is used for
   steady state only, where that does not hide anything and its numbers compare with etcd's
   published ones.
 
