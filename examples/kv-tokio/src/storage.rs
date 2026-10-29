@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
-use crate::kv::Kv;
+use crate::kv::{Entry, Kv};
 
 /// The application state persisted with a snapshot.
 pub struct Snapshot {
@@ -207,19 +207,24 @@ impl Disk {
     }
 }
 
-/// `[through u64][core len u32][core][count u32]([klen u32][k][vlen u32][v])*[crc32 u32]`,
-/// the checksum covering everything before it.
+/// `[through u64][core len u32][core][revision u64][count u32]`, then per key
+/// `[klen u32][k][vlen u32][v][create u64][mod u64][version u64]`, then `[crc32 u32]`, the
+/// checksum covering everything before it.
 pub fn encode_snapshot(through: u64, core: &[u8], kv: &Kv) -> Vec<u8> {
-    let size = 20 + core.len() + kv.iter().map(|(k, v)| 8 + k.len() + v.len()).sum::<usize>();
+    let size = 28 + core.len() + kv.iter().map(|(k, e)| 32 + k.len() + e.value.len()).sum::<usize>();
     let mut b = Vec::with_capacity(size);
     b.extend_from_slice(&through.to_le_bytes());
     b.extend_from_slice(&(core.len() as u32).to_le_bytes());
     b.extend_from_slice(core);
+    b.extend_from_slice(&kv.revision().to_le_bytes());
     b.extend_from_slice(&(kv.len() as u32).to_le_bytes());
-    for (k, v) in kv.iter() {
-        for part in [k.as_bytes(), v.as_bytes()] {
+    for (k, e) in kv.iter() {
+        for part in [k, &e.value[..]] {
             b.extend_from_slice(&(part.len() as u32).to_le_bytes());
             b.extend_from_slice(part);
+        }
+        for n in [e.create, e.modified, e.version] {
+            b.extend_from_slice(&n.to_le_bytes());
         }
     }
     b.extend_from_slice(&crc32fast::hash(&b).to_le_bytes());
@@ -241,19 +246,23 @@ pub fn decode_snapshot(b: &Bytes) -> Option<Snapshot> {
     let through = u64::from_le_bytes(take(8)?.try_into().ok()?);
     let core_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
     let core = Bytes::copy_from_slice(take(core_len)?);
+    let revision = u64::from_le_bytes(take(8)?.try_into().ok()?);
     let count = u32::from_le_bytes(take(4)?.try_into().ok()?);
-    let mut kv = Kv::default();
+    let mut entries = Vec::new();
     for _ in 0..count {
         let mut part = || {
             let len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
-            String::from_utf8(take(len)?.to_vec()).ok()
+            Some(take(len)?.to_vec())
         };
         let (k, v) = (part()?, part()?);
-        kv.insert(k, v);
+        let mut n = || Some(u64::from_le_bytes(take(8)?.try_into().ok()?));
+        let (create, modified, version) = (n()?, n()?, n()?);
+        entries.push((k, Entry { value: v.into(), create, modified, version }));
     }
     if pos != b.len() {
         return None;
     }
+    let kv = Kv::restore(revision, entries);
     Some(Snapshot { through, core, kv })
 }
 
@@ -397,7 +406,10 @@ mod tests {
 
     #[test]
     fn snapshot_round_trips() {
-        let kv = Kv::from_iter([("k".to_owned(), "v".to_owned())]);
+        let kv = Kv::restore(
+            4,
+            [(b"k\0".to_vec(), Entry { value: b"v".as_slice().into(), create: 2, modified: 4, version: 3 })],
+        );
         let s = Snapshot { through: 7, core: Bytes::from_static(b"core"), kv };
         let d = decode_snapshot(&Bytes::from(encode_snapshot(s.through, &s.core, &s.kv))).unwrap();
         assert_eq!((d.through, d.core, d.kv), (s.through, s.core, s.kv));
@@ -405,7 +417,10 @@ mod tests {
 
     #[test]
     fn a_damaged_snapshot_is_rejected() {
-        let kv = Kv::from_iter([("k".to_owned(), "v".to_owned())]);
+        let kv = Kv::restore(
+            4,
+            [(b"k\0".to_vec(), Entry { value: b"v".as_slice().into(), create: 2, modified: 4, version: 3 })],
+        );
         let good = encode_snapshot(7, b"core", &kv);
         for i in 0..good.len() {
             let mut bad = good.clone();

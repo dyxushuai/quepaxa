@@ -25,6 +25,7 @@
 
 mod kv;
 mod node;
+mod ops;
 mod storage;
 
 use std::collections::HashMap;

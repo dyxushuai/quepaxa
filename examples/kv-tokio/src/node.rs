@@ -13,6 +13,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
 use crate::kv::Kv;
+use crate::ops::{self, Request};
 use crate::storage::{Disk, SnapshotWriter, decode_snapshot, encode_snapshot};
 
 /// Largest frame on a peer link; snapshots larger than this are not taken (see `maybe_snapshot`).
@@ -132,22 +133,6 @@ struct PendingPersist {
     records: Vec<Bytes>,
     then: Vec<quepaxa::Outbound>,
     replace: bool,
-}
-
-/// Committed operations are `[key len u32][key][value]`, so keys may contain any byte.
-fn encode_put(k: &str, v: &str) -> Bytes {
-    let mut b = Vec::with_capacity(4 + k.len() + v.len());
-    b.extend_from_slice(&(k.len() as u32).to_le_bytes());
-    b.extend_from_slice(k.as_bytes());
-    b.extend_from_slice(v.as_bytes());
-    Bytes::from(b)
-}
-
-fn decode_put(b: &[u8]) -> Option<(String, String)> {
-    let klen = u32::from_le_bytes(b.get(..4)?.try_into().ok()?) as usize;
-    let k = std::str::from_utf8(b.get(4..4usize.checked_add(klen)?)?).ok()?;
-    let v = std::str::from_utf8(&b[4 + klen..]).ok()?;
-    Some((k.to_owned(), v.to_owned()))
 }
 
 pub struct Node {
@@ -350,14 +335,10 @@ impl Node {
 
     fn on_client(&mut self, now: Timestamp, cmd: Cmd, reply: oneshot::Sender<String>) {
         match cmd {
-            Cmd::Put(k, v) => match self.replica.propose(now, encode_put(&k, &v)) {
-                Ok(id) => {
-                    self.writes.insert(id, reply);
-                }
-                Err(e) => {
-                    let _ = reply.send(format!("ERR {e}"));
-                }
-            },
+            Cmd::Put(k, v) => {
+                let put = Request::Put { key: k.into_bytes(), value: v.into_bytes(), prev_kv: false };
+                self.propose(now, put, reply)
+            }
             Cmd::Get(k) => match self.replica.read_barrier(now) {
                 Ok(id) => {
                     self.reads.insert(id, (k, reply));
@@ -392,8 +373,21 @@ impl Node {
         }
     }
 
+    fn propose(&mut self, now: Timestamp, req: Request, reply: oneshot::Sender<String>) {
+        match self.replica.propose(now, Bytes::from(req.encode())) {
+            Ok(id) => {
+                self.writes.insert(id, reply);
+            }
+            Err(e) => {
+                let _ = reply.send(format!("ERR {e}"));
+            }
+        }
+    }
+
     fn value(&self, k: &str) -> String {
-        self.kv.get(k).map_or_else(|| "NONE".to_owned(), |v| format!("VALUE {v}"))
+        self.kv
+            .get(k.as_bytes())
+            .map_or_else(|| "NONE".to_owned(), |e| format!("VALUE {}", String::from_utf8_lossy(&e.value)))
     }
 
     /// Adopts a peer's snapshot. The replica validates it first (its checkpoint persist is
@@ -437,8 +431,10 @@ impl Node {
                 }
                 Action::Commit { slot, entries } => {
                     if slot.0 >= self.applied {
-                        for (k, v) in entries.iter().filter_map(|e| decode_put(&e.payload)) {
-                            self.kv.insert(k, v);
+                        // A payload that is not a request (a corrupt or foreign batch) applies as
+                        // nothing on every replica alike.
+                        for req in entries.iter().filter_map(|e| Request::decode(&e.payload)) {
+                            ops::apply(&mut self.kv, &req);
                         }
                         self.applied = slot.0 + 1;
                     }
@@ -629,12 +625,5 @@ mod tests {
         t.join().unwrap();
         written.advance(u64::MAX, None);
         written.wait_for(u64::MAX - 1);
-    }
-
-    #[test]
-    fn put_encoding_keeps_any_key() {
-        let b = encode_put("a=b c", "v=1");
-        assert_eq!(decode_put(&b), Some(("a=b c".to_owned(), "v=1".to_owned())));
-        assert_eq!(decode_put(&[9, 0, 0, 0, b'x']), None);
     }
 }
