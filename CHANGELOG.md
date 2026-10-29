@@ -5,6 +5,11 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: a follower whose hedged batch loses its slot forwards the entries to the current
+  leader again (hedging them anew if it stays silent) instead of proposing them slot after
+  slot against a live leader, where they could wait seconds for a random win. Seen after a
+  leader fault: the new leader filled every slot while a follower's hedged writes waited
+  up to 10 s.
 - Verification: a Verus proof that the durability gate never lets a send or effect overtake
   the writes it depends on and that its persists carry exactly the records written, for
   every sequence of calls the replica makes, on a port of `gate.rs` (`verification/verus/`);
