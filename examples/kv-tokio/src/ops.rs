@@ -35,12 +35,14 @@ pub enum Target {
     Mod(u64),
 }
 
+/// The discriminant is the log encoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Cmp {
-    Equal,
-    NotEqual,
-    Less,
-    Greater,
+    Equal = 0,
+    NotEqual = 1,
+    Less = 2,
+    Greater = 3,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -439,6 +441,14 @@ mod tests {
             Request::Put { key: vec![0, 255, 0], value: vec![], prev_kv: false },
             Request::Delete { key: b"a".to_vec(), end: vec![0], prev_kv: true },
             cas("k", u64::MAX, "v"),
+            Request::Txn {
+                compares: [Cmp::Equal, Cmp::NotEqual, Cmp::Less, Cmp::Greater]
+                    .into_iter()
+                    .map(|cmp| Compare { key: vec![3], cmp, target: Target::Version(7) })
+                    .collect(),
+                success: Vec::new(),
+                failure: Vec::new(),
+            },
             Request::Txn {
                 compares: vec![Compare {
                     key: vec![1],

@@ -9,7 +9,7 @@ use tokio::sync::oneshot;
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status};
 
 use crate::client::{Cmd, Failure, Reply};
-use crate::kv::Entry;
+use crate::kv::{Entry, in_range};
 use crate::node::Ev;
 use crate::ops::{self, Applied, Cmp, Compare, RangeReq, Request, Response, Target};
 use crate::pb::etcdserverpb::kv_server::Kv;
@@ -175,6 +175,22 @@ fn op_req(op: &RequestOp) -> Result<Request, Status> {
     }
 }
 
+/// etcd refuses a branch that writes a key twice: a key put twice, or put and deleted.
+fn distinct_writes(ops: &[Request]) -> Result<(), Status> {
+    let puts: Vec<&[u8]> = ops
+        .iter()
+        .filter_map(|r| if let Request::Put { key, .. } = r { Some(&key[..]) } else { None })
+        .collect();
+    for (i, key) in puts.iter().enumerate() {
+        let deleted =
+            ops.iter().any(|r| matches!(r, Request::Delete { key: k, end, .. } if in_range(k, end, key)));
+        if deleted || puts[..i].contains(key) {
+            return Err(Status::invalid_argument("duplicate key given in txn request"));
+        }
+    }
+    Ok(())
+}
+
 /// The response to `op` (one of the executed branch's requests).
 fn op_response(r: Response, op: &RequestOp, header: Option<ResponseHeader>) -> ResponseOp {
     let response = match r {
@@ -259,8 +275,10 @@ impl Kv for EtcdKv {
     async fn txn(&self, req: GrpcRequest<TxnRequest>) -> Result<GrpcResponse<TxnResponse>, Status> {
         let r = req.into_inner();
         let compares = r.compare.iter().map(compare_req).collect::<Result<_, _>>()?;
-        let success = r.success.iter().map(op_req).collect::<Result<_, _>>()?;
-        let failure = r.failure.iter().map(op_req).collect::<Result<_, _>>()?;
+        let success: Vec<Request> = r.success.iter().map(op_req).collect::<Result<_, _>>()?;
+        let failure: Vec<Request> = r.failure.iter().map(op_req).collect::<Result<_, _>>()?;
+        distinct_writes(&success)?;
+        distinct_writes(&failure)?;
         let a = self
             .applied(Cmd::Write(Request::Txn { compares, success, failure }))
             .await?
@@ -295,5 +313,68 @@ mod tests {
         assert_eq!(code(Failure::Fenced), tonic::Code::Unavailable);
         assert_eq!(code(Failure::OutcomeUnknown), tonic::Code::Unknown);
         assert_eq!(code(Failure::Refused(quepaxa::Error::PayloadTooLarge)), tonic::Code::InvalidArgument);
+    }
+
+    fn pb_compare(
+        result: compare::CompareResult,
+        target: compare::CompareTarget,
+    ) -> crate::pb::etcdserverpb::Compare {
+        crate::pb::etcdserverpb::Compare {
+            result: result as i32,
+            target: target as i32,
+            key: b"k".to_vec(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn comparisons_translate_each_result_and_target() {
+        use compare::{CompareResult as R, CompareTarget as T, TargetUnion as U};
+        for (result, cmp) in [
+            (R::Equal, Cmp::Equal),
+            (R::NotEqual, Cmp::NotEqual),
+            (R::Less, Cmp::Less),
+            (R::Greater, Cmp::Greater),
+        ] {
+            let c = compare_req(&pb_compare(result, T::Version)).unwrap();
+            assert_eq!((c.cmp, c.target), (cmp, Target::Version(0)), "a missing value compares as zero");
+        }
+        let with = |target, union| crate::pb::etcdserverpb::Compare {
+            target_union: Some(union),
+            ..pb_compare(R::Equal, target)
+        };
+        assert_eq!(compare_req(&with(T::Create, U::CreateRevision(4))).unwrap().target, Target::Create(4));
+        assert_eq!(compare_req(&with(T::Mod, U::ModRevision(5))).unwrap().target, Target::Mod(5));
+        assert_eq!(
+            compare_req(&with(T::Value, U::Value(b"v".to_vec()))).unwrap().target,
+            Target::Value(b"v".to_vec())
+        );
+        let code = |c| compare_req(&c).unwrap_err().code();
+        assert_eq!(
+            code(with(T::Mod, U::Version(1))),
+            tonic::Code::InvalidArgument,
+            "target and value disagree"
+        );
+        assert_eq!(code(with(T::Mod, U::ModRevision(-1))), tonic::Code::InvalidArgument);
+        assert_eq!(code(pb_compare(R::Equal, T::Lease)), tonic::Code::Unimplemented);
+        let ranged =
+            crate::pb::etcdserverpb::Compare { range_end: b"z".to_vec(), ..pb_compare(R::Equal, T::Version) };
+        assert_eq!(code(ranged), tonic::Code::Unimplemented);
+        let unkeyed =
+            crate::pb::etcdserverpb::Compare { key: Vec::new(), ..pb_compare(R::Equal, T::Version) };
+        assert_eq!(code(unkeyed), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn a_branch_may_not_write_one_key_twice() {
+        let put = |k: &[u8]| Request::Put { key: k.to_vec(), value: Vec::new(), prev_kv: false };
+        let delete =
+            |k: &[u8], end: &[u8]| Request::Delete { key: k.to_vec(), end: end.to_vec(), prev_kv: false };
+        let read = Request::Range(RangeReq::key(b"a"));
+        assert!(distinct_writes(&[put(b"a"), put(b"b"), read.clone(), delete(b"c", b"")]).is_ok());
+        assert!(distinct_writes(&[delete(b"a", b"c"), delete(b"b", b"")]).is_ok(), "deletes may overlap");
+        assert!(distinct_writes(&[put(b"a"), read, put(b"a")]).is_err());
+        assert!(distinct_writes(&[delete(b"a", b"c"), put(b"b")]).is_err());
+        assert!(distinct_writes(&[put(b"z"), delete(b"a", b"\0")]).is_err());
     }
 }
