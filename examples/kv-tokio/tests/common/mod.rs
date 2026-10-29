@@ -17,6 +17,8 @@ fn free_ports(n: usize) -> Vec<u16> {
 pub struct Cluster {
     peers: Vec<u16>,
     clients: Vec<u16>,
+    /// Where each replica serves etcd's v3 KV gRPC API.
+    pub etcd: Vec<u16>,
     /// The first `members` replicas are configured; the others may join later.
     members: usize,
     dir: std::path::PathBuf,
@@ -34,10 +36,11 @@ impl Cluster {
     pub fn with_members(n: usize, members: usize) -> Self {
         let dir = std::env::temp_dir().join(format!("kv-tokio-cluster-{}-{n}-{members}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut ports = free_ports(2 * n);
+        let mut ports = free_ports(3 * n);
+        let etcd = ports.split_off(2 * n);
         let clients = ports.split_off(n);
         let peers = ports;
-        let mut c = Self { peers, clients, members, dir, nodes: (0..n).map(|_| None).collect() };
+        let mut c = Self { peers, clients, etcd, members, dir, nodes: (0..n).map(|_| None).collect() };
         for i in 0..n {
             c.start(i);
         }
@@ -55,6 +58,7 @@ impl Cluster {
         }
         let child = cmd
             .args(["--client", &format!("127.0.0.1:{}", self.clients[i])])
+            .args(["--etcd", &format!("127.0.0.1:{}", self.etcd[i])])
             .args(["--data", self.dir.join(format!("n{i}")).to_str().unwrap()])
             .args(["--snapshot-every", "50"])
             .spawn()

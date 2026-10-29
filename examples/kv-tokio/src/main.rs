@@ -3,7 +3,7 @@
 //! ```text
 //! kv-tokio --id 0 --members 0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102 \
 //!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
-//!          [--peers 3=127.0.0.1:7103]
+//!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379]
 //! ```
 //!
 //! `--members` are the configured members; `--peers` are replicas that may join later (a
@@ -15,6 +15,10 @@
 //! the change is decided. Requests on one connection may be pipelined; replies come back in
 //! order.
 //!
+//! With `--etcd`, the same replica also serves etcd v3's KV gRPC API (`Range`, `Put`,
+//! `DeleteRange`, single-level `Txn`), so etcd's clients and tools work against it; see
+//! `src/grpc.rs` for what is refused.
+//!
 //! A replica removed by a change keeps serving until the new members no longer need it,
 //! then exits with status 0 (`Action::Retired`); its data directory may then be deleted.
 //! `RECONFIGURE` only names replicas with a known address.
@@ -24,9 +28,11 @@
 //! behind mTLS (e.g. a mesh sidecar) before exposing them.
 
 mod client;
+mod grpc;
 mod kv;
 mod node;
 mod ops;
+mod pb;
 mod storage;
 
 use std::collections::HashMap;
@@ -58,6 +64,8 @@ struct Args {
     /// Replicas that may join later.
     peers: Vec<(u32, SocketAddr)>,
     client: SocketAddr,
+    /// Where to serve etcd's v3 KV gRPC API, if anywhere.
+    etcd: Option<SocketAddr>,
     data: PathBuf,
     snapshot_every: u64,
     leader_order: Vec<NodeId>,
@@ -65,7 +73,7 @@ struct Args {
 
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
-    let (mut leader_order, mut peers) = (Vec::new(), Vec::new());
+    let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -86,6 +94,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--peers" => peers = addrs("--peers", &value)?,
             "--client" => client = Some(value.parse().map_err(|e| format!("--client: {e}"))?),
             "--data" => data = Some(PathBuf::from(value)),
+            "--etcd" => etcd = Some(value.parse().map_err(|e| format!("--etcd: {e}"))?),
             "--snapshot-every" => every = value.parse().map_err(|e| format!("--snapshot-every: {e}"))?,
             "--leader-order" => {
                 for i in value.split(',') {
@@ -103,6 +112,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(Args {
         id: id.ok_or("--id is required")?,
         client: client.ok_or("--client is required")?,
+        etcd,
         data: data.ok_or("--data is required")?,
         members,
         peers,
@@ -326,6 +336,16 @@ async fn main() {
     let peer_listener = TcpListener::bind(listen).await.expect("bind peer address");
     let client_listener = TcpListener::bind(args.client).await.expect("bind client address");
     eprintln!("kv-tokio {}: peers on {listen}, clients on {}", args.id, args.client);
+    if let Some(addr) = args.etcd {
+        let service = grpc::KvServer::new(grpc::EtcdKv::new(events.clone(), cluster_id, args.id));
+        eprintln!("kv-tokio {}: etcd v3 KV API on {addr}", args.id);
+        tokio::spawn(async move {
+            if let Err(e) = tonic::transport::Server::builder().add_service(service).serve(addr).await {
+                eprintln!("kv-tokio: etcd API on {addr}: {e}");
+                std::process::exit(1);
+            }
+        });
+    }
     let peer_events = events.clone();
     tokio::spawn(async move {
         while let Ok((s, _)) = peer_listener.accept().await {
