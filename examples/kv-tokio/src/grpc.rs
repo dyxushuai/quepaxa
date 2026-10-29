@@ -230,7 +230,6 @@ impl Kv for EtcdKv {
         match self.applied(cmd).await? {
             Ok(a) => {
                 let Response::Put { prev } = a.response else { return Err(Status::internal("not a put")) };
-                // `prev` here is the request's key's previous entry; its key is the request's.
                 let prev_kv = prev.map(|e| key_value(&r.key, &e));
                 Ok(GrpcResponse::new(PutResponse { header: self.header(a.revision), prev_kv }))
             }

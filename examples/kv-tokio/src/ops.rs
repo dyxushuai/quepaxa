@@ -119,20 +119,18 @@ impl Request {
                 for c in compares {
                     put_bytes(b, &c.key);
                     b.push(c.cmp as u8);
-                    match &c.target {
+                    let (tag, n) = match &c.target {
                         Target::Value(v) => {
                             b.push(0);
                             put_bytes(b, v);
+                            continue;
                         }
-                        Target::Version(n) | Target::Create(n) | Target::Mod(n) => {
-                            b.push(match c.target {
-                                Target::Version(_) => 1,
-                                Target::Create(_) => 2,
-                                _ => 3,
-                            });
-                            b.extend_from_slice(&n.to_le_bytes());
-                        }
-                    }
+                        Target::Version(n) => (1, n),
+                        Target::Create(n) => (2, n),
+                        Target::Mod(n) => (3, n),
+                    };
+                    b.push(tag);
+                    b.extend_from_slice(&n.to_le_bytes());
                 }
                 for branch in [success, failure] {
                     b.extend_from_slice(&(branch.len() as u32).to_le_bytes());
