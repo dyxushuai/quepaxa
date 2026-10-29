@@ -4,10 +4,26 @@
 //!
 //! ```text
 //! kv-bench --targets 127.0.0.1:7200,127.0.0.1:7201 --rate 20000 --secs 10 --conns 16 [--gets 0.5]
+//! kv-bench --protocol etcd --targets 127.0.0.1:2379 --rate 5000 --secs 60 \
+//!          [--timeline 100] [--fault-at 20] [--samples out.csv]
 //! ```
 //!
 //! Prints achieved throughput and latency percentiles. Results are measurements of one
 //! machine and configuration, not production claims.
+//!
+//! `--protocol etcd` drives etcd's v3 KV gRPC API instead (`kv-tokio --etcd`, or etcd), with
+//! a range for each GET and a put for each PUT. There latency runs from each request's
+//! intended send time, and late arrivals are still sent: `--timeline MS` prints per-interval
+//! latency, `--fault-at SECS` the longest stretch without a completion after that time and
+//! how long throughput took to come back, and `--samples FILE` writes every request as
+//! `due_us,done_us,outcome`.
+
+mod etcd;
+#[path = "../../pb.rs"]
+mod pb;
+mod timeline;
+
+use timeline::percentile;
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -120,17 +136,60 @@ async fn connection(
     stats.lock().unwrap().unanswered += left;
 }
 
-fn percentile(sorted: &[u64], p: f64) -> u64 {
-    if sorted.is_empty() {
-        return 0;
+/// The etcd run's summary, in the line protocol's format plus what happened over time.
+fn report(
+    samples: &[timeline::Sample],
+    end_us: u64,
+    rate: f64,
+    secs: f64,
+    timeline_ms: Option<u64>,
+    fault_at: Option<f64>,
+    samples_path: Option<&str>,
+) {
+    use timeline::Outcome;
+    let mut lat: Vec<u64> =
+        samples.iter().filter(|s| s.outcome == Outcome::Ok).map(|s| s.latency_us()).collect();
+    lat.sort_unstable();
+    let count = |o| samples.iter().filter(|s| s.outcome == o).count();
+    println!(
+        "offered={rate:.0}/s completed={} throughput={:.0}/s errors={} unanswered={} missed=0 p50={}us p90={}us p99={}us max={}us",
+        lat.len(),
+        lat.len() as f64 / secs,
+        count(Outcome::Error),
+        count(Outcome::Unanswered),
+        percentile(&lat, 0.5),
+        percentile(&lat, 0.9),
+        percentile(&lat, 0.99),
+        lat.last().copied().unwrap_or(0),
+    );
+    if let Some(at) = fault_at {
+        let fault_us = (at * 1e6) as u64;
+        let gap = timeline::longest_gap_us(samples, fault_us, end_us);
+        let recovery = timeline::recovery_us(samples, fault_us, end_us)
+            .map_or_else(|| "never".to_owned(), |us| format!("{}ms", us / 1000));
+        println!("fault_at={at}s longest_gap={}ms recovered_after={recovery}", gap / 1000);
     }
-    sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+    if let Some(ms) = timeline_ms {
+        println!("interval_start_ms,completed,errors,p50_us,p99_us,max_us");
+        for (start, ok, err, p50, p99, max) in timeline::intervals(samples, ms * 1000) {
+            println!("{},{ok},{err},{p50},{p99},{max}", start / 1000);
+        }
+    }
+    if let Some(path) = samples_path {
+        let mut out = String::from("due_us,done_us,outcome\n");
+        for s in samples {
+            out += &format!("{},{},{:?}\n", s.due_us, s.done_us, s.outcome);
+        }
+        std::fs::write(path, out).expect("--samples: writable path");
+    }
 }
 
 #[tokio::main]
 async fn main() {
     let mut targets: Vec<SocketAddr> = Vec::new();
     let (mut rate, mut secs, mut conns, mut gets) = (1000.0, 10.0, 8usize, 0.5);
+    let (mut protocol, mut samples_path, mut timeline_ms, mut fault_at) =
+        (String::from("lines"), None, None, None);
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let v = it.next().unwrap_or_default();
@@ -142,10 +201,24 @@ async fn main() {
             "--secs" => secs = v.parse().expect("--secs: duration"),
             "--conns" => conns = v.parse().expect("--conns: connections"),
             "--gets" => gets = v.parse().expect("--gets: fraction of GETs"),
+            "--protocol" => protocol = v,
+            "--samples" => samples_path = Some(v),
+            "--timeline" => timeline_ms = Some(v.parse::<u64>().expect("--timeline: milliseconds")),
+            "--fault-at" => fault_at = Some(v.parse::<f64>().expect("--fault-at: seconds")),
             other => panic!("unknown flag {other}"),
         }
     }
     assert!(!targets.is_empty(), "--targets is required");
+    match protocol.as_str() {
+        "lines" => {}
+        "etcd" => {
+            let load = etcd::Load { targets, rate, secs, conns, gets };
+            let (samples, end_us) = etcd::run(&load).await;
+            report(&samples, end_us, rate, secs, timeline_ms, fault_at, samples_path.as_deref());
+            return;
+        }
+        other => panic!("--protocol: lines or etcd, not {other}"),
+    }
     let stats = Arc::new(Mutex::new(Stats::default()));
     let start = Instant::now();
     let until = start + Duration::from_secs_f64(secs);
