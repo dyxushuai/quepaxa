@@ -144,8 +144,9 @@ majority, and `hedge_max` above the slowest client commit path.
 three etcd v3.7.2 members, one system at a time, each node in its own container with
 three cores, data on the VM's ext4 disk (one 512-byte append + `fsync`: 1.7 ms mean). Both
 are driven through etcd's v3 KV gRPC API by the same clients, which `kv-tokio` serves with
-`--etcd`; QuePaxa runs its default `Config`. Measured 2026-10-29 at commit `6dba864` (#119); raw
-results in `target/bench-etcd/20261029-210608/` of that run.
+`--etcd`; QuePaxa runs its default `Config`. Steady state measured 2026-10-29 at commit
+`6dba864`, faults 2026-10-30 at `222030e` (both in #119); raw results in
+`target/bench-etcd/20261029-210608/` and `target/bench-etcd/20261030-182133/` of those runs.
 
 ### Steady state
 
@@ -168,7 +169,7 @@ in the log, so it costs about what a write does: a third of etcd's throughput.
 
 ### Leader faults
 
-Open-loop load (`kv-bench --protocol etcd`, 5,000 puts/s, Poisson arrivals) on the two
+Open-loop load (`kv-bench --protocol etcd --gets 0`, 5,000 puts/s, Poisson arrivals) on the two
 followers for 40 s; the fault starts at 10 s and is undone at 25 s (a crashed leader stays
 down). Latency runs from each request's due time; percentiles cover successful requests
 only, so a request etcd fails after its internal 7 s timeout is an error, not a 7 s sample.
@@ -177,42 +178,42 @@ local network (10 ms, 100 ms).
 
 | Fault | System | p99 | max | Errors | Longest gap | Degraded |
 |---|---|---|---|---|---|---|
-| crash (`SIGKILL`) | etcd | 856 ms | 1,645 ms | 3,245 | 1,612 ms | 1,750 ms |
-| | etcd, tuned | 16 ms | 137 ms | 296 | 125 ms | 250 ms |
-| | QuePaxa | 495 ms | 788 ms | 0 | 561 ms | 3,000 ms |
-| partition (15 s) | etcd | 1,097 ms | 1,869 ms | 4,368 | 1,824 ms | 1,750 ms |
-| | etcd, tuned | 17 ms | 182 ms | 429 | 170 ms | 250 ms |
-| | QuePaxa | 624 ms | 1,042 ms | 0 | 405 ms | 1,000 ms |
-| slow disk (50 write IOPS, 15 s) | etcd | 396 ms | 509 ms | 0 | 203 ms | 4,250 ms |
-| | etcd, tuned | 243 ms | 401 ms | 914 | 119 ms | 500 ms |
-| | QuePaxa | 12.5 ms | 96 ms | 0 | 48 ms | 250 ms |
-| far leader (+50 ms, 15 s) | etcd | 203 ms | 218 ms | 0 | 56 ms | 250 ms |
-| | etcd, tuned | 622 ms | 960 ms | 0 | 418 ms | 1,250 ms |
-| | QuePaxa | 327 ms | 619 ms | 0 | 196 ms | 750 ms |
+| crash (`SIGKILL`) | etcd | 110 ms | 1,505 ms | 7,528 | 1,497 ms | 2,000 ms |
+| | etcd, tuned | 16 ms | 146 ms | 598 | 120 ms | 250 ms |
+| | QuePaxa | 333 ms | 726 ms | 0 | 332 ms | 750 ms |
+| partition (15 s) | etcd | 151 ms | 1,031 ms | 5,132 | 1,018 ms | 1,750 ms |
+| | etcd, tuned | 16 ms | 150 ms | 708 | 142 ms | 250 ms |
+| | QuePaxa | 304 ms | 654 ms | 0 | 300 ms | 750 ms |
+| slow disk (50 write IOPS, 15 s) | etcd | 1,490 ms | 1,715 ms | 0 | 798 ms | 6,750 ms |
+| | etcd, tuned | 177 ms | 359 ms | 794 | 155 ms | 500 ms |
+| | QuePaxa | 17 ms | 109 ms | 0 | 42 ms | 0 ms |
+| far leader (+50 ms, 15 s) | etcd | 173 ms | 350 ms | 0 | 91 ms | 500 ms |
+| | etcd, tuned | 590 ms | 1,665 ms | 3,683 | 97 ms | 2,500 ms |
+| | QuePaxa | 680 ms | 1,106 ms | 0 | 344 ms | 1,000 ms |
 
 What the table says, and what it does not:
 
 - **No request failed on QuePaxa** in any scenario. etcd answers clients with errors while
-  it has no leader (its client retries them); tuned etcd fails a few hundred requests
-  even on a slow disk, because 100 ms elections fire while the leader is merely slow.
-- **A dead or cut-off leader** costs etcd with default timeouts one election: 1.6-1.8 s
-  without completions. Tuned etcd recovers in about 150 ms. QuePaxa needs no election, but
-  its followers wait one hedge delay before proposing themselves, so its gap (0.4-0.6 s) is
-  between the two. Its hedge delay adapts to the commit latency but is capped by
-  `hedge_max` (1 s); it is not tuned here.
-- **A slow leader disk** barely touches QuePaxa: the two other recorders form the
-  majority, so commits never wait for the slow one. Every etcd write goes through the
-  leader, whose raft loop waits on its own log write before taking the next batch, so its
-  p99 follows the slow disk for the whole fault.
-- **A distant leader**: with default timeouts every etcd commit pays the added delay and
-  nothing else changes. Tuned etcd does worse (p99 622 ms): 50 ms each way is close to
-  its 100 ms election timeout. Which mechanism costs it the time was not traced.
-  QuePaxa's followers hedge around the slow leader; its p99 lies between the two.
-- **QuePaxa's weakness after a crash**: with one replica dead for the rest of the run, it
-  stalled briefly (250-500 ms, several times) long after recovering, which is most of its
-  3 s of degraded time; etcd did not. The cause is not yet diagnosed; the leader rotation
-  is one candidate: with a member down, a rotation can hand leadership back to it, and
-  slots then wait for a takeover again.
+  it has no leader (its client retries them): thousands with default timeouts, hundreds
+  tuned, and tuned etcd fails requests even when the leader is only slow or far, because
+  its 100 ms elections fire anyway.
+- **A dead or cut-off leader** costs etcd with default timeouts one election: 1.0-1.5 s
+  without completions. Tuned etcd recovers in about 130 ms. QuePaxa needs no election, but
+  its followers wait one hedge delay before proposing themselves, so its gap (about 0.3 s)
+  is between the two. Its hedge delay adapts to the commit latency, capped by `hedge_max`
+  (1 s); it is not tuned here. etcd's p99 is lower than QuePaxa's because the requests it
+  fails during the election leave the percentiles; QuePaxa delays them instead.
+- **A slow leader disk** does not show in QuePaxa's numbers: the two other recorders form
+  the majority, so commits never wait for the slow one. Every etcd write goes through the
+  leader, whose raft loop waits on its own log write before taking the next batch, so with
+  default timeouts its p99 reached 1.5 s and throughput stayed below 80% for 6.75 s.
+- **A distant leader is QuePaxa's weakest case here**: its p99 (680 ms) is the worst of
+  the three. Followers forward to the far leader and hedge only after the adaptive delay,
+  which the slower commits stretch. etcd with default timeouts simply pays the added delay
+  on each commit (p99 173 ms); tuned etcd keeps electing new leaders (3,683 errors).
+- In an earlier run with half the load as linearizable ranges (each a read barrier in
+  QuePaxa), QuePaxa also stalled briefly (250-500 ms, several times) long after a crash;
+  the write-only runs above do not show it. Not yet diagnosed.
 - Before the fix in #118, the same runs showed QuePaxa tails of 10-29 s after every fault:
   a follower's hedged writes lost slot after slot to a healthy new leader. The numbers
   above are after it.
