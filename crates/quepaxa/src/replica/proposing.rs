@@ -4,8 +4,8 @@
 //! itself only if they are not committed within the hedge delay δ; commit-time dedup
 //! makes the occasional double inclusion harmless. A slot someone else started is driven
 //! by this replica after `(position + 1) · δ` without progress, so a crashed proposer
-//! never leaves a gap. δ adapts to twice the smoothed commit latency, within
-//! `[hedge_min, hedge_max]`. None of these timers affects safety.
+//! never leaves a gap. δ adapts to four times the smoothed commit latency of entries that
+//! were not hedged, within `[hedge_min, hedge_max]`. None of these timers affects safety.
 
 use alloc::vec::Vec;
 
@@ -88,7 +88,7 @@ impl Replica {
     /// The hedge delay δ.
     pub(super) fn hedge_delay(&self) -> u64 {
         let (lo, hi) = (self.cfg.hedge_min, self.cfg.hedge_max);
-        self.commit_latency.map_or(hi / 4, |l| l.saturating_mul(2)).clamp(lo, hi)
+        self.commit_latency.map_or(hi / 4, |l| l.saturating_mul(4)).clamp(lo, hi)
     }
 
     /// A batch of entries the leader received from a follower.
@@ -292,6 +292,9 @@ impl Replica {
             self.forwarded.iter().filter(|(_, (_, at))| at.after(delta) <= now).map(|(id, _)| *id).collect();
         for id in late {
             if let Some((e, _)) = self.forwarded.remove(&id) {
+                if let Some(o) = self.outstanding.get_mut(&id) {
+                    o.2 = true;
+                }
                 self.metrics.hedged += 1;
                 self.hedged.push_back(e);
             }

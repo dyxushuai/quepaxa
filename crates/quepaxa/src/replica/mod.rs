@@ -118,9 +118,11 @@ pub struct Replica {
     hedged: VecDeque<Item>,
     /// Own entries handed to the leader, with when.
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
-    /// Own proposals awaiting commit: when they were made, and what they are.
-    outstanding: BTreeMap<ProposalId, (Timestamp, Kind)>,
-    /// Smoothed propose-to-commit latency of own proposals, in nanoseconds.
+    /// Own proposals awaiting commit: when they were made, what they are, and whether they
+    /// were hedged.
+    outstanding: BTreeMap<ProposalId, (Timestamp, Kind, bool)>,
+    /// Smoothed propose-to-commit latency of own proposals that were not hedged, in
+    /// nanoseconds.
     commit_latency: Option<u64>,
     next_batch: u64,
     next_proposal: u64,
@@ -396,7 +398,7 @@ impl Replica {
         if sorted != by_id {
             return Err(Error::InvalidConfig("leader_order must list every member exactly once"));
         }
-        let proposed_here = self.outstanding.values().any(|(_, kind)| *kind == Kind::Reconfigure);
+        let proposed_here = self.outstanding.values().any(|(_, kind, _)| *kind == Kind::Reconfigure);
         if self.schedule.epoch().1 > self.committed || proposed_here {
             return Err(Error::ReconfigurationPending);
         }
@@ -426,7 +428,7 @@ impl Replica {
             return Err(Error::PayloadTooLarge);
         }
         self.next_proposal += 1;
-        self.outstanding.insert(id, (self.now, kind));
+        self.outstanding.insert(id, (self.now, kind, false));
         self.pending.push_back(item);
         Ok(id)
     }

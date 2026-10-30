@@ -168,8 +168,12 @@ impl Replica {
                     self.confirm_retired();
                     continue;
                 }
-                if let Some((at, _)) = self.outstanding.remove(&id) {
-                    self.observe_latency(self.now.0.saturating_sub(at.0));
+                if let Some((at, _, hedged)) = self.outstanding.remove(&id) {
+                    // A hedged entry waited out the hedge delay itself: learning from it
+                    // would stretch the delay further each time the leader is slow.
+                    if !hedged {
+                        self.observe_latency(self.now.0.saturating_sub(at.0));
+                    }
                     self.actions.push(if kind == Kind::Barrier {
                         Action::ReadReady { id, slot }
                     } else {
