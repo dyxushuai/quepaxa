@@ -61,7 +61,7 @@ pub fn intervals(samples: &[Sample], width_us: u64) -> Vec<(u64, usize, usize, u
 pub fn longest_gap_us(samples: &[Sample], from_us: u64, end_us: u64) -> u64 {
     let mut done: Vec<u64> = samples
         .iter()
-        .filter(|s| s.outcome == Outcome::Ok && s.done_us >= from_us)
+        .filter(|s| s.outcome == Outcome::Ok && (from_us..=end_us).contains(&s.done_us))
         .map(|s| s.done_us)
         .collect();
     done.sort_unstable();
@@ -113,6 +113,8 @@ mod tests {
         let s = run(6, 2_000_000, 4_000_000);
         // The last completion before the stall is at 1.999 s, the next at 4 s.
         assert_eq!(longest_gap_us(&s, 0, 6_000_000), 2_001_000);
+        // Completions after the window do not stretch a gap inside it.
+        assert_eq!(longest_gap_us(&s, 0, 3_000_000), 1_001_000);
         let rows = intervals(&s, 1_000_000);
         assert_eq!(rows.len(), 6);
         assert!(rows[2].5 >= 1_999_000, "requests due when the stall began wait it out: {:?}", rows[2]);

@@ -45,6 +45,10 @@ pub enum Failure {
 pub fn line(reply: Reply) -> String {
     match reply {
         Reply::Done(Applied { response: Response::Range { kvs, .. }, .. }) => match kvs.first() {
+            // A line break would split the reply; such a value came in over gRPC.
+            Some((_, e)) if e.value.iter().any(|b| matches!(b, b'\n' | b'\r')) => {
+                "ERR value contains a line break; read it over the etcd API".to_owned()
+            }
             Some((_, e)) => format!("VALUE {}", String::from_utf8_lossy(&e.value)),
             None => "NONE".to_owned(),
         },
@@ -165,6 +169,8 @@ mod tests {
         };
         assert_eq!(line(range(vec![(b"k".as_slice().into(), value)])), "VALUE v");
         assert_eq!(line(range(Vec::new())), "NONE");
+        let two_lines = Entry { value: b"a\nOK".as_slice().into(), create: 1, modified: 1, version: 1 };
+        assert!(line(range(vec![(b"k".as_slice().into(), two_lines)])).starts_with("ERR "));
         assert_eq!(line(Reply::Done(put_result(1))), "OK");
         assert_eq!(line(Reply::Unknown { revision: 1 }), "OK");
         assert_eq!(

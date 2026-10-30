@@ -187,7 +187,7 @@ faulted() {
   local t0=$(($(date +%s%3N) + 5000))
   docker run --rm --name qpx-gen --network "$net" --cpuset-cpus "$gen_cpus" -v "$results:/out" "$image" \
     kv-bench --protocol etcd --targets "${followers[0]}:2379,${followers[1]}:2379" --rate "$rate" \
-    --secs "$secs" --conns 16 --start-at "$t0" --fault-at "$fault" --timeline 250 \
+    --gets 0 --secs "$secs" --conns 16 --start-at "$t0" --fault-at "$fault" --timeline 250 \
     --samples "/out/$1-$2.csv" > "$out.txt" &
   local gen=$!
   sleep_until $((t0 + fault * 1000))
