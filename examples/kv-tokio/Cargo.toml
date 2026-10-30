@@ -15,6 +15,15 @@ getrandom = "0.4"
 mimalloc = { version = "0.1.52", default-features = false }
 quepaxa = { path = "../../crates/quepaxa" }
 tokio = { version = "1.53.3", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+# etcd v3 KV gRPC front end (src/grpc.rs); pinned to releases at least two weeks old.
+prost = "0.14.4"
+tonic = { version = "0.14.6", default-features = false, features = ["codegen", "router", "server", "channel", "transport"] }
+tonic-prost = "0.14.6"
+
+[build-dependencies]
+# Compiles proto/ without a system protoc.
+protox = "0.10.0"
+tonic-prost-build = { version = "0.14.6", default-features = false, features = ["transport"] }
 
 [lints]
 workspace = true

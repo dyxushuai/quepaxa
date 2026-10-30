@@ -5,6 +5,18 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `examples/kv-tokio`: serves etcd v3's KV gRPC API (`--etcd ADDR`: `Range`, `Put`,
+  `DeleteRange`, single-level `Txn`) from the same replica and state as the line protocol,
+  so etcd's clients and its `benchmark` tool drive it; anything outside that subset (past
+  revisions, sorting, leases, nested or duplicate-key transactions, compaction) is refused
+  with an explicit status. The store keeps etcd's revisions (store revision, per-key create
+  and mod revision, version). Log entries and snapshots change format; existing data
+  directories must be recreated. Adds tonic 0.14, prost 0.14 and protox 0.10 (64 crates
+  in `Cargo.lock`, all checked by `cargo deny`), for the example only.
+- `examples/kv-tokio`: `kv-bench --protocol etcd` drives etcd's API open loop and reports
+  latency over time, the longest gap and degraded time after a fault; `bench/etcd/run.sh`
+  compares a QuePaxa cluster with etcd v3.7.2 in Docker under steady load and four leader
+  faults. Results: [docs/benchmarks.md](docs/benchmarks.md#against-etcd).
 - `quepaxa`: a follower whose hedged batch loses its slot forwards the entries to the current
   leader again (hedging them anew if it stays silent) instead of proposing them slot after
   slot against a live leader, where they could wait seconds for a random win. Seen after a

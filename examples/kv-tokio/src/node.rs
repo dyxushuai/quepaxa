@@ -8,11 +8,13 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use quepaxa::{Action, Input, NodeId, PersistId, ProposalId, Replica, Slot, Timestamp};
+use quepaxa::{Action, Input, PersistId, ProposalId, Replica, Slot, Timestamp};
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
+use crate::client::{Cmd, Failure, Pending, Reply};
 use crate::kv::Kv;
+use crate::ops::{self, RangeReq, Request};
 use crate::storage::{Disk, SnapshotWriter, decode_snapshot, encode_snapshot};
 
 /// Largest frame on a peer link; snapshots larger than this are not taken (see `maybe_snapshot`).
@@ -48,16 +50,6 @@ impl PeerFrame {
     }
 }
 
-pub enum Cmd {
-    Put(String, String),
-    Get(String),
-    Stale(String),
-    /// The replica's counters, on one line.
-    Stats,
-    /// New members, preferred leaders first (empty: by id).
-    Reconfigure(Vec<NodeId>, Vec<NodeId>),
-}
-
 pub enum Ev {
     Peer {
         from: u32,
@@ -65,7 +57,7 @@ pub enum Ev {
     },
     Client {
         cmd: Cmd,
-        reply: oneshot::Sender<String>,
+        reply: oneshot::Sender<Reply>,
     },
     /// A background snapshot write finished: `Ok(false)` if a newer snapshot won.
     SnapshotSaved {
@@ -134,22 +126,6 @@ struct PendingPersist {
     replace: bool,
 }
 
-/// Committed operations are `[key len u32][key][value]`, so keys may contain any byte.
-fn encode_put(k: &str, v: &str) -> Bytes {
-    let mut b = Vec::with_capacity(4 + k.len() + v.len());
-    b.extend_from_slice(&(k.len() as u32).to_le_bytes());
-    b.extend_from_slice(k.as_bytes());
-    b.extend_from_slice(v.as_bytes());
-    Bytes::from(b)
-}
-
-fn decode_put(b: &[u8]) -> Option<(String, String)> {
-    let klen = u32::from_le_bytes(b.get(..4)?.try_into().ok()?) as usize;
-    let k = std::str::from_utf8(b.get(4..4usize.checked_add(klen)?)?).ok()?;
-    let v = std::str::from_utf8(&b[4 + klen..]).ok()?;
-    Some((k.to_owned(), v.to_owned()))
-}
-
 pub struct Node {
     replica: Replica,
     /// Taken by the writer thread when the node runs.
@@ -175,8 +151,8 @@ pub struct Node {
     snapshot_from: Option<u32>,
     peers: HashMap<u32, Sender<Vec<u8>>>,
     start: Instant,
-    writes: HashMap<ProposalId, oneshot::Sender<String>>,
-    reads: HashMap<ProposalId, (String, oneshot::Sender<String>)>,
+    pending_writes: Pending,
+    reads: HashMap<ProposalId, (RangeReq, oneshot::Sender<Reply>)>,
     persists: Vec<PendingPersist>,
     /// Record bytes in `persists`.
     pending: u64,
@@ -210,7 +186,7 @@ impl Node {
             snapshot_from: None,
             peers,
             start: Instant::now(),
-            writes: HashMap::new(),
+            pending_writes: Pending::default(),
             reads: HashMap::new(),
             persists: Vec::new(),
             pending: 0,
@@ -348,52 +324,49 @@ impl Node {
         }
     }
 
-    fn on_client(&mut self, now: Timestamp, cmd: Cmd, reply: oneshot::Sender<String>) {
+    fn on_client(&mut self, now: Timestamp, cmd: Cmd, reply: oneshot::Sender<Reply>) {
+        let refused = |e| Reply::Failed(Failure::Refused(e));
         match cmd {
-            Cmd::Put(k, v) => match self.replica.propose(now, encode_put(&k, &v)) {
+            Cmd::Write(req) => {
+                let payload = req.encode();
+                match self.replica.propose(now, Bytes::from(payload.clone())) {
+                    Ok(id) => self.pending_writes.write(id, payload, reply),
+                    Err(e) => {
+                        let _ = reply.send(refused(e));
+                    }
+                }
+            }
+            Cmd::Read { range, linearizable: true } => match self.replica.read_barrier(now) {
                 Ok(id) => {
-                    self.writes.insert(id, reply);
+                    self.reads.insert(id, (range, reply));
                 }
                 Err(e) => {
-                    let _ = reply.send(format!("ERR {e}"));
+                    let _ = reply.send(refused(e));
                 }
             },
-            Cmd::Get(k) => match self.replica.read_barrier(now) {
-                Ok(id) => {
-                    self.reads.insert(id, (k, reply));
-                }
-                Err(e) => {
-                    let _ = reply.send(format!("ERR {e}"));
-                }
-            },
-            Cmd::Stale(k) => {
-                let _ = reply.send(self.value(&k));
+            Cmd::Read { range, linearizable: false } => {
+                let _ = reply.send(Reply::Done(ops::read(&self.kv, &range)));
             }
             Cmd::Stats => {
-                let _ = reply.send(format!("STATS {:?}", self.replica.metrics()));
+                let _ = reply.send(Reply::Text(format!("STATS {:?}", self.replica.metrics())));
             }
             Cmd::Reconfigure(members, leaders) => {
                 // A member nobody can reach would be decided all the same, and could cost the
                 // new epoch its quorum for good.
                 let me = self.replica.id();
                 if let Some(m) = members.iter().find(|m| **m != me && !self.peers.contains_key(&m.0)) {
-                    let _ = reply.send(format!("ERR unknown replica {} (add it to --peers)", m.0));
+                    let _ =
+                        reply.send(Reply::Text(format!("ERR unknown replica {} (add it to --peers)", m.0)));
                     return;
                 }
                 match self.replica.propose_reconfiguration(now, members, leaders) {
-                    Ok(id) => {
-                        self.writes.insert(id, reply);
-                    }
+                    Ok(id) => self.pending_writes.write(id, Vec::new(), reply),
                     Err(e) => {
-                        let _ = reply.send(format!("ERR {e}"));
+                        let _ = reply.send(refused(e));
                     }
                 }
             }
         }
-    }
-
-    fn value(&self, k: &str) -> String {
-        self.kv.get(k).map_or_else(|| "NONE".to_owned(), |v| format!("VALUE {v}"))
     }
 
     /// Adopts a peer's snapshot. The replica validates it first (its checkpoint persist is
@@ -437,20 +410,25 @@ impl Node {
                 }
                 Action::Commit { slot, entries } => {
                     if slot.0 >= self.applied {
-                        for (k, v) in entries.iter().filter_map(|e| decode_put(&e.payload)) {
-                            self.kv.insert(k, v);
+                        let me = self.replica.id();
+                        for e in &entries {
+                            // A payload that is not a request (a corrupt or foreign batch)
+                            // applies as nothing on every replica alike.
+                            let Some(req) = Request::decode(&e.payload) else { continue };
+                            let applied = ops::apply(&mut self.kv, &req);
+                            if e.origin == me {
+                                self.pending_writes.applied(slot.0, e.id, &e.payload, applied);
+                            }
                         }
                         self.applied = slot.0 + 1;
                     }
                 }
-                Action::Committed { id, .. } => {
-                    if let Some(r) = self.writes.remove(&id) {
-                        let _ = r.send("OK".to_owned());
-                    }
+                Action::Committed { id, slot } => {
+                    self.pending_writes.committed(id, slot.0, self.kv.revision())
                 }
                 Action::ReadReady { id, .. } => {
-                    if let Some((k, r)) = self.reads.remove(&id) {
-                        let _ = r.send(self.value(&k));
+                    if let Some((range, r)) = self.reads.remove(&id) {
+                        let _ = r.send(Reply::Done(ops::read(&self.kv, &range)));
                     }
                 }
                 Action::SnapshotNeeded { peer, .. } => {
@@ -467,11 +445,9 @@ impl Node {
                     std::process::exit(0);
                 }
                 Action::Dropped { id, .. } => {
-                    if let Some(r) = self.writes.remove(&id) {
-                        let _ = r.send("ERR outcome unknown (replica fenced)".to_owned());
-                    }
+                    self.pending_writes.dropped(id);
                     if let Some((_, r)) = self.reads.remove(&id) {
-                        let _ = r.send("ERR replica fenced".to_owned());
+                        let _ = r.send(Reply::Failed(Failure::Fenced));
                     }
                 }
                 _ => {}
@@ -586,7 +562,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kv-tokio-node-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let (disk, records) = Disk::open(&dir).unwrap();
-        let cfg = quepaxa::Config::new([1; 16], NodeId(0), vec![NodeId(0)], [2; 32]);
+        let cfg = quepaxa::Config::new([1; 16], quepaxa::NodeId(0), vec![quepaxa::NodeId(0)], [2; 32]);
         let replica = Replica::new(cfg, records, Timestamp(0)).unwrap();
         let (events, _) = std::sync::mpsc::sync_channel(16);
         let mut n = Node::new(replica, disk, HashMap::new(), u64::MAX, events);
@@ -598,7 +574,11 @@ mod tests {
     fn every_report_reaches_the_replica_even_when_several_arrive_together() {
         let mut n = node("reports");
         let (reply, _) = oneshot::channel();
-        n.on_client(n.now(), Cmd::Put("k".to_owned(), "v".to_owned()), reply);
+        n.on_client(
+            n.now(),
+            Cmd::Write(Request::Put { key: b"k".to_vec(), value: b"v".to_vec(), prev_kv: false }),
+            reply,
+        );
         n.drain();
         let id = n.persists.last().expect("the proposal persists").id;
         // Two reports taken in one turn: the first produces actions, the second is a failure.
@@ -611,6 +591,37 @@ mod tests {
             Err(quepaxa::Error::Fenced),
             "the storage failure fenced the replica"
         );
+    }
+
+    /// Acknowledges every persist issued so far, as the writer thread would.
+    fn settle(n: &mut Node) {
+        while let Some(id) = n.persists.last().map(|p| p.id) {
+            n.persists.clear();
+            n.pending = 0;
+            n.written.advance(0, Some(Report { id, then: Vec::new(), ok: true }));
+            n.on_written();
+        }
+    }
+
+    #[test]
+    fn each_write_gets_the_result_it_saw_in_log_order() {
+        let mut n = node("results");
+        let put = |n: &mut Node, v: &[u8]| {
+            let (reply, rx) = oneshot::channel();
+            let req = Request::Put { key: b"k".to_vec(), value: v.to_vec(), prev_kv: true };
+            n.on_client(n.now(), Cmd::Write(req), reply);
+            n.drain();
+            rx
+        };
+        let mut first = put(&mut n, b"1");
+        settle(&mut n);
+        let mut second = put(&mut n, b"2");
+        settle(&mut n);
+        let Ok(Reply::Done(a)) = first.try_recv() else { panic!("first write unanswered") };
+        let Ok(Reply::Done(b)) = second.try_recv() else { panic!("second write unanswered") };
+        assert_eq!(a.revision, 1);
+        let ops::Response::Put { prev: Some(prev) } = b.response else { panic!("{b:?}") };
+        assert_eq!((b.revision, &*prev.value), (2, &b"1"[..]));
     }
 
     #[test]
@@ -629,12 +640,5 @@ mod tests {
         t.join().unwrap();
         written.advance(u64::MAX, None);
         written.wait_for(u64::MAX - 1);
-    }
-
-    #[test]
-    fn put_encoding_keeps_any_key() {
-        let b = encode_put("a=b c", "v=1");
-        assert_eq!(decode_put(&b), Some(("a=b c".to_owned(), "v=1".to_owned())));
-        assert_eq!(decode_put(&[9, 0, 0, 0, b'x']), None);
     }
 }

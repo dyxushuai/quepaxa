@@ -1,0 +1,5 @@
+target
+.git
+docs
+verification
+**/node_modules
