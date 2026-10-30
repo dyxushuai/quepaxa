@@ -144,7 +144,7 @@ majority, and `hedge_max` above the slowest client commit path.
 three etcd v3.7.2 members, one system at a time, each node in its own container with
 three cores, data on the VM's ext4 disk (one 512-byte append + `fsync`: 1.7 ms mean). Both
 are driven through etcd's v3 KV gRPC API by the same clients, which `kv-tokio` serves with
-`--etcd`; QuePaxa runs its default `Config`. Measured 2026-10-29 at commit `6dba864`; raw
+`--etcd`; QuePaxa runs its default `Config`. Measured 2026-10-29 at commit `6dba864` (#119); raw
 results in `target/bench-etcd/20261029-210608/` of that run.
 
 ### Steady state
