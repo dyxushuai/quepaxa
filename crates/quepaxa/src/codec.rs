@@ -20,6 +20,8 @@ const KIND_CATCH_UP: u8 = 4;
 const KIND_ENTRIES: u8 = 5;
 const KIND_FORWARD: u8 = 6;
 const KIND_COMPACTED: u8 = 7;
+const KIND_READ_QUERY: u8 = 8;
+const KIND_READ_REPLY: u8 = 9;
 
 const VALUE_INLINE: u8 = 0;
 
@@ -97,6 +99,15 @@ pub(crate) enum Body {
     Compacted {
         through: Slot,
     },
+    /// Asks a recorder for its high-water mark, for read round `round`.
+    ReadQuery {
+        round: u64,
+    },
+    /// The sender holds no state for any slot at or after `high`.
+    ReadReply {
+        round: u64,
+        high: Slot,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,7 +124,10 @@ impl Body {
             Body::RecordReply { first, prev_agg, .. } => wire(first).max(wire(prev_agg)),
             Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len()).max().unwrap_or(0),
             Body::Forward { batch } => batch.len(),
-            Body::CatchUp { .. } | Body::Compacted { .. } => 0,
+            Body::CatchUp { .. }
+            | Body::Compacted { .. }
+            | Body::ReadQuery { .. }
+            | Body::ReadReply { .. } => 0,
         }
     }
 }
@@ -162,6 +176,8 @@ impl Message {
             Body::Entries { .. } => KIND_ENTRIES,
             Body::Forward { .. } => KIND_FORWARD,
             Body::Compacted { .. } => KIND_COMPACTED,
+            Body::ReadQuery { .. } => KIND_READ_QUERY,
+            Body::ReadReply { .. } => KIND_READ_REPLY,
         });
         let e = &self.env;
         out.put_slice(&e.cluster_id);
@@ -197,6 +213,11 @@ impl Message {
             }
             Body::Forward { batch } => put_value(&mut out, batch),
             Body::Compacted { through } => out.put_u64_le(through.0),
+            Body::ReadQuery { round } => out.put_u64_le(*round),
+            Body::ReadReply { round, high } => {
+                out.put_u64_le(*round);
+                out.put_u64_le(high.0);
+            }
         }
         Bytes::from(out)
     }
@@ -206,7 +227,10 @@ impl Message {
         match &self.body {
             Body::RecordRequest { proposal, .. } | Body::Decided { proposal, .. } => proposal.value.len(),
             Body::RecordReply { first, prev_agg, .. } => len(first) + len(prev_agg),
-            Body::CatchUp { .. } | Body::Compacted { .. } => 0,
+            Body::CatchUp { .. }
+            | Body::Compacted { .. }
+            | Body::ReadQuery { .. }
+            | Body::ReadReply { .. } => 0,
             Body::Forward { batch } => batch.len(),
             Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len() + 33).sum(),
         }
@@ -267,6 +291,8 @@ impl Message {
             }
             KIND_FORWARD => Body::Forward { batch: r.value()? },
             KIND_COMPACTED => Body::Compacted { through: Slot(r.u64()?) },
+            KIND_READ_QUERY => Body::ReadQuery { round: r.u64()? },
+            KIND_READ_REPLY => Body::ReadReply { round: r.u64()?, high: Slot(r.u64()?) },
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -471,6 +497,14 @@ mod tests {
     }
 
     #[test]
+    fn read_query_and_reply_match_golden_bytes_v1() {
+        let query = Message { env: env(), body: Body::ReadQuery { round: 7 } };
+        assert_eq!(query.encode().to_vec(), golden("08", "0700000000000000"));
+        let reply = Message { env: env(), body: Body::ReadReply { round: 7, high: Slot(0x0102) } };
+        assert_eq!(reply.encode().to_vec(), golden("09", "0700000000000000 0201000000000000"));
+    }
+
+    #[test]
     fn decode_shares_the_input_buffer() {
         let bytes = request().encode();
         let Body::RecordRequest { proposal, .. } = Message::decode(&bytes, &CTX).unwrap().body else {
@@ -585,9 +619,16 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn catch_up_kinds_round_trip(from: u64, ps in proptest::collection::vec(arb_prop(), 0..4)) {
+        fn catch_up_kinds_round_trip(from: u64, round: u64, ps in proptest::collection::vec(arb_prop(), 0..4)) {
             let batch = ps.first().map(|p| p.value.clone()).unwrap_or_default();
-            for body in [Body::CatchUp { from: Slot(from) }, Body::Entries { first: Slot(from), proposals: ps.clone() }, Body::Forward { batch }, Body::Compacted { through: Slot(from) }] {
+            for body in [
+                Body::CatchUp { from: Slot(from) },
+                Body::Entries { first: Slot(from), proposals: ps.clone() },
+                Body::Forward { batch },
+                Body::Compacted { through: Slot(from) },
+                Body::ReadQuery { round },
+                Body::ReadReply { round, high: Slot(from) },
+            ] {
                 let m = Message { env: env(), body };
                 proptest::prop_assert_eq!(Message::decode(&m.encode(), &CTX).unwrap(), m);
             }

@@ -9,6 +9,7 @@ mod gate;
 mod log;
 mod messages;
 mod proposing;
+mod reads;
 mod retire;
 mod snapshot;
 

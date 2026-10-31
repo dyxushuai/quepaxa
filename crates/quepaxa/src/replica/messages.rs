@@ -38,8 +38,11 @@ impl Replica {
         };
         let from = msg.env.from;
         let known = self.cfg.members.contains(&from) || self.schedule.knows(from);
-        let request =
-            matches!(msg.body, Body::RecordRequest { .. } | Body::CatchUp { .. } | Body::Forward { .. });
+        // Anyone may read: a joining or removed replica asks members it may not know yet.
+        let request = matches!(
+            msg.body,
+            Body::RecordRequest { .. } | Body::CatchUp { .. } | Body::Forward { .. } | Body::ReadQuery { .. }
+        );
         if msg.env.to != self.me || from == self.me || !(known || request) {
             self.metrics.messages_rejected += 1;
             return;
@@ -148,6 +151,8 @@ impl Replica {
                     }
                     Body::Forward { batch } => self.on_forward(&batch),
                     Body::Compacted { through } => self.on_compacted(from, through),
+                    Body::ReadQuery { round } => self.on_read_query(from, round),
+                    Body::ReadReply { .. } => {}
                 }
             }
             // Before driving: a retirement barrier it submits is proposed in this round.
