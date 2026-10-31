@@ -52,7 +52,7 @@ fn cas(key: &str, mod_revision: i64, value: &str) -> TxnRequest {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn etcd_clients_read_write_and_compare_and_swap() {
-    let c = Cluster::new(3);
+    let c = Cluster::with_etcd(3);
     let (mut a, mut b) = (connect(&c, 0).await, connect(&c, 1).await);
 
     // A put on one replica is read linearizably on another, with matching revisions.
@@ -115,7 +115,7 @@ fn code<T: std::fmt::Debug>(r: Result<tonic::Response<T>, tonic::Status>) -> Cod
 
 #[tokio::test(flavor = "multi_thread")]
 async fn requests_outside_the_subset_are_refused_explicitly() {
-    let c = Cluster::new(3);
+    let c = Cluster::with_etcd(3);
     let mut a = connect(&c, 0).await;
 
     assert_eq!(

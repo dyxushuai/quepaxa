@@ -17,7 +17,9 @@ fn free_ports(n: usize) -> Vec<u16> {
 pub struct Cluster {
     peers: Vec<u16>,
     clients: Vec<u16>,
-    /// Where each replica serves etcd's v3 KV gRPC API.
+    /// Where each replica serves etcd's v3 KV gRPC API; empty unless asked for
+    /// ([`Cluster::with_etcd`]), since every extra port is another chance that a parallel
+    /// test takes it between `free_ports` and the child's bind.
     pub etcd: Vec<u16>,
     /// The first `members` replicas are configured; the others may join later.
     members: usize,
@@ -31,12 +33,21 @@ impl Cluster {
         Self::with_members(n, n)
     }
 
+    /// `n` replicas that also serve etcd's v3 KV gRPC API.
+    pub fn with_etcd(n: usize) -> Self {
+        Self::build(n, n, true)
+    }
+
     /// `n` replicas of which the first `members` are configured; the others start as
     /// joining replicas.
     pub fn with_members(n: usize, members: usize) -> Self {
+        Self::build(n, members, false)
+    }
+
+    fn build(n: usize, members: usize, etcd: bool) -> Self {
         let dir = std::env::temp_dir().join(format!("kv-tokio-cluster-{}-{n}-{members}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut ports = free_ports(3 * n);
+        let mut ports = free_ports(if etcd { 3 * n } else { 2 * n });
         let etcd = ports.split_off(2 * n);
         let clients = ports.split_off(n);
         let peers = ports;
@@ -56,9 +67,11 @@ impl Cluster {
         if !joiners.is_empty() {
             cmd.args(["--peers", &joiners.join(",")]);
         }
+        cmd.args(["--client", &format!("127.0.0.1:{}", self.clients[i])]);
+        if let Some(port) = self.etcd.get(i) {
+            cmd.args(["--etcd", &format!("127.0.0.1:{port}")]);
+        }
         let child = cmd
-            .args(["--client", &format!("127.0.0.1:{}", self.clients[i])])
-            .args(["--etcd", &format!("127.0.0.1:{}", self.etcd[i])])
             .args(["--data", self.dir.join(format!("n{i}")).to_str().unwrap()])
             .args(["--snapshot-every", "50"])
             .spawn()
