@@ -179,11 +179,13 @@ impl Replica {
         self.ask(number, asked);
     }
 
-    /// Below K: undecided slots are driven if nobody else does. (A replica that decided
-    /// them says so in every envelope, which starts a catch-up.)
+    /// Below K: the next slot is driven if nobody else does (on a fresh cluster nobody has
+    /// recorded it). Later ones are driven by the recorders that recorded them, and a
+    /// replica that decided them says so in every envelope, which starts a catch-up; driving
+    /// them from here would only contend with their proposers.
     fn wait_for(&mut self, k: u64) {
-        for slot in self.committed..k.min(self.committed + self.window()) {
-            self.seen.entry(Slot(slot)).or_insert(self.now);
+        if self.committed < k {
+            self.seen.entry(Slot(self.committed)).or_insert(self.now);
         }
     }
 
