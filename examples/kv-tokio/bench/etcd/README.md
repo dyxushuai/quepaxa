@@ -22,6 +22,7 @@ latency), one file per run, request samples (`*.csv`), and `summary.md`.
 | Scenario | Load | What happens to the leader |
 |---|---|---|
 | `steady` | etcd's `benchmark`: put (unlimited, and at `RATE`), range (linearizable, serializable), txn-put; 256 clients over 16 connections, all three members | nothing |
+| `mixed` | open loop at `MIXED_RATE` (40000/s), 90% linearizable ranges and 10% puts, on all three members | nothing |
 | `crash` | open loop at `RATE` (5000/s) on the two followers | `SIGKILL` at 10 s |
 | `partition` | same | its traffic to and from the followers is dropped from 10 s to 25 s |
 | `slow-disk` | same | writes capped at `SLOW_IOPS` (50) IOPS from 10 s to 25 s (cgroup `io.max`) |
