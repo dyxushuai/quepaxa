@@ -131,11 +131,17 @@ LEMMA KnownNoChange ==
     PROVE  NoChange(Known(r))
 BY FixedAssumptions DEF RInvTypes, NoChange, Known, Write, None, Values
 
+LEMMA PrefixKnownNoChange ==
+    ASSUME RInvTypes, NEW r \in Replicas
+    PROVE  NoChange(PrefixKnown(r))
+BY FixedAssumptions DEF RInvTypes, NoChange, PrefixKnown, Write, None, Values
+
 LEMMA CoveringFixed ==
     ASSUME RInvTypes, NEW r \in Replicas, NEW k \in Nat
     PROVE  Covering(r, k) = {InitMembers}
 <1>1. NoChange(Known(r)) BY KnownNoChange
-<1>2. \A t \in k..N-1 : t \in Slots => MembersAt(t, Known(r)) = InitMembers BY <1>1, MembersFixed
+<1>2. \A t \in k..N-1 : t \in Slots => MembersAt(t, PrefixKnown(r)) = InitMembers
+  BY PrefixKnownNoChange, MembersFixed
 <1>3. Prefix(log[r]) \in 0..N BY PrefixProps DEF RInvTypes
 <1>4. Latest(r) = Start BY <1>1, <1>3, FoldedFixed DEF Latest
 <1>5. \A t \in k..N-1 : t \in Slots BY MAssumptions DEF Slots

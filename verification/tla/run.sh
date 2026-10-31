@@ -27,13 +27,14 @@ failed=0
 
 simulate=(-simulate -depth 300)
 
-# simulate <label> <spec> <files...>: random behaviours for $seconds, no violation allowed.
+# simulate <label> <spec> <config> <files...>: random behaviours for $seconds, no violation
+# allowed.
 simulate_ok() {
-  local label=$1 spec=$2 dir=$work/$2
+  local label=$1 spec=$2 cfg=$3 dir=$work/$3
   mkdir "$dir"
-  cp "${@:3}" "$dir/"
+  cp "${@:4}" "$dir/"
   local out status
-  out=$(tlc "$dir" "$seconds" "$spec" -config "$spec.cfg" "${simulate[@]}" 2>&1)
+  out=$(tlc "$dir" "$seconds" "$spec" -config "$cfg.cfg" "${simulate[@]}" 2>&1)
   status=$?
   if [[ $status -ne 124 ]] || ! grep -q "Running Random Simulation" <<< "$out"; then
     echo "FAIL    $label: TLC ended with status $status instead of running out of time:"; tail -40 <<< "$out"
@@ -46,10 +47,10 @@ simulate_ok() {
   fi
 }
 
-simulate_ok QuePaxa.tla QuePaxa "$here/QuePaxa.tla" "$here/QuePaxa.cfg"
+simulate_ok QuePaxa.tla QuePaxa QuePaxa "$here/QuePaxa.tla" "$here/QuePaxa.cfg"
 # The proof's inductive invariant (prove.sh) on reachable states: a change to QuePaxa.tla
 # that breaks it shows up here in minutes.
-simulate_ok "QuePaxaProof.tla (IndInv)" QuePaxaProof \
+simulate_ok "QuePaxaProof.tla (IndInv)" QuePaxaProof QuePaxaProof \
   "$here/QuePaxa.tla" "$here/QuePaxaProof.tla" "$here/QuePaxaProof.cfg"
 
 for cfg in Membership MembershipQuorum; do
@@ -78,13 +79,13 @@ else
   echo "OK      Reads.tla (ReadsFixed.cfg): exhaustive, $(grep -oE '[0-9,]+ distinct states found' <<< "$out" | tail -1)"
 fi
 for cfg in Reads ReadsTwoChanges; do
-  simulate_ok "Reads.tla ($cfg.cfg)" Reads "$here/Membership.tla" "$here/Reads.tla" "$here/$cfg.cfg"
+  simulate_ok "Reads.tla ($cfg.cfg)" Reads "$cfg" "$here/Membership.tla" "$here/Reads.tla" "$here/$cfg.cfg"
 done
 
 # spec, its configuration, name, invariant it must violate, seconds to find it ("-" for
 # TLA_BUG_SECONDS), then a sed expression planting the bug. Configurations too large to
 # exhaust are simulated.
-covering='    LET st == Latest\(r\) IN \{MembersAt\(t, Known\(r\)\) : t \\in k\.\.N-1\} \\cup \{st\.cur, st\.nxt\}'
+covering='    LET st == Latest\(r\) IN \{MembersAt\(t, PrefixKnown\(r\)\) : t \\in k\.\.N-1\} \\cup \{st\.cur, st\.nxt\}'
 bugs=(
   QuePaxa QuePaxa "decide-on-any-aggregate" Agreement - 's/IF best = s\.p$/IF best # Nil/'
   QuePaxa QuePaxa "skip-phase3-adoption" Agreement - 's/next\(IF best = Nil THEN s\.p ELSE best\)/next(s.p)/'

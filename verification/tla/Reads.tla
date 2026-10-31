@@ -54,10 +54,14 @@ DurableMark(r) ==
 \* ready (what the read reflects).
 Idle == [st |-> "idle", at |-> 0, before |-> {}, who |-> {}, k |-> 1, applied |-> 0]
 
+\* What r has applied: the decisions of its contiguous prefix, writes elsewhere. A slot r
+\* learned out of order does not change its member sets until the gap below it is filled.
+PrefixKnown(r) == [t \in Slots |-> IF t < Prefix(log[r]) THEN decided[t] ELSE Write]
+
 \* The member sets r knows that cover a slot at or above k: those of slots k..N-1 as r
-\* computes them, and the epoch it knows to be in force or pending.
+\* computes them from what it has applied, and the epoch it knows to be in force or pending.
 Covering(r, k) ==
-    LET st == Latest(r) IN {MembersAt(t, Known(r)) : t \in k..N-1} \cup {st.cur, st.nxt}
+    LET st == Latest(r) IN {MembersAt(t, PrefixKnown(r)) : t \in k..N-1} \cup {st.cur, st.nxt}
 
 RInit ==
     /\ Init
