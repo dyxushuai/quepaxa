@@ -60,8 +60,8 @@ service features rather than the engine's cross-region availability.
 Make leader faults and distant leaders cost little latency: a multi-region test harness,
 leader placement that follows load, and hedging tuned for wide-area links.
 
-_Why it serves the approach:_ it is the claim only a timeout-free engine can make, and today's
-far-leader numbers do not back it up yet.
+_Why it serves the approach:_ it is the claim only a timeout-free engine can make, and nothing
+has measured it across asymmetric regions yet.
 
 ### Engine features for production services
 
