@@ -1,7 +1,7 @@
 diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
 --- a/crates/quepaxa/src/replica/mod.rs
 +++ b/crates/quepaxa/src/replica/mod.rs
-@@ -399,6 +399,10 @@
+@@ -428,6 +428,10 @@ impl Replica {
              return Err(Error::PayloadTooLarge);
          }
          self.next_proposal += 1;
@@ -9,6 +9,6 @@ diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.
 +            self.actions.push(Action::ReadReady { id, slot: Slot(self.emitted.saturating_sub(1)) });
 +            return Ok(id);
 +        }
-         self.outstanding.insert(id, (self.now, kind));
+         self.outstanding.insert(id, (self.now, kind, false));
          self.pending.push_back(item);
          Ok(id)

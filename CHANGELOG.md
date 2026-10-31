@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: the hedge delay no longer feeds on itself. It learned from every own entry's
+  commit latency, hedged ones included, whose latency contains the delay itself: once the
+  leader slowed, each hedge raised the delay for the next, up to `hedge_max` in about a
+  second (seen as a 1.1 s stall with a distant leader). It now learns only from entries
+  that were not hedged, and is four times their smoothed latency instead of twice, so a
+  healthy leader's ordinary tail no longer triggers hedges.
 - `examples/kv-tokio`: serves etcd v3's KV gRPC API (`--etcd ADDR`: `Range`, `Put`,
   `DeleteRange`, single-level `Txn`) from the same replica and state as the line protocol,
   so etcd's clients and its `benchmark` tool drive it; anything outside that subset (past

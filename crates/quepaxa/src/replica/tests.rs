@@ -672,3 +672,32 @@ fn a_follower_hands_a_hedged_batch_that_lost_its_slot_back_to_the_leader() {
     assert_eq!(forwards(&out), 1, "the entry goes back to the leader");
     assert!(r.forwarded.contains_key(&id), "and is hedged again if the leader stays silent");
 }
+
+#[test]
+fn a_hedged_entry_does_not_stretch_the_hedge_delay() {
+    const MS: u64 = 1_000_000;
+    let mut r = replica_as(1);
+    let mut out = Vec::new();
+    r.commit_latency = Some(4 * MS);
+    let delta = r.hedge_delay();
+    let id = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    // The leader stays silent: the entry is hedged and commits in this replica's own slot,
+    // long after it was proposed.
+    while r.forwarded.contains_key(&id) {
+        let at = r.next_deadline().expect("the hedge is scheduled");
+        r.handle_timeout(at).unwrap();
+        r.poll_actions(&mut out);
+    }
+    let (slot, key, value) =
+        r.batches.values().find_map(|b| Some((b.slot?, b.key, b.value.clone()))).expect("a hedged batch");
+    let env =
+        Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(2), to: NodeId(1), commit_index: 0 };
+    let decided =
+        Message { env, body: Body::Decided { slot, proposal: Proposal { priority: 1, key, value } } };
+    r.handle(Timestamp(r.now.0 + 500 * MS), Input::Message(decided.encode())).unwrap();
+    r.poll_actions(&mut out);
+    assert!(out.iter().any(|a| matches!(a, Action::Committed { id: c, .. } if *c == id)), "{out:?}");
+    // Its latency includes the hedge delay itself; learning from it would feed back.
+    assert_eq!(r.hedge_delay(), delta);
+}

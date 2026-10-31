@@ -144,9 +144,9 @@ majority, and `hedge_max` above the slowest client commit path.
 three etcd v3.7.2 members, one system at a time, each node in its own container with
 three cores, data on the VM's ext4 disk (one 512-byte append + `fsync`: 1.7 ms mean). Both
 are driven through etcd's v3 KV gRPC API by the same clients, which `kv-tokio` serves with
-`--etcd`; QuePaxa runs its default `Config`. Steady state measured 2026-10-29 at commit
-`6dba864`, faults 2026-10-30 at `222030e` (both in #119); raw results in
-`target/bench-etcd/20261029-210608/` and `target/bench-etcd/20261030-182133/` of those runs.
+`--etcd`; QuePaxa runs its default `Config`. Measured 2026-10-30 with the
+hedge-delay fix (`01bf73e`); raw results in `target/bench-etcd/20261030-235005/` (steady
+state) and `target/bench-etcd/20261030-233953/` (faults) of those runs.
 
 ### Steady state
 
@@ -155,11 +155,11 @@ members):
 
 | Workload | etcd req/s | etcd p50 / p99 | QuePaxa req/s | QuePaxa p50 / p99 |
 |---|---|---|---|---|
-| put, unlimited | 24,525 | 10.1 / 19.1 ms | 32,154 | 7.2 / 13.9 ms |
-| put, 5,000/s | 4,998 | 8.1 / 15.5 ms | 4,998 | 5.9 / 11.2 ms |
-| txn-put | 23,303 | 10.6 / 20.9 ms | 30,776 | 7.4 / 19.9 ms |
-| range, linearizable | 99,409 | 1.6 / 12.4 ms | 33,916 | 6.9 / 11.8 ms |
-| range, serializable | 146,246 | 0.9 / 6.7 ms | 159,978 | 0.8 / 5.1 ms |
+| put, unlimited | 24,601 | 10.2 / 18.9 ms | 31,983 | 7.3 / 13.9 ms |
+| put, 5,000/s | 4,998 | 7.8 / 16.4 ms | 4,998 | 5.9 / 10.9 ms |
+| txn-put | 23,112 | 10.7 / 20.5 ms | 32,366 | 7.1 / 13.5 ms |
+| range, linearizable | 100,273 | 1.4 / 13.5 ms | 30,902 | 7.1 / 15.0 ms |
+| range, serializable | 144,021 | 0.9 / 7.0 ms | 162,500 | 0.8 / 4.8 ms |
 
 Writes: QuePaxa commits in fewer `fsync`s on the path (a decision is applied before its
 local record is durable), so 30% more throughput at lower latency. Linearizable reads are
@@ -178,45 +178,54 @@ local network (10 ms, 100 ms).
 
 | Fault | System | p99 | max | Errors | Longest gap | Degraded |
 |---|---|---|---|---|---|---|
-| crash (`SIGKILL`) | etcd | 110 ms | 1,505 ms | 7,528 | 1,497 ms | 2,000 ms |
-| | etcd, tuned | 16 ms | 146 ms | 598 | 120 ms | 250 ms |
-| | QuePaxa | 333 ms | 726 ms | 0 | 332 ms | 750 ms |
-| partition (15 s) | etcd | 151 ms | 1,031 ms | 5,132 | 1,018 ms | 1,750 ms |
-| | etcd, tuned | 16 ms | 150 ms | 708 | 142 ms | 250 ms |
-| | QuePaxa | 304 ms | 654 ms | 0 | 300 ms | 750 ms |
-| slow disk (50 write IOPS, 15 s) | etcd | 1,490 ms | 1,715 ms | 0 | 798 ms | 6,750 ms |
-| | etcd, tuned | 177 ms | 359 ms | 794 | 155 ms | 500 ms |
-| | QuePaxa | 17 ms | 109 ms | 0 | 42 ms | 0 ms |
-| far leader (+50 ms, 15 s) | etcd | 173 ms | 350 ms | 0 | 91 ms | 500 ms |
-| | etcd, tuned | 590 ms | 1,665 ms | 3,683 | 97 ms | 2,500 ms |
-| | QuePaxa | 680 ms | 1,106 ms | 0 | 344 ms | 1,000 ms |
+| crash (`SIGKILL`) | etcd | 16 ms | 1,087 ms | 5,402 | 1,075 ms | 1,250 ms |
+| | etcd, tuned | 16 ms | 139 ms | 603 | 127 ms | 250 ms |
+| | QuePaxa | 15 ms | 130 ms | 0 | 40 ms | 0 ms |
+| partition (15 s) | etcd | 75 ms | 1,094 ms | 5,483 | 1,082 ms | 2,000 ms |
+| | etcd, tuned | 16 ms | 141 ms | 613 | 124 ms | 250 ms |
+| | QuePaxa | 12 ms | 138 ms | 0 | 36 ms | 250 ms |
+| slow disk (50 write IOPS, 15 s) | etcd | 395 ms | 506 ms | 0 | 227 ms | 4,750 ms |
+| | etcd, tuned | 391 ms | 700 ms | 628 | 385 ms | 1,750 ms |
+| | QuePaxa | 14 ms | 176 ms | 0 | 160 ms | 250 ms |
+| far leader (+50 ms, 15 s) | etcd | 243 ms | 535 ms | 0 | 90 ms | 500 ms |
+| | etcd, tuned | 1,126 ms | 1,716 ms | 0 | 548 ms | 1,750 ms |
+| | QuePaxa | 13 ms | 166 ms | 0 | 40 ms | 250 ms |
 
 What the table says, and what it does not:
 
 - **No request failed on QuePaxa** in any scenario. etcd answers clients with errors while
   it has no leader (its client retries them): thousands with default timeouts, hundreds
-  tuned, and tuned etcd fails requests even when the leader is only slow or far, because
-  its 100 ms elections fire anyway.
-- **A dead or cut-off leader** costs etcd with default timeouts one election: 1.0-1.5 s
-  without completions. Tuned etcd recovers in about 130 ms. QuePaxa needs no election, but
-  its followers wait one hedge delay before proposing themselves, so its gap (about 0.3 s)
-  is between the two. Its hedge delay adapts to the commit latency, capped by `hedge_max`
-  (1 s); it is not tuned here. etcd's p99 is lower than QuePaxa's because the requests it
-  fails during the election leave the percentiles; QuePaxa delays them instead.
-- **A slow leader disk** does not show in QuePaxa's numbers: the two other recorders form
+  tuned, and tuned etcd fails requests even when the leader is only slow, because its
+  100 ms elections fire anyway.
+- **A dead or cut-off leader** costs etcd with default timeouts one election: about 1.1 s
+  without completions. Tuned etcd recovers in about 130 ms. QuePaxa needs no election:
+  followers propose themselves after the hedge delay (four times the smoothed commit
+  latency, a few tens of ms here) and the leader rotates out after eight slots it did not
+  lead, so its longest gap is about 40 ms. etcd's p99 is as low as QuePaxa's because the
+  requests it fails during the election leave the percentiles; QuePaxa delays them by at
+  most 140 ms instead.
+- **A slow leader disk** barely shows in QuePaxa's numbers: the two other recorders form
   the majority, so commits never wait for the slow one. Every etcd write goes through the
-  leader, whose raft loop waits on its own log write before taking the next batch, so with
-  default timeouts its p99 reached 1.5 s and throughput stayed below 80% for 6.75 s.
-- **A distant leader is QuePaxa's weakest case here**: its p99 (680 ms) is the worst of
-  the three. Followers forward to the far leader and hedge only after the adaptive delay,
-  which the slower commits stretch. etcd with default timeouts simply pays the added delay
-  on each commit (p99 173 ms); tuned etcd keeps electing new leaders (3,683 errors).
-- In an earlier run with half the load as linearizable ranges (each a read barrier in
-  QuePaxa), QuePaxa also stalled briefly (250-500 ms, several times) long after a crash;
-  the write-only runs above do not show it. Not yet diagnosed.
-- Before the fix in #118, the same runs showed QuePaxa tails of 10-29 s after every fault:
-  a follower's hedged writes lost slot after slot to a healthy new leader. The numbers
-  above are after it.
+  leader, whose raft loop waits on its own log write before taking the next batch, so its
+  p99 follows the slow disk for the whole fault.
+- **A distant leader**: QuePaxa's followers hedge around it within tens of ms and rotate it
+  out, so its p99 stays at the level of a healthy cluster. etcd with default timeouts pays
+  the added delay on every commit for the whole fault; tuned etcd does worse (p99 1.1 s),
+  with 50 ms each way close to its 100 ms election timeout. Which mechanism costs it the
+  time was not traced.
+- etcd's numbers vary between runs more than QuePaxa's: in an earlier run on the same
+  host, default etcd's p99 after a crash was 110 ms instead of 16 ms and after a slow
+  disk 1.5 s instead of 395 ms, depending on where the election and the backlog fell.
+- These are after two QuePaxa fixes this comparison found. Before #118, a follower's
+  hedged writes lost slot after slot to a healthy new leader (tails of 10-29 s). Before
+  the next fix, the hedge delay learned from hedged entries, whose latency contains the
+  delay itself, so once the leader slowed it rose to its 1 s cap within a second: a 0.3 s
+  gap after a crash and p99 680 ms with a distant leader.
+- In an earlier run with half the load as linearizable ranges, QuePaxa stalled briefly
+  (250-500 ms, a few times) long after a crash. Three reruns with leader changes logged
+  did not reproduce it (one rotation each, as expected), and etcd showed similar dips in
+  write-only runs on the same shared disk, so `fsync` jitter on the two remaining replicas
+  is the likelier cause.
 - One host and one configuration: hypotheses to check on your own hardware, not
   production claims. All six nodes share the host's disk and CPU sockets, and the
   network is a Docker bridge.

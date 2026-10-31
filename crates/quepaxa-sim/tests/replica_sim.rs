@@ -175,9 +175,11 @@ fn membership_changes_under_faults_stay_safe_and_converge() {
 
 #[test]
 fn removed_majority_waits_for_the_new_members() {
-    // Seed 1534 removes two of three members; when they shut down as soon as they had
-    // applied the old epoch themselves, the new members could never learn its last slots.
-    let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(3, 1534) };
+    // Seed 1576 replaces members 0 and 1 (two of three) with 3 and 4; when removed members
+    // shut down as soon as they had applied the old epoch themselves, the new members could
+    // never learn its last slots. The seed only picks the schedule: re-pick one that still
+    // removes two of three when timing changes move it.
+    let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(3, 1576) };
     let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
     assert!(report.reconfigurations > 0, "{report:?}");
 }
