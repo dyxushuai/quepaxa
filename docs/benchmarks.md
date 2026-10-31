@@ -24,7 +24,7 @@ CPU only: messages are delivered and persists acknowledged in memory, no I/O.
 Three `kv-tokio` processes on loopback, each persisting with `fsync` to its own data
 directory; `kv-bench` drives an open-loop Poisson workload in the Go reference
 implementation's shape — 17-byte commands (1-byte operation, 8-byte key, 8-byte value),
-50% `PUT` / 50% `GET` (linearizable, via read barriers), random keys from a 52-letter
+50% `PUT` / 50% `GET` (linearizable, then through log barriers), random keys from a 52-letter
 alphabet — over 24 pipelined connections spread across the replicas, 5 s per point.
 Requests unanswered 5 s after the run are counted separately; none occurred.
 
@@ -144,9 +144,11 @@ majority, and `hedge_max` above the slowest client commit path.
 three etcd v3.7.2 members, one system at a time, each node in its own container with
 three cores, data on the VM's ext4 disk (one 512-byte append + `fsync`: 1.7 ms mean). Both
 are driven through etcd's v3 KV gRPC API by the same clients, which `kv-tokio` serves with
-`--etcd`; QuePaxa runs its default `Config`. Measured 2026-10-30 with the
-hedge-delay fix (`01bf73e`); raw results in `target/bench-etcd/20261030-235005/` (steady
-state) and `target/bench-etcd/20261030-233953/` (faults) of those runs.
+`--etcd`; QuePaxa runs its default `Config`. Steady state and the read-heavy run measured
+2026-10-31 with reads that take no log slot (`20ae43b`), raw results in
+`target/bench-etcd/20261031-183234/`; faults 2026-10-30 with the hedge-delay fix
+(`01bf73e`), `target/bench-etcd/20261030-233953/` (the fault load is write-only, and the
+write path has not changed since).
 
 ### Steady state
 
@@ -155,17 +157,40 @@ members):
 
 | Workload | etcd req/s | etcd p50 / p99 | QuePaxa req/s | QuePaxa p50 / p99 |
 |---|---|---|---|---|
-| put, unlimited | 24,601 | 10.2 / 18.9 ms | 31,983 | 7.3 / 13.9 ms |
-| put, 5,000/s | 4,998 | 7.8 / 16.4 ms | 4,998 | 5.9 / 10.9 ms |
-| txn-put | 23,112 | 10.7 / 20.5 ms | 32,366 | 7.1 / 13.5 ms |
-| range, linearizable | 100,273 | 1.4 / 13.5 ms | 30,902 | 7.1 / 15.0 ms |
-| range, serializable | 144,021 | 0.9 / 7.0 ms | 162,500 | 0.8 / 4.8 ms |
+| put, unlimited | 24,221 | 10.4 / 19.5 ms | 31,985 | 7.3 / 13.7 ms |
+| put, 5,000/s | 4,866 | 8.0 / 93.8 ms | 4,999 | 5.9 / 11.1 ms |
+| txn-put | 22,580 | 10.9 / 22.7 ms | 32,650 | 7.2 / 12.7 ms |
+| range, linearizable | 100,116 | 1.4 / 12.6 ms | 147,466 | 1.0 / 5.5 ms |
+| range, serializable | 143,705 | 0.9 / 6.6 ms | 154,484 | 0.9 / 5.1 ms |
 
 Writes: QuePaxa commits in fewer `fsync`s on the path (a decision is applied before its
-local record is durable), so 30% more throughput at lower latency. Linearizable reads are
-QuePaxa's weak spot: etcd confirms leadership with a heartbeat round and reads locally
-(ReadIndex), while `kv-tokio` puts every linearizable read through a read barrier, a slot
-in the log, so it costs about what a write does: a third of etcd's throughput.
+local record is durable), so 30% more throughput at lower latency. Linearizable reads ask
+a majority for its high-water mark and wait until the replica applied past it (ADR 0003):
+one round trip, no log slot, no write, so they run close to serializable ones. etcd
+confirms leadership with a heartbeat round (ReadIndex). Before this change every
+linearizable read went through the log, a slot per batch: 33,648/s at p50 6.9 ms on the
+same host (`target/bench-etcd/20261031-175233/`), a third of etcd's.
+
+### Read-heavy
+
+Open loop at 40,000 requests/s on all three members, 90% linearizable ranges and 10% puts
+(`run.sh mixed`). A read now waits for the writes in flight past the replica's applied
+prefix (they hold the mark up), where it used to share their slot, so it pays about one
+round trip more:
+
+| Version | p50 | p99 | max |
+|---|---|---|---|
+| reads through the log (`22a016b`) | 7.4 ms | 12.5-13.2 ms | 139-165 ms |
+| reads without a log slot (`20ae43b`) | 8.0-8.2 ms | 14.4-15.3 ms | 34-141 ms |
+| etcd | 9.7-10.7 ms | 21-26 ms | 37-115 ms |
+
+Ranges over the runs without errors (four with reads through the log, three without a log
+slot, alternated). The host is shared and was noisy
+(load average 5-9 from other tenants): in noisy runs both QuePaxa versions and etcd
+degraded alike (p99 into hundreds of ms, and QuePaxa refusing reads with `Busy` once 4,096
+were outstanding), so those runs are left out rather than averaged. An earlier version of
+the waiting rule drove every slot below the mark itself, contending with their proposers:
+p99 45-200 ms here, fixed before these runs.
 
 ### Leader faults
 
