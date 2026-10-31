@@ -3,9 +3,9 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
-## Unreleased
+## 0.5.0 — 2026-10-31
 
-- `quepaxa`: linearizable reads no longer go through the log. `read_barrier` asks a
+- `quepaxa` (breaking): linearizable reads no longer go through the log. `read_barrier` asks a
   majority of every member set from the decided prefix on for their high-water mark and
   is ready once the replica applied every slot below the largest one: one round trip, no
   consensus slot, no write. `read_barrier` and `ReadReady` keep their shape (the slot is the
