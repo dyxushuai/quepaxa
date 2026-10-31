@@ -137,7 +137,7 @@ impl Config {
             (!self.members.is_empty(), "members must not be empty"),
             (self.members.len() <= crate::schedule::MAX_MEMBERS, "at most 1024 members"),
             (sorted.len() == self.members.len(), "members must be unique"),
-            // Room for at least one entry's framing (an empty read barrier is 29 bytes).
+            // Room for at least one entry's framing (an empty barrier entry is 29 bytes).
             (self.max_batch_bytes >= 64, "max_batch_bytes must be at least 64"),
             (
                 u64::from(self.max_message_bytes) >= 2 * u64::from(self.max_batch_bytes) + MESSAGE_OVERHEAD,
@@ -242,12 +242,12 @@ pub enum Action {
         /// `through` (the proposal is in the log at or before it).
         slot: Slot,
     },
-    /// A read barrier is in the log: after applying every commit up to and including
-    /// `slot`, application state may serve a linearizable read.
+    /// A read is ready: after applying every commit up to and including `slot`, application
+    /// state may serve a linearizable read. Emitted after the `Commit` of `slot`.
     ReadReady {
-        /// The barrier.
+        /// The read ([`crate::Replica::read_barrier`]).
         id: ProposalId,
-        /// The barrier's slot.
+        /// The last slot the read must reflect.
         slot: Slot,
     },
     /// Slots up to `through` were compacted away at `peer`: fetch that peer's
@@ -270,7 +270,7 @@ pub enum Action {
         members: Vec<NodeId>,
     },
     /// This replica is not a member of `epoch`, a majority of that epoch's members
-    /// durably know every slot before it, and a read barrier of its own committed with no
+    /// durably know every slot before it, and a barrier entry of its own committed with no
     /// later change adding it back: the cluster no longer needs this replica, which may shut
     /// down. Reported once per start. A change decided after that barrier can still add it
     /// back; the operator who proposes one keeps the replica running. See

@@ -149,7 +149,7 @@ pub struct Replica {
     retire_probe: Option<Timestamp>,
     /// The epoch `Action::Retired` was reported for.
     retired: Option<u64>,
-    /// A read barrier of this replica's own, confirming retirement from this epoch once
+    /// A barrier entry of this replica's own (through the log), confirming retirement from this epoch once
     /// committed (a later change may have added it back); never reported to the caller.
     retire_barrier: Option<(u64, ProposalId)>,
     /// That barrier committed; retirement is decided once everything learned with it is
@@ -353,12 +353,13 @@ impl Replica {
     /// The returned id later appears in exactly one of [`Action::ReadReady`] or
     /// [`Action::Dropped`]: once the application has applied every commit up to the
     /// reported slot, reading its state reflects every write that completed before this
-    /// call, on any replica. See [`guide::reads`](crate::guide::reads).
+    /// call, on any replica. The read asks a majority for a bound and waits to apply up to
+    /// it; it takes no slot and writes nothing. See [`guide::reads`](crate::guide::reads).
     ///
     /// # Errors
     ///
-    /// As [`Replica::propose`] ([`Error::Busy`], [`Error::Fenced`], [`Error::NotDrained`]);
-    /// a barrier always fits a batch, so never [`Error::PayloadTooLarge`].
+    /// [`Error::Busy`] (reads count against [`Config::max_outstanding_proposals`] with
+    /// proposals), [`Error::Fenced`], [`Error::NotDrained`].
     pub fn read_barrier(&mut self, now: Timestamp) -> Result<ProposalId, Error> {
         self.begin(now)?;
         let id = self.submit_read()?;

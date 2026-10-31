@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: linearizable reads no longer go through the log. `read_barrier` asks a
+  majority of every member set from the decided prefix on for their high-water mark and
+  is ready once the replica applied every slot below the largest one: one round trip, no
+  consensus slot, no write. `read_barrier` and `ReadReady` keep their shape (the slot is the
+  last one applied); reads still count against `max_outstanding_proposals` and are dropped
+  on fence. Two message kinds join the wire format (`ReadQuery`, `ReadReply`); peers of
+  older versions reject them. Modelled in `verification/tla/Reads.tla`, proved for fixed
+  membership in `ReadsProof.tla` (ADR 0003).
 - `quepaxa`: the hedge delay no longer feeds on itself. It learned from every own entry's
   commit latency, hedged ones included, whose latency contains the delay itself: once the
   leader slowed, each hedge raised the delay for the next, up to `hedge_max` in about a

@@ -21,8 +21,18 @@ A slot is decided once its value can never change; replicas that decide a slot a
 _Avoid_: Committed, chosen
 
 **Read barrier**:
-A log entry proposed to obtain a slot position after which a linearizable read may be served.
+The point a linearizable read waits for, obtained by a quorum read: once every slot below it is applied, local state reflects every write that completed before the read.
 _Avoid_: Read index, sync
+
+**Quorum read**:
+A round asking the members of every epoch from the decided prefix on for their high-water mark; its largest answer bounds every completed write.
+_Avoid_: Lease read
+
+**High-water mark**:
+The first slot past every slot a recorder holds state for: its registers, its decided log and its snapshot floor.
+
+**Retirement barrier**:
+A barrier entry a removed replica proposes through the log; once it commits, every change decided before it is applied.
 
 **Proposer**:
 The active role within a replica that drives consensus on a slot by sending record requests to recorders.
