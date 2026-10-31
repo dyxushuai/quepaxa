@@ -5,11 +5,13 @@
 set -euo pipefail
 dir=$1
 
-# Prints "<key> <value>..." for one run, over all regions: p50 p99 max (ms, from the merged
-# samples), errors, unanswered, longest gap, degraded (worst region), leader after.
+# Prints one run's values over the regions given (their generators' files): p50 p99 max
+# (ms, from the merged samples), errors, unanswered, longest gap, degraded (worst region),
+# leader after.
 run_row() {
-  local name=$1
-  sort -n <(awk -F, 'FNR > 1 && $3 == "Ok" { print $2 - $1 }' "$dir/$name"-r?.csv) | awk '
+  local name=$1 csvs=() txts=() i
+  for i in $2; do csvs+=("$dir/$name-r$i.csv"); txts+=("$dir/$name-r$i.txt"); done
+  sort -n <(awk -F, 'FNR > 1 && $3 == "Ok" { print $2 - $1 }' "${csvs[@]}") | awk '
     { v[NR] = $1 }
     function pct(p) { return NR ? v[int((NR - 1) * p + 0.5) + 1] / 1000 : 0 }
     END { printf "%.1f %.1f %.1f", pct(0.5), pct(0.99), NR ? v[NR] / 1000 : 0 }'
@@ -17,7 +19,7 @@ run_row() {
     function field(k,   i) { for (i = 1; i <= NF; i++) if (index($i, k "=") == 1) return substr($i, length(k) + 2); return "" }
     /^offered/ { e += field("errors"); u += field("unanswered") }
     /^fault_at/ { g = field("longest_gap") + 0; d = field("degraded") + 0; if (g > mg) mg = g; if (d > md) md = d }
-    END { printf " %d %d %d %d", e, u, mg, md }' "$dir/$name"-r?.txt
+    END { printf " %d %d %d %d", e, u, mg, md }' "${txts[@]}"
   echo " $(sed -n 's/^leader_after=//p' "$dir/$name-leader.txt" 2>/dev/null || echo -)"
 }
 
@@ -63,8 +65,18 @@ combine() {
 cases=$(find "$dir" -name '*-r0.txt' -printf '%f\n' | sed 's/-[0-9]*-r0\.txt$//' | sort -u)
 systems="quepaxa etcd etcd-tuned"
 regions=$(sed -n 's/^regions: \([^;]*\);.*/\1/p' "$dir/env.txt")
+far=$(sed -n 's/^regions: .*far: \([^,]*\),.*/\1/p' "$dir/env.txt")
+all="" others="" i=0
+for region in $regions; do
+  all+=" $i"
+  [ "$region" = "$far" ] || others+=" $i"
+  i=$((i + 1))
+done
 
 echo "### All regions (median over runs, range in parentheses; latency in ms)"
+echo
+echo "With the leader's region crashed or cut off, its own clients cannot write at all; those"
+echo "rows ($far down) cover the other regions."
 echo
 echo "| System | Case | p50 | p99 | max | Errors | Unanswered | Longest gap (ms) | Degraded (ms) | Leader after |"
 echo "|---|---|---|---|---|---|---|---|---|---|"
@@ -74,7 +86,8 @@ for system in $systems; do
     rest=${c#"$system"-}
     # "etcd-tuned-calm" also starts with "etcd-".
     [ "$system" = etcd ] && [[ $rest == tuned-* ]] && continue
-    rows=$(for f in "$dir/$c"-[0-9]*-r0.txt; do run_row "$(basename "$f" -r0.txt)"; done)
+    case $rest in crash | partition) over=$others ;; *) over=$all ;; esac
+    rows=$(for f in "$dir/$c"-[0-9]*-r0.txt; do run_row "$(basename "$f" -r0.txt)" "$over"; done)
     echo "| $system | $rest$(combine <<< "$rows")"
   done
 done
