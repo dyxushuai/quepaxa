@@ -264,10 +264,76 @@ What the table says, and what it does not:
   production claims. All six nodes share the host's disk and CPU sockets, and the
   network is a Docker bridge.
 
+### Across regions
+
+Five replicas of each system, one per emulated region (us-east, us-west, eu-west, ap-ne,
+sa-east; round trips of 70-300 ms, the `wan_leaders` matrix), on the same host with
+`tc netem` delaying every replica-to-replica link (`examples/kv-tokio/bench/etcd/wan.sh`).
+A generator per region writes 200 puts/s to its own region's replica (1,000/s in total)
+for 40 s; faults hit the leader's region from 10 s to 25 s. The leader is pinned to ap-ne,
+whose second-nearest peer is the farthest (180 ms; a majority is three of five), or to
+us-east (80 ms) for the best-placed control. QuePaxa runs with WAN timers (retransmit
+400 ms, hedge cap 3 s), etcd with its defaults (heartbeat 100 ms, election 1 s) and tuned
+per its guide for the 300 ms largest round trip (300 ms, 3 s). Medians of six runs (two
+sets of three, `target/bench-etcd/wan-20261031-235204/` and `wan-20261101-011133/`, at
+`876bc6b`), range in parentheses, latency in ms.
+
+With the leader's region alive, on all five regions' writes:
+
+| Leader's region | QuePaxa p99 | etcd p99 | etcd tuned p99 | Errors (QuePaxa / etcd / tuned) |
+|---|---|---|---|---|
+| far, no fault | 654 (612-683) | 2,754 (1,006-4,038) | 1,122 (892-1,460) | 0 / 0 (0-381) / 0 |
+| best-placed, no fault | 327 (320-333) | 504 (491-844) | 498 (497-967) | 0 / 0 / 0 |
+| far, +100 ms on its links | 1,281 (1,081-2,324) | 2,327 (2,104-4,032) | 1,391 (1,186-1,927) | 0 / 0 / 0 |
+| far, ±50 ms jitter and 1% loss | 1,798 (1,193-11,795) | 6,672 (6,491-6,843) | 6,305 (4,999-9,804) | 0 / 4,511 (3,998-11,056) / 0 (0-1,727) |
+
+With the leader's region crashed or cut off, on the other four regions' writes (its own
+clients cannot write at all):
+
+| Fault | System | Errors | Longest gap | p99 | max |
+|---|---|---|---|---|---|
+| crash | QuePaxa | 0 | 3,231 (3,204-3,453) | 6,998 (6,564-7,553) | 7,915 |
+| | etcd | 1,172 (947-1,360) | 1,807 (1,709-2,284) | 2,722 (2,299-5,692) | 3,842 |
+| | etcd, tuned | 3,063 (2,667-4,327) | 4,792 (3,454-6,021) | 1,977 (1,416-6,081) | 5,473 |
+| partition | QuePaxa | 0 | 3,228 (3,179-3,300) | 7,090 (6,913-8,135) | 8,001 |
+| | etcd | 1,223 (1,162-1,476) | 2,293 (1,752-2,532) | 3,121 (2,483-4,988) | 4,140 |
+| | etcd, tuned | 2,904 (2,843-3,861) | 4,308 (4,123-6,056) | 1,782 (1,046-4,018) | 5,029 |
+
+What the tables say, and what they do not:
+
+- **No QuePaxa request failed** in any case. etcd fails writes whenever it loses or
+  changes its leader: with jitter on the leader's links default etcd's 1 s election
+  timeout fires again and again (4,000-11,000 errors per run), and once it fired with no
+  fault at all.
+- **With the leader alive but far or jittery**, QuePaxa's p99 is the lowest of the three.
+  With +100 ms on the leader's links it is about even with tuned etcd (the two sets
+  disagreed on the order). Placement matters for all three: moving the leader from ap-ne
+  to us-east at least halves the p99.
+- **Losing the leader's region costs QuePaxa a 3.2 s stall** in every other region: longer
+  than default etcd's election (about 2 s), shorter than tuned etcd's (4-5 s). The gap is
+  close to the hedge cap (3 s) plus a round trip: followers propose their own entries only
+  after the hedge delay, which on these round trips reaches the cap. After the stall the
+  backlog drains slowly, so QuePaxa's p99 (7-8 s) is well above the gap; etcd's p99 is
+  lower partly because the requests it fails leave the percentiles.
+- **One jitter run stalled QuePaxa for 11.6 s** (p99 11.8 s); the other five stalled
+  0.7-1.7 s. Not explained yet. This, the 3 s stall and the slow drain are follow-up work
+  for the engine (`STRATEGY.md`, cross-region track), not fixed here.
+- The two sets reproduce each other: per system and case their p99 ranges overlap, except
+  default etcd with jitter (6,491-6,672 against 6,722-6,843) and tuned etcd after a crash
+  (1,416-1,977 against 2,129-6,081), and QuePaxa and tuned etcd rank the same in each set
+  on p99 and longest gap, except the p99 with +100 ms noted above.
+- The `Degraded` column of `summary.md` is left out: at 200 writes/s per region, 250 ms
+  buckets hold about 50 requests, and round-trip variation alone puts many of them under
+  the 80% line even without a fault.
+- Jittered links are rate-limited in netem so that it does not reorder packets; the
+  replicas saw 3-36 TCP reordering events per jitter run, from the loss.
+- One host: links are emulated, there is no bandwidth limit, and the five replicas share
+  the disk and CPUs. Hypotheses for real regions, not production claims.
+
 ## Not measured
 
 - No comparison against the Go reference implementation: running the Go code was out of
   scope of the research (it was read, not built). The workload above mirrors its shape so
   a comparison can be added on the same machine.
-- Heterogeneous WAN placements are covered by the simulator (`wan_leaders`) and one added
-  delay in the etcd comparison, not by a multi-region deployment.
+- No deployment on real regions: the cross-region comparison above emulates the links on
+  one host.

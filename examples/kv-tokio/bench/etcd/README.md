@@ -56,3 +56,47 @@ completed than 80% of the pre-fault rate (a brief stall late in the run adds lit
 cluster that stays slow adds every step); `Errors` are requests the server answered with
 an error, which etcd's client would retry. Latency percentiles cover successful requests
 only: a request etcd fails after its 7 s internal timeout is an error, not a 7 s sample.
+
+## Across regions (`wan.sh`)
+
+```sh
+examples/kv-tokio/bench/etcd/wan.sh            # everything (about 80 minutes)
+examples/kv-tokio/bench/etcd/wan.sh --smoke    # one short run per case
+examples/kv-tokio/bench/etcd/wan.sh crash jitter
+```
+
+Five replicas of each system, one per emulated region (us-east, us-west, eu-west, ap-ne,
+sa-east), still on this host. Every replica-to-replica link is delayed by half the round
+trip between its regions in each direction (`tc netem`, one HTB class per destination; the
+matrix is `wan_leaders`'s in `crates/quepaxa-sim`). Before each run the harness pings every
+link and aborts if one is off by more than 10% or 5 ms, and checks that each region's
+generator reaches its local replica in under 1 ms.
+
+| Case | What happens to the leader's region |
+|---|---|
+| `calm` | nothing; also run with the leader in the best-placed region (`calm-best`) |
+| `crash` | its replica is killed at 10 s |
+| `partition` | its traffic to and from the other replicas is dropped from 10 s to 25 s |
+| `slow` | `SLOW_MS` (100 ms) added to everything it sends to the others, 10 s to 25 s |
+| `jitter` | ±`JITTER_MS` (50 ms, normal) and `LOSS` (1%) on what it sends, 10 s to 25 s |
+
+- **Leader.** A majority is three of five, so a leader waits for its second-nearest
+  peer. The leader is pinned to the region where that peer is farthest (ap-ne, 180 ms)
+  and, for `calm-best`, nearest (us-east, 80 ms): QuePaxa through `--leader-order` (the
+  rest of the order by the same rank), etcd through `etcdctl move-leader`, confirmed before
+  any load. The summary records which region led after the fault.
+- **Timers.** QuePaxa runs with `--retransmit-ms 400 --hedge-max-ms 3000`, the WAN values
+  in `quepaxa::Config`'s docs. etcd runs with its defaults (100 ms, 1000 ms) and tuned per
+  its guide: heartbeat at the largest round trip (300 ms), election timeout ten times it.
+- **Load.** `RATE` (1000 writes/s) split evenly over a generator per region, each with its
+  own seed, writing only to its region's replica.
+- **Runs.** Each case runs `REPEATS` (3) times on fresh containers; `summary.md` gives the
+  median and the range over runs, over all regions (percentiles from the merged samples)
+  and per region.
+- **Jitter.** netem reorders jittered packets unless it is rate-limited, so the jitter
+  links carry a rate far above the load. The harness counts TCP reordering events on
+  every replica during the run (`reorders=` in `*-leader.txt`); a handful come from the
+  loss.
+
+It is still one host: links are emulated, there is no bandwidth limit, and every replica
+shares the same disk and CPU pool.
