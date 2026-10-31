@@ -1,0 +1,14 @@
+diff --git a/crates/quepaxa/src/replica/reads.rs b/crates/quepaxa/src/replica/reads.rs
+--- a/crates/quepaxa/src/replica/reads.rs
++++ b/crates/quepaxa/src/replica/reads.rs
+@@ -110,9 +110,7 @@ impl Replica {
+                 set
+             })
+             .collect();
+-        sets.sort_unstable();
+-        sets.dedup();
+-        sets
++        sets.split_off(sets.len() - 1)
+     }
+ 
+     fn ask(&mut self, number: u64, members: impl IntoIterator<Item = NodeId>) {

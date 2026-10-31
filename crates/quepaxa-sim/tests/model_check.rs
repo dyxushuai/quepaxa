@@ -22,6 +22,7 @@ fn leader_and_follower_writes_with_a_crash_are_safe() {
     let cfg = ModelConfig {
         nodes: 3,
         proposals: vec![0, 1],
+        reads: Vec::new(),
         deviations: deviations(1),
         crashes: 1,
         max_depth: depth(200),
@@ -42,6 +43,7 @@ fn leader_write_survives_a_crash_and_a_partition() {
     let cfg = ModelConfig {
         nodes: 3,
         proposals: vec![0],
+        reads: Vec::new(),
         deviations: deviations(2),
         crashes: 1,
         max_depth: depth(200),
@@ -58,6 +60,7 @@ fn contending_followers_are_safe() {
     let cfg = ModelConfig {
         nodes: 3,
         proposals: vec![1, 2],
+        reads: Vec::new(),
         deviations: deviations(2),
         crashes: 0,
         max_depth: depth(200),
@@ -68,5 +71,24 @@ fn contending_followers_are_safe() {
     assert!(report.complete > 0, "{report:?}");
     // Every schedule within the bounds is explored (states at the depth bound are shown to
     // settle under the default schedule), whatever bounds the run uses.
+    assert!(report.exhausted, "{report:?}");
+}
+
+/// A read at another replica, requested once a write is acknowledged, must cover it, under
+/// a crash (that may lose an unsynced register) and a partition of any replica.
+#[test]
+fn a_read_after_an_acknowledged_write_covers_it() {
+    let cfg = ModelConfig {
+        nodes: 3,
+        proposals: vec![0],
+        reads: vec![2],
+        deviations: deviations(1),
+        crashes: 1,
+        max_depth: depth(200),
+        max_states: budget(2_000_000),
+    };
+    let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
+    println!("{report:?}");
+    assert!(report.complete > 0, "{report:?}");
     assert!(report.exhausted, "{report:?}");
 }

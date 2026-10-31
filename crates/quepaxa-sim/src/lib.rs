@@ -360,7 +360,7 @@ impl Sim {
                     self.propose(i)?;
                 }
                 if self.faults_on && self.chance(self.cfg.read) {
-                    let i = self.member();
+                    let i = self.reader();
                     self.read(i)?;
                 }
                 // Checked only when enabled, so other configurations keep their random streams.
@@ -435,6 +435,16 @@ impl Sim {
     /// A random member of the latest membership.
     fn member(&mut self) -> usize {
         self.members[self.rng.below(self.members.len() as u64) as usize]
+    }
+
+    /// Where a client reads: usually a member, sometimes any live replica (one behind, joining,
+    /// or removed and not yet retired).
+    fn reader(&mut self) -> usize {
+        if self.rng.below(4) > 0 {
+            return self.member();
+        }
+        let live: Vec<usize> = (0..self.nodes.len()).filter(|&i| self.nodes[i].replica.is_some()).collect();
+        live[self.rng.below(live.len() as u64) as usize]
     }
 
     /// Proposes `nodes` replicas drawn from everyone, at a random member.

@@ -23,6 +23,9 @@ pub struct ModelConfig {
     pub nodes: usize,
     /// One client write per entry, proposed at that replica at the start.
     pub proposals: Vec<usize>,
+    /// One linearizable read per entry, requested at that replica once the first write is
+    /// acknowledged: it must cover that write.
+    pub reads: Vec<usize>,
     /// Deviations from the default schedule along one path.
     pub deviations: u32,
     /// Crash-restarts allowed along one path (a separate budget; they cost no deviation).
@@ -63,6 +66,8 @@ struct MNode {
     proposed: BTreeMap<ProposalId, Bytes>,
     /// Proposals whose client received `Committed`.
     acked: BTreeSet<ProposalId>,
+    /// Reads in progress: the slot each must cover.
+    reads: BTreeMap<ProposalId, u64>,
 }
 
 #[derive(Clone)]
@@ -77,6 +82,8 @@ struct State {
     /// Payloads that must eventually commit: client writes, minus those whose replica
     /// crashed before committing them (the client retries those as new payloads).
     required: Vec<Bytes>,
+    /// Replicas still to request a read once a write is acknowledged.
+    read_at: Vec<usize>,
     depth: usize,
 }
 
@@ -111,9 +118,17 @@ impl State {
     fn fingerprint(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for n in &self.nodes {
-            (n.replica.fingerprint(), &n.durable, n.now, n.next_commit, &n.proposed).hash(&mut h);
+            (n.replica.fingerprint(), &n.durable, n.now, n.next_commit, &n.proposed, &n.reads).hash(&mut h);
         }
-        (&self.events, self.deviations, self.crashes, self.isolated, &self.ledger, &self.history)
+        (
+            &self.events,
+            self.deviations,
+            self.crashes,
+            self.isolated,
+            &self.ledger,
+            &self.history,
+            &self.read_at,
+        )
             .hash(&mut h);
         h.finish()
     }
@@ -279,6 +294,8 @@ impl State {
         n.durable.extend(kept);
         n.starts += 1;
         n.next_commit = 0;
+        // Its clients' reads are lost with it.
+        n.reads.clear();
         // The client retries exactly the writes it never saw acknowledged.
         let acked = std::mem::take(&mut n.acked);
         let lost: Vec<Bytes> = std::mem::take(&mut n.proposed)
@@ -307,6 +324,7 @@ impl State {
     fn drain(&mut self, i: usize) -> Result<(), String> {
         let mut actions = Vec::new();
         self.nodes[i].replica.poll_actions(&mut actions);
+        let mut acked_slot = None;
         for a in actions {
             match a {
                 Action::Send(o) => self.post(i, o.to.0 as usize, o.bytes),
@@ -326,8 +344,28 @@ impl State {
                     self.nodes[i].acked.insert(id);
                     let payload = self.nodes[i].proposed.get(&id).cloned().unwrap_or_default();
                     self.ledger.acknowledged(NodeId(i as u32), id, &payload, slot.0, None)?;
+                    acked_slot = Some(slot.0);
+                }
+                Action::ReadReady { id, slot } => {
+                    let n = &mut self.nodes[i];
+                    if let Some(covers) = n.reads.remove(&id)
+                        && (slot.0 < covers || n.next_commit <= slot.0)
+                    {
+                        return Err(format!(
+                            "n{i} read ready at slot {} (applied up to {}) misses the write acknowledged in slot {covers}",
+                            slot.0, n.next_commit
+                        ));
+                    }
                 }
                 _ => {}
+            }
+        }
+        if let Some(covers) = acked_slot {
+            for j in std::mem::take(&mut self.read_at) {
+                let n = &mut self.nodes[j];
+                let id = n.replica.read_barrier(Timestamp(n.now)).map_err(|e| e.to_string())?;
+                n.reads.insert(id, covers);
+                self.drain(j)?;
             }
         }
         Ok(())
@@ -341,7 +379,7 @@ impl State {
 
     fn complete(&self) -> bool {
         self.required.iter().all(|p| self.ledger.is_committed(p))
-            && self.nodes.iter().all(|n| n.next_commit as usize == self.ledger.slots())
+            && self.nodes.iter().all(|n| n.next_commit as usize == self.ledger.slots() && n.reads.is_empty())
     }
 }
 
@@ -357,6 +395,7 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
             starts: 0,
             proposed: BTreeMap::new(),
             acked: BTreeSet::new(),
+            reads: BTreeMap::new(),
         });
     }
     let mut init = State {
@@ -368,6 +407,7 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         history: crate::invariants::History::default(),
         ledger: crate::invariants::Ledger::default(),
         required: Vec::new(),
+        read_at: cfg.reads.clone(),
         depth: 0,
     };
     for i in 0..cfg.nodes {

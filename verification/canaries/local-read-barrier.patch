@@ -1,14 +1,12 @@
-diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
---- a/crates/quepaxa/src/replica/mod.rs
-+++ b/crates/quepaxa/src/replica/mod.rs
-@@ -428,6 +428,10 @@ impl Replica {
-             return Err(Error::PayloadTooLarge);
-         }
-         self.next_proposal += 1;
-+        if kind == Kind::Barrier {
-+            self.actions.push(Action::ReadReady { id, slot: Slot(self.emitted.saturating_sub(1)) });
-+            return Ok(id);
-+        }
-         self.outstanding.insert(id, (self.now, kind, false));
-         self.pending.push_back(item);
-         Ok(id)
+diff --git a/crates/quepaxa/src/replica/reads.rs b/crates/quepaxa/src/replica/reads.rs
+--- a/crates/quepaxa/src/replica/reads.rs
++++ b/crates/quepaxa/src/replica/reads.rs
+@@ -144,7 +144,7 @@ impl Replica {
+             let sets = self.read_member_sets();
+             let short: Vec<&Vec<NodeId>> = sets
+                 .iter()
+-                .filter(|set| 2 * set.iter().filter(|m| round.answers.contains_key(m)).count() <= set.len())
++                .filter(|_| false)
+                 .collect();
+             if !short.is_empty() {
+                 let new: BTreeSet<NodeId> = short

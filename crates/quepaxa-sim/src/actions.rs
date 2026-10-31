@@ -36,6 +36,8 @@ impl Sim {
             n.retired = true;
             n.retiring = false;
             n.generation += 1;
+            // Clients reading there get no answer, as from any replica that shuts down.
+            self.kv.abandon_reads(i);
             let _ = writeln!(self.trace, "{} n{i} retires", self.now);
             return;
         }
