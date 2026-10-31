@@ -78,7 +78,7 @@ generator reaches its local replica in under 1 ms.
 | `crash` | its replica is killed at 10 s |
 | `partition` | its traffic to and from the other replicas is dropped from 10 s to 25 s |
 | `slow` | `SLOW_MS` (100 ms) added to everything it sends to the others, 10 s to 25 s |
-| `jitter` | ±`JITTER_MS` (50 ms, normal) and `LOSS` (1%) on what it sends, 10 s to 25 s |
+| `jitter` | `JITTER_MS` (50 ms, normal) of jitter and `LOSS` (1%) on what it sends, 10 s to 25 s |
 
 - **Leader.** A majority is three of five, so a leader waits for its second-nearest
   peer. The leader is pinned to the region where that peer is farthest (ap-ne, 180 ms)
@@ -93,10 +93,14 @@ generator reaches its local replica in under 1 ms.
 - **Runs.** Each case runs `REPEATS` (3) times on fresh containers; `summary.md` gives the
   median and the range over runs, over all regions (percentiles from the merged samples)
   and per region.
-- **Jitter.** netem reorders jittered packets unless it is rate-limited, so the jitter
-  links carry a rate far above the load. The harness counts TCP reordering events on
-  every replica during the run (`reorders=` in `*-leader.txt`); a handful come from the
-  loss.
+- **Jitter.** netem reorders jittered packets unless the link has a rate, so every link
+  carries one far above the load. A rate keeps packets in order by holding each one
+  behind the packet ahead, so under load the added delay skews toward the high end of
+  the jitter rather than spreading ±50 ms: the case is mostly extra, uneven delay plus
+  loss. The harness counts TCP reordering events on every replica during the run
+  (`reorders=` in `*-leader.txt`); a handful come from the loss.
+- **Faults change links in place** (`tc qdisc change`): replacing a link's qdisc would
+  drop the packets queued in it.
 
 It is still one host: links are emulated, there is no bandwidth limit, and every replica
 shares the same disk and CPU pool.
