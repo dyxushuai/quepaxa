@@ -327,6 +327,9 @@ What the tables say, and what they do not:
   the 80% line even without a fault.
 - Jittered links are rate-limited in netem so that it does not reorder packets; the
   replicas saw 3-36 TCP reordering events per jitter run, from the loss.
+- In these runs the leader after the fault was found with short-lived probe containers
+  during the last 7.5 s of the load, not pinned off the replicas' cores; `wan.sh` now
+  probes after the load. The post-heal tail may carry a little of that noise.
 - One host: links are emulated, there is no bandwidth limit, and the five replicas share
   the disk and CPUs. Hypotheses for real regions, not production claims.
 

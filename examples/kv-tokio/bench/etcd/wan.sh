@@ -71,10 +71,10 @@ mkdir -p "$results" "$data"
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$here/lib.sh"
 
-replicas=()
-for i in $(seq 0 $((n - 1))); do replicas+=("qpx-r$i"); done
+replicas=() gens=()
+for i in $(seq 0 $((n - 1))); do replicas+=("qpx-r$i") gens+=("qpx-g$i"); done
 cleanup() {
-  docker rm -f "${replicas[@]}" qpx-g0 qpx-g1 qpx-g2 qpx-g3 qpx-g4 >/dev/null 2>&1 || true
+  docker rm -f "${replicas[@]}" "${gens[@]}" qpx-burst >/dev/null 2>&1 || true
   wipe_data 2>/dev/null || true
 }
 trap 'cleanup; docker network rm "$net" >/dev/null 2>&1 || true' EXIT
@@ -118,13 +118,24 @@ start_etcd() {
   done
 }
 
+running() { [ "$(docker inspect -f '{{.State.Running}}' "qpx-r$1" 2>/dev/null)" = true ]; }
+
+# The client endpoints of the replicas still running.
 endpoints() {
   local i out=""
-  for i in $(seq 0 $((n - 1))); do out+="${out:+,}$(replica_ip "$i"):2379"; done
+  for i in $(seq 0 $((n - 1))); do running "$i" && out+="${out:+,}$(replica_ip "$i"):2379"; done
   echo "$out"
 }
 
-# netem_on <replica> <peer> <netem args>: the delay on the replica's link to that peer.
+# etcd's leader endpoint, as its running members report it.
+etcd_leader() {
+  local i
+  for i in $(seq 0 $((n - 1))); do running "$i" && break; done
+  docker exec "qpx-r$i" etcdctl --endpoints="$(endpoints)" endpoint status -w json 2>/dev/null |
+    jq -r '.[] | select(.Status.header.member_id == .Status.leader) | .Endpoint' | head -1
+}
+
+# netem_cmd <replica> <peer> <netem args>: the delay on the replica's link to that peer.
 netem_cmd() {
   local c=$((10 + $2))
   echo "tc qdisc del dev eth0 parent 1:$c 2>/dev/null; tc qdisc add dev eth0 parent 1:$c handle $c: netem $3 limit 100000"
@@ -201,23 +212,30 @@ leader_now() {
     done
     [ "$best_i" = - ] && echo none || echo "${regions[$best_i]}"
   else
-    local st ip live="" eps=""
-    for i in $(seq 0 $((n - 1))); do
-      [ "$(docker inspect -f '{{.State.Running}}' "qpx-r$i" 2>/dev/null)" = true ] || continue
-      live=${live:-$i}
-      eps+="${eps:+,}$(replica_ip "$i"):2379"
-    done
-    st=$(docker exec "qpx-r$live" etcdctl --endpoints="$eps" endpoint status -w json 2>/dev/null || true)
-    ip=$(jq -r '.[] | select(.Status.header.member_id == .Status.leader) | .Endpoint' <<< "${st:-[]}" |
-      head -1 | sed 's|http://||; s|:2379||')
+    local ip
+    ip=$(etcd_leader | sed 's|http://||; s|:2379||')
     for i in $(seq 0 $((n - 1))); do [ "$(replica_ip "$i")" = "$ip" ] && { echo "${regions[$i]}"; return; }; done
     echo none
   fi
 }
 
+# leader_now with writes flowing (QuePaxa's leader shows only in its fast path), outside any
+# measurement.
+leader_with_writes() {
+  local now
+  if [ "$1" = quepaxa ]; then
+    docker run -d --rm --name qpx-burst --network "$net" --cpuset-cpus "$gen_cpus" "$image" \
+      benchmark --endpoints="$(endpoints)" put --total 2000 --rate 500 >/dev/null
+    sleep 1
+  fi
+  now=$(leader_now "$1")
+  docker rm -f qpx-burst >/dev/null 2>&1 || true
+  echo "$now"
+}
+
 # Waits for the cluster to take writes, then puts the leader in region <pinned>.
 ready() {
-  local system=$1 pinned=$2 deadline=$((SECONDS + 120)) hex leader_ep st
+  local system=$1 pinned=$2 deadline=$((SECONDS + 120)) hex
   until docker run --rm --network "$net" "$image" benchmark --endpoints="$(endpoints)" \
     put --total 10 >/dev/null 2>&1; do
     [ $SECONDS -lt $deadline ] || { echo "cluster did not come up" >&2; exit 1; }
@@ -226,22 +244,14 @@ ready() {
   if [ "$system" != quepaxa ]; then
     for _ in $(seq 10); do
       [ "$(leader_now "$system")" = "${regions[$pinned]}" ] && break
-      st=$(docker exec qpx-r0 etcdctl --endpoints="$(endpoints)" endpoint status -w json)
-      leader_ep=$(jq -r '.[] | select(.Status.header.member_id == .Status.leader) | .Endpoint' <<< "$st" | head -1)
       hex=$(docker exec qpx-r0 etcdctl --endpoints="$(replica_ip "$pinned"):2379" endpoint status -w simple |
         cut -d, -f2 | xargs)
-      docker exec qpx-r0 etcdctl --endpoints="$leader_ep" move-leader "$hex" >/dev/null 2>&1 || true
+      docker exec qpx-r0 etcdctl --endpoints="$(etcd_leader)" move-leader "$hex" >/dev/null 2>&1 || true
       sleep 2
     done
-  else
-    # Writes flowing, so the leader shows in the fast path.
-    docker run -d --rm --name qpx-g0 --network "$net" "$image" benchmark --endpoints="$(endpoints)" \
-      put --total 2000 --rate 500 >/dev/null
-    sleep 1
   fi
   local now
-  now=$(leader_now "$system")
-  docker rm -f qpx-g0 >/dev/null 2>&1 || true
+  now=$(leader_with_writes "$system")
   [ "$now" = "${regions[$pinned]}" ] || { echo "$system leads from $now, not ${regions[$pinned]}" >&2; exit 1; }
   echo "  leader: $now"
 }
@@ -299,6 +309,8 @@ heal() {
 # One run: a generator per region on its local replica, the fault on the leader's region.
 run_case() {
   local system=$1 scenario=$2 pinned=$3 name=$4 run=$5 i pids=() before
+  # Probes (containers of their own) run before and after the load, never during it.
+  [ "$scenario" = jitter ] && before=$(reorders)
   local t0=$(($(date +%s%3N) + 5000)) per=$((rate / n))
   for i in $(seq 0 $((n - 1))); do
     docker run --rm --name "qpx-g$i" --network "$net" --ip "$(gen_ip "$i")" --cpuset-cpus "$gen_cpus" \
@@ -308,17 +320,15 @@ run_case() {
       --samples "/out/$name-r$i.csv" > "$results/$name-r$i.txt" &
     pids+=($!)
   done
-  [ "$scenario" = jitter ] && before=$(reorders)
   sleep_until $((t0 + fault * 1000))
   inject "$scenario" "$pinned"
   sleep_until $((t0 + heal * 1000))
   heal "$scenario" "$pinned"
-  sleep_until $((t0 + (heal + (secs - heal) / 2) * 1000))
+  for i in "${pids[@]}"; do wait "$i"; done
   {
-    echo "leader_after=$(leader_now "$system")"
+    echo "leader_after=$(leader_with_writes "$system")"
     [ "$scenario" = jitter ] && echo "reorders=$(($(reorders) - before))"
   } > "$results/$name-leader.txt"
-  for i in "${pids[@]}"; do wait "$i"; done
   case $scenario in slow | jitter) check_links "$pinned" ;; esac
   awk '/^offered/ { for (i = 1; i <= NF; i++) if ($i ~ /^p99=/) p = p " " $i } END { print "    p99 by region:" p }' \
     "$results/$name"-r?.txt
