@@ -3,8 +3,11 @@
 //! ```text
 //! kv-tokio --id 0 --members 0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102 \
 //!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
-//!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379]
+//!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379] [--retransmit-ms 400] [--hedge-max-ms 3000]
 //! ```
+//!
+//! `--retransmit-ms` and `--hedge-max-ms` set the replica's `retransmit_interval` and
+//! `hedge_max`; raise them above the longest round trip and commit path on a WAN.
 //!
 //! `--members` are the configured members; `--peers` are replicas that may join later (a
 //! joining replica runs with the same `--members` and finds its own address in `--peers`).
@@ -69,11 +72,16 @@ struct Args {
     data: PathBuf,
     snapshot_every: u64,
     leader_order: Vec<NodeId>,
+    retransmit_ms: Option<u64>,
+    hedge_max_ms: Option<u64>,
 }
+
+const MILLI: u64 = 1_000_000;
 
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
     let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
+    let (mut retransmit_ms, mut hedge_max_ms) = (None, None);
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -101,6 +109,12 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                     leader_order.push(NodeId(i.parse().map_err(|e| format!("--leader-order: {e}"))?));
                 }
             }
+            "--retransmit-ms" => {
+                retransmit_ms = Some(value.parse().map_err(|e| format!("--retransmit-ms: {e}"))?)
+            }
+            "--hedge-max-ms" => {
+                hedge_max_ms = Some(value.parse().map_err(|e| format!("--hedge-max-ms: {e}"))?)
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -118,7 +132,25 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         peers,
         snapshot_every: every,
         leader_order,
+        retransmit_ms,
+        hedge_max_ms,
     })
+}
+
+/// The replica's configuration: what the flags set, `Config::new`'s defaults otherwise.
+fn config(args: &Args) -> Config {
+    let members: Vec<NodeId> = args.members.iter().map(|(i, _)| NodeId(*i)).collect();
+    let mut cluster_id = [0u8; 16];
+    cluster_id[..8].copy_from_slice(b"kv-tokio");
+    let mut cfg = Config::new(cluster_id, NodeId(args.id), members, seed());
+    cfg.leader_order = args.leader_order.clone();
+    if let Some(ms) = args.retransmit_ms {
+        cfg.retransmit_interval = ms.saturating_mul(MILLI);
+    }
+    if let Some(ms) = args.hedge_max_ms {
+        cfg.hedge_max = ms.saturating_mul(MILLI);
+    }
+    cfg
 }
 
 /// Reads one length-prefixed frame; the buffer grows with the bytes actually received, so
@@ -305,11 +337,8 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let members: Vec<NodeId> = args.members.iter().map(|(i, _)| NodeId(*i)).collect();
-    let mut cluster_id = [0u8; 16];
-    cluster_id[..8].copy_from_slice(b"kv-tokio");
-    let mut cfg = Config::new(cluster_id, NodeId(args.id), members, seed());
-    cfg.leader_order = args.leader_order;
+    let cfg = config(&args);
+    let cluster_id = cfg.cluster_id;
     let (disk, records) = Disk::open(&args.data).expect("open data directory");
     let replica = Replica::new(cfg, records, Timestamp(0)).expect("recover replica");
 
@@ -373,6 +402,25 @@ mod tests {
         let twice = args(&format!("{base} --peers 1=127.0.0.1:4")).err().unwrap();
         assert!(twice.contains("replica 1 is listed twice"), "{twice}");
         assert!(args("--id 0 --client 127.0.0.1:1 --data d --members 0=127.0.0.1:2,0=127.0.0.1:3").is_err());
+    }
+
+    #[test]
+    fn wan_timers_reach_the_replica_config() {
+        let base = "--id 0 --client 127.0.0.1:1 --data d --members 0=127.0.0.1:2";
+        let wan = config(&args(&format!("{base} --retransmit-ms 400 --hedge-max-ms 3000")).unwrap());
+        assert_eq!((wan.retransmit_interval, wan.hedge_max), (400 * MILLI, 3_000 * MILLI));
+        let pinned = config(&args(&format!("{base},1=127.0.0.1:3 --leader-order 1,0")).unwrap());
+        assert_eq!(pinned.leader_order, vec![NodeId(1), NodeId(0)], "the leader stays pinned");
+        let plain = config(&args(base).unwrap());
+        let default = Config::new([0; 16], NodeId(0), vec![NodeId(0)], [0; 32]);
+        assert_eq!(
+            (plain.retransmit_interval, plain.hedge_max),
+            (default.retransmit_interval, default.hedge_max)
+        );
+        let zero = config(&args(&format!("{base} --hedge-max-ms 0")).unwrap());
+        assert!(Replica::new(zero, [], Timestamp(0)).is_err(), "the replica's own validation refuses it");
+        let bad = args(&format!("{base} --retransmit-ms soon")).err().unwrap();
+        assert!(bad.starts_with("--retransmit-ms"), "{bad}");
     }
 
     /// A client connection served by `client`, with the node side of its events.

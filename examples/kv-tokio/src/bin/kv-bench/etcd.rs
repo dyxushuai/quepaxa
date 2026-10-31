@@ -22,6 +22,8 @@ pub struct Load {
     /// When the run starts on the wall clock, so another process can time faults against
     /// it; `None`: as soon as the clients exist.
     pub start_at: Option<SystemTime>,
+    /// Seeds arrivals and keys: generators running side by side need different seeds.
+    pub seed: u64,
 }
 
 /// Runs the load; returns every request's sample and the run's end (microseconds from start),
@@ -47,7 +49,7 @@ pub async fn run(load: &Load) -> (Vec<Sample>, u64) {
     };
     tokio::time::sleep_until(start.into()).await;
     let until = start + Duration::from_secs_f64(load.secs);
-    let mut rng = SplitMix(1);
+    let mut rng = SplitMix(load.seed);
     let mut next = start;
     let mut handles = Vec::new();
     loop {
