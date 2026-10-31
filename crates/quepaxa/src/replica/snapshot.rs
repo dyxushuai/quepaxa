@@ -132,6 +132,7 @@ impl Replica {
         self.raise_floor(state.next, core_state);
         self.advance_committed();
         self.emit_commits();
+        self.check_reads();
         // Resume fetching whatever the cluster decided after the snapshot. The snapshot
         // answered any outstanding request, so if peers compacted past it meanwhile, the
         // next one may be asked for at once.

@@ -831,3 +831,43 @@ fn anyone_may_ask_for_the_mark_but_only_members_answer_reads() {
     r.handle(Timestamp(1), from_peer(7, 0, Body::ReadReply { round: 1, high: Slot(5) })).unwrap();
     assert_eq!(r.metrics().messages_rejected, rejected + 1);
 }
+
+/// The round a read asked `peer` with, from what `r` sent.
+fn read_round_sent(r: &mut Replica, peer: u32) -> u64 {
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    out.iter()
+        .find_map(|a| match a {
+            Action::Send(o) if o.to == NodeId(peer) => {
+                match Message::decode(&o.bytes, &r_wire()).map(|m| m.body) {
+                    Ok(Body::ReadQuery { round }) => Some(round),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .expect("a read query")
+}
+
+#[test]
+fn an_answer_to_a_previous_incarnations_read_does_not_count() {
+    let cfg = || Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    let mut records = Vec::new();
+    let mut r = Replica::new(cfg(), [], Timestamp(0)).unwrap();
+    persist_all(&mut r, &mut records);
+    r.read_barrier(Timestamp(1)).unwrap();
+    let old = read_round_sent(&mut r, 1);
+    // Restarted, with slot 0 decided since: a fresh read needs a majority's answers.
+    let mut r = Replica::new(cfg(), records.clone(), Timestamp(2)).unwrap();
+    persist_all(&mut r, &mut Vec::new());
+    r.handle(Timestamp(2), from_peer(1, 0, Body::Decided { slot: Slot(0), proposal: proposal(1, 1, 0) }))
+        .unwrap();
+    persist_all(&mut r, &mut Vec::new());
+    let read = r.read_barrier(Timestamp(3)).unwrap();
+    assert_ne!(read_round_sent(&mut r, 1), old, "round numbers differ across incarnations");
+    // A reply to the old round, delivered late, is not an answer to this one.
+    r.handle(Timestamp(3), from_peer(1, 0, Body::ReadReply { round: old, high: Slot(1) })).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    assert!(!out.iter().any(|a| matches!(a, Action::ReadReady { id, .. } if *id == read)), "{out:?}");
+}

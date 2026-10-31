@@ -38,8 +38,8 @@ impl Replica {
     }
 
     /// Once a majority of the new members durably know every slot before their epoch,
-    /// submits the confirming read barrier; until then, asks the members still behind on
-    /// the retransmit timer.
+    /// submits the confirming retirement barrier entry; until then, asks the members still
+    /// behind on the retransmit timer.
     pub(super) fn check_retired(&mut self) {
         if let Some(epoch) = self.retire_committed.take()
             && self.removed_from().is_some_and(|(latest, _)| latest == epoch)

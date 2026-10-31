@@ -4,7 +4,7 @@ mod common;
 
 use bytes::Bytes;
 use common::{config, drain};
-use quepaxa::{Action, DropReason, Error, Input, NodeId, PersistId, Replica, Slot, Timestamp};
+use quepaxa::{Action, DropReason, Error, Input, NodeId, Replica, Slot, Timestamp};
 
 /// Replicas on a network that delivers everything except to the ones that are down, and
 /// acknowledges every persist; time moves only to fire timers.
@@ -193,7 +193,7 @@ fn fencing_drops_pending_reads() {
             Action::Persist { id, .. } => Some(id),
             _ => None,
         })
-        .unwrap_or(PersistId(1));
+        .expect("the write is persisted");
     r.handle(Timestamp(0), Input::StorageFailed(persist)).unwrap();
     let dropped: Vec<_> = drain(&mut r)
         .into_iter()

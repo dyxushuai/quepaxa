@@ -34,12 +34,20 @@ use crate::types::{NodeId, ProposalId, Slot, Timestamp};
 use super::Replica;
 
 /// Reads waiting for a round, and the round in flight.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "model", derive(Hash))]
 pub(super) struct Reads {
     queued: Vec<ProposalId>,
     round: Option<Round>,
     next_round: u64,
+}
+
+impl Reads {
+    /// Rounds are numbered from the incarnation up, so a late answer to a round asked
+    /// before a restart never matches one asked after it.
+    pub(super) fn new(incarnation: u64) -> Self {
+        Self { queued: Vec::new(), round: None, next_round: incarnation << 32 }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -201,8 +209,8 @@ impl Replica {
 
     /// Fencing drops every pending read.
     pub(super) fn drop_reads(&mut self) {
-        let reads = mem::take(&mut self.reads);
-        let ids = reads.queued.into_iter().chain(reads.round.into_iter().flat_map(|r| r.reads));
+        let queued = mem::take(&mut self.reads.queued);
+        let ids = queued.into_iter().chain(self.reads.round.take().into_iter().flat_map(|r| r.reads));
         for id in ids {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }
