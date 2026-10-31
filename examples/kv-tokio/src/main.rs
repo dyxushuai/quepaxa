@@ -409,6 +409,8 @@ mod tests {
         let base = "--id 0 --client 127.0.0.1:1 --data d --members 0=127.0.0.1:2";
         let wan = config(&args(&format!("{base} --retransmit-ms 400 --hedge-max-ms 3000")).unwrap());
         assert_eq!((wan.retransmit_interval, wan.hedge_max), (400 * MILLI, 3_000 * MILLI));
+        let pinned = config(&args(&format!("{base},1=127.0.0.1:3 --leader-order 1,0")).unwrap());
+        assert_eq!(pinned.leader_order, vec![NodeId(1), NodeId(0)], "the leader stays pinned");
         let plain = config(&args(base).unwrap());
         let default = Config::new([0; 16], NodeId(0), vec![NodeId(0)], [0; 32]);
         assert_eq!(

@@ -135,10 +135,14 @@ etcd_leader() {
     jq -r '.[] | select(.Status.header.member_id == .Status.leader) | .Endpoint' | head -1
 }
 
-# netem_cmd <replica> <peer> <netem args>: the delay on the replica's link to that peer.
+# netem_cmd <add|change> <replica> <peer> [extra ms] [netem args]: the replica's link to that
+# peer, delayed by half their round trip plus the extra. Every link has a rate, far above
+# the load: with one, netem never sends a packet before the one queued ahead of it, so
+# jitter does not reorder (and holds a packet behind a slower one ahead instead). Faults
+# change a link in place; replacing its qdisc would drop the packets queued in it.
 netem_cmd() {
-  local c=$((10 + $2))
-  echo "tc qdisc del dev eth0 parent 1:$c 2>/dev/null; tc qdisc add dev eth0 parent 1:$c handle $c: netem $3 limit 100000"
+  local c=$((10 + $3)) ms=$(($(rtt_of "$2" "$3") / 2 + ${4:-0}))
+  echo "tc qdisc $1 dev eth0 parent 1:$c handle $c: netem delay ${ms}ms ${5:-} rate 10gbit limit 100000"
 }
 
 # Every replica's egress: one HTB class per peer with half the round trip, everything else
@@ -150,7 +154,7 @@ shape_links() {
     for j in $(seq 0 $((n - 1))); do
       [ "$i" = "$j" ] && continue
       cmd+=" && tc class add dev eth0 parent 1: classid 1:$((10 + j)) htb rate 10gbit quantum 60000"
-      cmd+=" && $(netem_cmd "$i" "$j" "delay $(($(rtt_of "$i" "$j") / 2))ms")"
+      cmd+=" && $(netem_cmd add "$i" "$j")"
       cmd+=" && tc filter add dev eth0 parent 1: protocol ip prio 1 u32 match ip dst $(replica_ip "$j")/32 flowid 1:$((10 + j))"
     done
     sidecar "qpx-r$i" "$cmd"
@@ -283,14 +287,12 @@ inject() {
       sidecar "qpx-r$l" "$cmd" ;;
     slow)
       for j in $(peers_of "$l"); do
-        cmd+="$(netem_cmd "$l" "$j" "delay $(($(rtt_of "$l" "$j") / 2 + slow_ms))ms"); "
+        cmd+="$(netem_cmd change "$l" "$j" "$slow_ms"); "
       done
       sidecar "qpx-r$l" "$cmd" ;;
     jitter)
-      # With a rate set, netem never sends a packet before the one queued ahead of it, so
-      # jitter does not reorder (a FIFO child does not stop that).
       for j in $(peers_of "$l"); do
-        cmd+="$(netem_cmd "$l" "$j" "delay $(($(rtt_of "$l" "$j") / 2))ms ${jitter_ms}ms distribution normal loss ${loss}% rate 10gbit"); "
+        cmd+="$(netem_cmd change "$l" "$j" 0 "${jitter_ms}ms distribution normal loss ${loss}%"); "
       done
       sidecar "qpx-r$l" "$cmd" ;;
   esac
@@ -301,7 +303,7 @@ heal() {
   case $1 in
     partition) sidecar "qpx-r$l" "iptables -F" ;;
     slow | jitter)
-      for j in $(peers_of "$l"); do cmd+="$(netem_cmd "$l" "$j" "delay $(($(rtt_of "$l" "$j") / 2))ms"); "; done
+      for j in $(peers_of "$l"); do cmd+="$(netem_cmd change "$l" "$j"); "; done
       sidecar "qpx-r$l" "$cmd" ;;
   esac
 }

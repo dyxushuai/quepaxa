@@ -47,7 +47,8 @@ combine() {
       for (i = 1; i <= NR; i++) a[i] = col[c, i] + 0
       for (i = 1; i <= NR; i++) for (j = i + 1; j <= NR; j++) if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
       if (a[1] == a[NR]) return fmt(a[1])
-      return fmt(a[int((NR + 1) / 2)]) " (" fmt(a[1]) "–" fmt(a[NR]) ")"
+      m = NR % 2 ? a[(NR + 1) / 2] : (a[NR / 2] + a[NR / 2 + 1]) / 2
+      return fmt(m) " (" fmt(a[1]) "–" fmt(a[NR]) ")"
     }
     function fmt(x) { return x == int(x) ? sprintf("%d", x) : sprintf("%.1f", x) }
     function word(c,   i, n, w, best) {
