@@ -99,12 +99,15 @@ pub(crate) enum Body {
     Compacted {
         through: Slot,
     },
-    /// Asks a recorder for its high-water mark, for read round `round`.
+    /// Asks a recorder for its high-water mark, for read round `round` of the asker's
+    /// `incarnation`.
     ReadQuery {
+        incarnation: u64,
         round: u64,
     },
     /// The sender holds no state for any slot at or after `high`.
     ReadReply {
+        incarnation: u64,
         round: u64,
         high: Slot,
     },
@@ -213,8 +216,12 @@ impl Message {
             }
             Body::Forward { batch } => put_value(&mut out, batch),
             Body::Compacted { through } => out.put_u64_le(through.0),
-            Body::ReadQuery { round } => out.put_u64_le(*round),
-            Body::ReadReply { round, high } => {
+            Body::ReadQuery { incarnation, round } => {
+                out.put_u64_le(*incarnation);
+                out.put_u64_le(*round);
+            }
+            Body::ReadReply { incarnation, round, high } => {
+                out.put_u64_le(*incarnation);
                 out.put_u64_le(*round);
                 out.put_u64_le(high.0);
             }
@@ -291,8 +298,10 @@ impl Message {
             }
             KIND_FORWARD => Body::Forward { batch: r.value()? },
             KIND_COMPACTED => Body::Compacted { through: Slot(r.u64()?) },
-            KIND_READ_QUERY => Body::ReadQuery { round: r.u64()? },
-            KIND_READ_REPLY => Body::ReadReply { round: r.u64()?, high: Slot(r.u64()?) },
+            KIND_READ_QUERY => Body::ReadQuery { incarnation: r.u64()?, round: r.u64()? },
+            KIND_READ_REPLY => {
+                Body::ReadReply { incarnation: r.u64()?, round: r.u64()?, high: Slot(r.u64()?) }
+            }
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -498,10 +507,14 @@ mod tests {
 
     #[test]
     fn read_query_and_reply_match_golden_bytes_v1() {
-        let query = Message { env: env(), body: Body::ReadQuery { round: 7 } };
-        assert_eq!(query.encode().to_vec(), golden("08", "0700000000000000"));
-        let reply = Message { env: env(), body: Body::ReadReply { round: 7, high: Slot(0x0102) } };
-        assert_eq!(reply.encode().to_vec(), golden("09", "0700000000000000 0201000000000000"));
+        let query = Message { env: env(), body: Body::ReadQuery { incarnation: 3, round: 7 } };
+        assert_eq!(query.encode().to_vec(), golden("08", "0300000000000000 0700000000000000"));
+        let reply =
+            Message { env: env(), body: Body::ReadReply { incarnation: 3, round: 7, high: Slot(0x0102) } };
+        assert_eq!(
+            reply.encode().to_vec(),
+            golden("09", "0300000000000000 0700000000000000 0201000000000000")
+        );
     }
 
     #[test]
@@ -626,8 +639,8 @@ mod tests {
                 Body::Entries { first: Slot(from), proposals: ps.clone() },
                 Body::Forward { batch },
                 Body::Compacted { through: Slot(from) },
-                Body::ReadQuery { round },
-                Body::ReadReply { round, high: Slot(from) },
+                Body::ReadQuery { incarnation: from, round },
+                Body::ReadReply { incarnation: from, round, high: Slot(from) },
             ] {
                 let m = Message { env: env(), body };
                 proptest::prop_assert_eq!(Message::decode(&m.encode(), &CTX).unwrap(), m);

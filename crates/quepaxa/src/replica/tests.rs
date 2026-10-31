@@ -718,13 +718,13 @@ fn mark(r: &mut Replica) -> u64 {
     let mut out = Vec::new();
     r.poll_actions(&mut out);
     out.clear();
-    r.handle(r.now, from_peer(1, 0, Body::ReadQuery { round: 9 })).unwrap();
+    r.handle(r.now, from_peer(1, 0, Body::ReadQuery { incarnation: 4, round: 9 })).unwrap();
     r.poll_actions(&mut out);
     let marks: Vec<u64> = out
         .iter()
         .filter_map(|a| match a {
             Action::Send(o) => match Message::decode(&o.bytes, &r_wire()).map(|m| m.body) {
-                Ok(Body::ReadReply { round: 9, high }) => Some(high.0),
+                Ok(Body::ReadReply { incarnation: 4, round: 9, high }) => Some(high.0),
                 _ => None,
             },
             _ => None,
@@ -824,23 +824,24 @@ fn anyone_may_ask_for_the_mark_but_only_members_answer_reads() {
     let mut out = Vec::new();
     r.poll_actions(&mut out);
     out.clear();
-    r.handle(Timestamp(1), from_peer(7, 0, Body::ReadQuery { round: 1 })).unwrap();
+    r.handle(Timestamp(1), from_peer(7, 0, Body::ReadQuery { incarnation: 1, round: 1 })).unwrap();
     r.poll_actions(&mut out);
     assert!(matches!(&out[..], [Action::Send(o)] if o.to == NodeId(7)), "{out:?}");
     let rejected = r.metrics().messages_rejected;
-    r.handle(Timestamp(1), from_peer(7, 0, Body::ReadReply { round: 1, high: Slot(5) })).unwrap();
+    r.handle(Timestamp(1), from_peer(7, 0, Body::ReadReply { incarnation: 1, round: 1, high: Slot(5) }))
+        .unwrap();
     assert_eq!(r.metrics().messages_rejected, rejected + 1);
 }
 
-/// The round a read asked `peer` with, from what `r` sent.
-fn read_round_sent(r: &mut Replica, peer: u32) -> u64 {
+/// The incarnation and round a read asked `peer` with, from what `r` sent.
+fn read_round_sent(r: &mut Replica, peer: u32) -> (u64, u64) {
     let mut out = Vec::new();
     r.poll_actions(&mut out);
     out.iter()
         .find_map(|a| match a {
             Action::Send(o) if o.to == NodeId(peer) => {
                 match Message::decode(&o.bytes, &r_wire()).map(|m| m.body) {
-                    Ok(Body::ReadQuery { round }) => Some(round),
+                    Ok(Body::ReadQuery { incarnation, round }) => Some((incarnation, round)),
                     _ => None,
                 }
             }
@@ -864,9 +865,14 @@ fn an_answer_to_a_previous_incarnations_read_does_not_count() {
         .unwrap();
     persist_all(&mut r, &mut Vec::new());
     let read = r.read_barrier(Timestamp(3)).unwrap();
-    assert_ne!(read_round_sent(&mut r, 1), old, "round numbers differ across incarnations");
+    let new = read_round_sent(&mut r, 1);
+    assert_eq!((new.0, new.1), (old.0 + 1, old.1), "the round number repeats; the incarnation does not");
     // A reply to the old round, delivered late, is not an answer to this one.
-    r.handle(Timestamp(3), from_peer(1, 0, Body::ReadReply { round: old, high: Slot(1) })).unwrap();
+    r.handle(
+        Timestamp(3),
+        from_peer(1, 0, Body::ReadReply { incarnation: old.0, round: old.1, high: Slot(1) }),
+    )
+    .unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
     assert!(!out.iter().any(|a| matches!(a, Action::ReadReady { id, .. } if *id == read)), "{out:?}");

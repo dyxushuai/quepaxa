@@ -276,7 +276,7 @@ impl Replica {
             hedged: VecDeque::new(),
             forwarded: BTreeMap::new(),
             outstanding: BTreeMap::new(),
-            reads: reads::Reads::new(last_incarnation + 1),
+            reads: reads::Reads::default(),
             commit_latency: None,
             next_batch: 0,
             next_proposal: 0,

@@ -34,20 +34,12 @@ use crate::types::{NodeId, ProposalId, Slot, Timestamp};
 use super::Replica;
 
 /// Reads waiting for a round, and the round in flight.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 #[cfg_attr(feature = "model", derive(Hash))]
 pub(super) struct Reads {
     queued: Vec<ProposalId>,
     round: Option<Round>,
     next_round: u64,
-}
-
-impl Reads {
-    /// Rounds are numbered from the incarnation up, so a late answer to a round asked
-    /// before a restart never matches one asked after it.
-    pub(super) fn new(incarnation: u64) -> Self {
-        Self { queued: Vec::new(), round: None, next_round: incarnation << 32 }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -81,12 +73,17 @@ impl Replica {
             .max(self.floor)
     }
 
-    pub(super) fn on_read_query(&mut self, from: NodeId, round: u64) {
+    pub(super) fn on_read_query(&mut self, from: NodeId, incarnation: u64, round: u64) {
         let high = Slot(self.high_water());
-        self.send(from, Body::ReadReply { round, high });
+        self.send(from, Body::ReadReply { incarnation, round, high });
     }
 
-    pub(super) fn on_read_reply(&mut self, from: NodeId, round: u64, high: Slot) {
+    /// Round numbers restart with each incarnation: a late answer to a round asked before
+    /// a restart must not count toward one asked after it.
+    pub(super) fn on_read_reply(&mut self, from: NodeId, incarnation: u64, round: u64, high: Slot) {
+        if incarnation != self.incarnation {
+            return;
+        }
         if let Some(r) = self.reads.round.as_mut().filter(|r| r.number == round) {
             let mark = r.answers.entry(from).or_default();
             *mark = (*mark).max(high.0);
@@ -125,7 +122,7 @@ impl Replica {
 
     fn ask(&mut self, number: u64, members: impl IntoIterator<Item = NodeId>) {
         for m in members {
-            self.send(m, Body::ReadQuery { round: number });
+            self.send(m, Body::ReadQuery { incarnation: self.incarnation, round: number });
         }
     }
 

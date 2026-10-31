@@ -151,8 +151,10 @@ impl Replica {
                     }
                     Body::Forward { batch } => self.on_forward(&batch),
                     Body::Compacted { through } => self.on_compacted(from, through),
-                    Body::ReadQuery { round } => self.on_read_query(from, round),
-                    Body::ReadReply { round, high } => self.on_read_reply(from, round, high),
+                    Body::ReadQuery { incarnation, round } => self.on_read_query(from, incarnation, round),
+                    Body::ReadReply { incarnation, round, high } => {
+                        self.on_read_reply(from, incarnation, round, high)
+                    }
                 }
             }
             // Before driving: a retirement barrier it submits is proposed in this round.
