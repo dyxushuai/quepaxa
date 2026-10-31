@@ -3,11 +3,12 @@
 # through etcd's v3 KV API, in containers on this host. See README.md.
 #
 # Usage: run.sh [--smoke] [scenario...]
-#   scenarios: steady crash partition slow-disk far-leader (default: all)
+#   scenarios: steady mixed crash partition slow-disk far-leader (default: all)
 #   --smoke    short runs, to check the harness works
 # Environment: RATE (fault-scenario load, default 5000/s), NODE_CPUS ("0-2 3-5 6-8"),
 #   GEN_CPUS (9-12), SLOW_IOPS (write IOPS cap on the slow leader, default 50),
-#   FAR_MS (one-way delay added to the far leader, default 50).
+#   FAR_MS (one-way delay added to the far leader, default 50), MIXED_RATE (read-heavy load,
+#   default 40000/s).
 # Needs Docker (with cgroup v2 for slow-disk) and jq. Results go to target/bench-etcd/<time>/.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -18,11 +19,11 @@ scenarios=()
 for a in "$@"; do
   case $a in
     --smoke) smoke=1 ;;
-    steady | crash | partition | slow-disk | far-leader) scenarios+=("$a") ;;
+    steady | mixed | crash | partition | slow-disk | far-leader) scenarios+=("$a") ;;
     *) echo "unknown argument $a" >&2; exit 2 ;;
   esac
 done
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(steady crash partition slow-disk far-leader)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(steady mixed crash partition slow-disk far-leader)
 
 if [ $smoke = 1 ]; then
   secs=8 fault=3 heal=6 total=2000 steady_secs=2
@@ -34,6 +35,7 @@ read -r -a node_cpus <<< "${NODE_CPUS:-0-2 3-5 6-8}"
 gen_cpus=${GEN_CPUS:-9-12}
 slow_iops=${SLOW_IOPS:-50}
 far_ms=${FAR_MS:-50}
+mixed_rate=${MIXED_RATE:-40000}
 
 image=qpx-bench:local
 etcd_image=gcr.io/etcd-development/etcd:v3.7.2@sha256:7c6c239825d00e3f6328a69caafd54be92063acf0c2ce78b8394699f52b75dc3
@@ -198,6 +200,14 @@ faulted() {
   head -2 "$out.txt" | sed 's/^/    /'
 }
 
+# A read-heavy open-loop load (90% linearizable ranges, 10% puts) on all three members.
+mixed() {
+  docker run --rm --name qpx-gen --network "$net" --cpuset-cpus "$gen_cpus" "$image" \
+    kv-bench --protocol etcd --targets "${endpoints}" --rate "$mixed_rate" --gets 0.9 \
+    --secs "$secs" --conns 16 > "$results/$1-mixed.txt"
+  head -1 "$results/$1-mixed.txt" | sed 's/^/    /'
+}
+
 # Steady state with etcd's benchmark tool, against all three members.
 steady() {
   local out="$results/$1-steady.txt" bench=(docker run --rm --network "$net" --cpuset-cpus "$gen_cpus" "$image"
@@ -216,8 +226,8 @@ steady() {
 
 for system in quepaxa etcd etcd-tuned; do
   for scenario in "${scenarios[@]}"; do
-    # Timeouts do not matter in steady state; the tuned etcd runs only the faults.
-    [ "$system" = etcd-tuned ] && [ "$scenario" = steady ] && continue
+    # Timeouts do not matter without faults; the tuned etcd runs only the faults.
+    [ "$system" = etcd-tuned ] && { [ "$scenario" = steady ] || [ "$scenario" = mixed ]; } && continue
     echo "$system: $scenario"
     case $system in
       quepaxa) start_quepaxa ;;
@@ -225,7 +235,11 @@ for system in quepaxa etcd etcd-tuned; do
       etcd-tuned) start_etcd 10 100 ;;
     esac
     ready "$system"
-    if [ "$scenario" = steady ]; then steady "$system"; else faulted "$system" "$scenario"; fi
+    case $scenario in
+      steady) steady "$system" ;;
+      mixed) mixed "$system" ;;
+      *) faulted "$system" "$scenario" ;;
+    esac
     stop
   done
 done

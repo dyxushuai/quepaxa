@@ -154,14 +154,14 @@ impl Replica {
                 Vec::new()
             });
             items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
-            let mine: Vec<(ProposalId, Kind)> = items
+            let mine: Vec<ProposalId> = items
                 .iter()
                 .filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)
-                .map(|i| (i.entry.id, i.kind))
+                .map(|i| i.entry.id)
                 .collect();
             let entries = items.into_iter().filter(|i| i.kind == Kind::App).map(|i| i.entry).collect();
             self.actions.push(Action::Commit { slot, entries });
-            for (id, kind) in mine {
+            for id in mine {
                 self.forwarded.remove(&id);
                 if self.retire_barrier.is_some_and(|(_, b)| b == id) {
                     self.outstanding.remove(&id);
@@ -174,11 +174,7 @@ impl Replica {
                     if !hedged {
                         self.observe_latency(self.now.0.saturating_sub(at.0));
                     }
-                    self.actions.push(if kind == Kind::Barrier {
-                        Action::ReadReady { id, slot }
-                    } else {
-                        Action::Committed { id, slot }
-                    });
+                    self.actions.push(Action::Committed { id, slot });
                 }
             }
             if key.origin == self.me && key.incarnation == self.incarnation {

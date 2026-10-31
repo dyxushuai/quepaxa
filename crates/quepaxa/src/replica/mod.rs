@@ -9,6 +9,7 @@ mod gate;
 mod log;
 mod messages;
 mod proposing;
+mod reads;
 mod retire;
 mod snapshot;
 
@@ -121,6 +122,8 @@ pub struct Replica {
     /// Own proposals awaiting commit: when they were made, what they are, and whether they
     /// were hedged.
     outstanding: BTreeMap<ProposalId, (Timestamp, Kind, bool)>,
+    /// Linearizable reads in progress (`reads.rs`).
+    reads: reads::Reads,
     /// Smoothed propose-to-commit latency of own proposals that were not hedged, in
     /// nanoseconds.
     commit_latency: Option<u64>,
@@ -146,7 +149,7 @@ pub struct Replica {
     retire_probe: Option<Timestamp>,
     /// The epoch `Action::Retired` was reported for.
     retired: Option<u64>,
-    /// A read barrier of this replica's own, confirming retirement from this epoch once
+    /// A barrier entry of this replica's own (through the log), confirming retirement from this epoch once
     /// committed (a later change may have added it back); never reported to the caller.
     retire_barrier: Option<(u64, ProposalId)>,
     /// That barrier committed; retirement is decided once everything learned with it is
@@ -273,6 +276,7 @@ impl Replica {
             hedged: VecDeque::new(),
             forwarded: BTreeMap::new(),
             outstanding: BTreeMap::new(),
+            reads: reads::Reads::default(),
             commit_latency: None,
             next_batch: 0,
             next_proposal: 0,
@@ -349,14 +353,19 @@ impl Replica {
     /// The returned id later appears in exactly one of [`Action::ReadReady`] or
     /// [`Action::Dropped`]: once the application has applied every commit up to the
     /// reported slot, reading its state reflects every write that completed before this
-    /// call, on any replica. See [`guide::reads`](crate::guide::reads).
+    /// call, on any replica. The read asks a majority for a bound and waits to apply up to
+    /// it; it takes no slot and writes nothing. See [`guide::reads`](crate::guide::reads).
     ///
     /// # Errors
     ///
-    /// As [`Replica::propose`] ([`Error::Busy`], [`Error::Fenced`], [`Error::NotDrained`]);
-    /// a barrier always fits a batch, so never [`Error::PayloadTooLarge`].
+    /// [`Error::Busy`] (reads count against [`Config::max_outstanding_proposals`] with
+    /// proposals), [`Error::Fenced`], [`Error::NotDrained`].
     pub fn read_barrier(&mut self, now: Timestamp) -> Result<ProposalId, Error> {
-        self.enqueue(now, Bytes::new(), Kind::Barrier)
+        self.begin(now)?;
+        let id = self.submit_read()?;
+        self.pump();
+        self.flush();
+        Ok(id)
     }
 
     /// Proposes new membership: `members`, with `leader_order` as the preferred leaders
@@ -418,7 +427,7 @@ impl Replica {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if self.outstanding.len() >= self.cfg.max_outstanding_proposals as usize {
+        if self.outstanding.len() + self.reads.len() >= self.cfg.max_outstanding_proposals as usize {
             return Err(Error::Busy);
         }
         let id = ProposalId(self.next_proposal);
@@ -548,6 +557,7 @@ impl Replica {
         for id in mem::take(&mut self.outstanding).into_keys().filter(|id| Some(*id) != internal) {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }
+        self.drop_reads();
         self.proposers.clear();
         self.pending.clear();
         self.hedged.clear();

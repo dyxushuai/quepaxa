@@ -701,3 +701,179 @@ fn a_hedged_entry_does_not_stretch_the_hedge_delay() {
     // Its latency includes the hedge delay itself; learning from it would feed back.
     assert_eq!(r.hedge_delay(), delta);
 }
+
+fn from_peer(from: u32, to: u32, body: Body) -> Input {
+    let env = Envelope {
+        cluster_id: [3; 16],
+        config_epoch: 0,
+        from: NodeId(from),
+        to: NodeId(to),
+        commit_index: 0,
+    };
+    Input::Message(Message { env, body }.encode())
+}
+
+/// The high-water mark `r` answers a read query with, sent at once (not gated on a persist).
+fn mark(r: &mut Replica) -> u64 {
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    out.clear();
+    r.handle(r.now, from_peer(1, 0, Body::ReadQuery { incarnation: 4, round: 9 })).unwrap();
+    r.poll_actions(&mut out);
+    let marks: Vec<u64> = out
+        .iter()
+        .filter_map(|a| match a {
+            Action::Send(o) => match Message::decode(&o.bytes, &r_wire()).map(|m| m.body) {
+                Ok(Body::ReadReply { incarnation: 4, round: 9, high }) => Some(high.0),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks.len(), 1, "one ungated reply: {out:?}");
+    marks[0]
+}
+
+/// Persists every pending write and returns all records written so far.
+fn persist_all(r: &mut Replica, records: &mut Vec<Bytes>) {
+    let mut out = Vec::new();
+    loop {
+        r.poll_actions(&mut out);
+        let persists: Vec<_> = out
+            .drain(..)
+            .filter_map(|a| match a {
+                Action::Persist { id, records: rs, replace, .. } => Some((id, rs, replace)),
+                _ => None,
+            })
+            .collect();
+        if persists.is_empty() {
+            return;
+        }
+        for (id, rs, replace) in persists {
+            if replace {
+                records.clear();
+            }
+            records.extend(rs);
+            r.handle(r.now, Input::Persisted(id)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn a_recorded_slot_raises_the_mark_before_its_register_is_durable() {
+    let mut r = replica();
+    assert_eq!(mark(&mut r), 0);
+    r.handle(
+        Timestamp(1),
+        from_peer(1, 0, Body::RecordRequest { slot: Slot(4), step: 4, proposal: proposal(1, 1, 0) }),
+    )
+    .unwrap();
+    // The register write is still pending; the answer does not wait for it.
+    assert_eq!(mark(&mut r), 5);
+}
+
+#[test]
+fn the_mark_survives_register_removal_compaction_and_restart() {
+    let mut r = replica();
+    let mut records = Vec::new();
+    persist_all(&mut r, &mut records);
+    for slot in 0..3 {
+        r.handle(
+            Timestamp(1),
+            from_peer(
+                1,
+                0,
+                Body::RecordRequest { slot: Slot(slot), step: 4, proposal: proposal(1, 1, slot) },
+            ),
+        )
+        .unwrap();
+        persist_all(&mut r, &mut records);
+        r.handle(
+            Timestamp(1),
+            from_peer(1, 0, Body::Decided { slot: Slot(slot), proposal: proposal(1, 1, slot) }),
+        )
+        .unwrap();
+        persist_all(&mut r, &mut records);
+    }
+    assert!(r.registers.is_empty(), "registers go once their decisions are durable");
+    assert_eq!(mark(&mut r), 3);
+    // Restarted from what was durable.
+    let cfg = Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    let mut restarted = Replica::new(cfg, records.clone(), Timestamp(2)).unwrap();
+    // Nothing is sent before the new incarnation is durable.
+    persist_all(&mut restarted, &mut Vec::new());
+    assert_eq!(mark(&mut restarted), 3);
+    // Compacted: the log below the floor is gone, the mark is not.
+    let members = [NodeId(0), NodeId(1), NodeId(2)];
+    let state = CoreState {
+        next: 10,
+        leaders: members.to_vec(),
+        schedule: Schedule::new(&members),
+        dedup: Dedup::default(),
+    }
+    .encode();
+    assert_eq!(r.install_snapshot(Timestamp(3), Slot(9), state), Ok(true));
+    persist_all(&mut r, &mut records);
+    assert!(r.log.is_empty());
+    assert_eq!(mark(&mut r), 10);
+}
+
+#[test]
+fn anyone_may_ask_for_the_mark_but_only_members_answer_reads() {
+    let mut r = replica();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    out.clear();
+    r.handle(Timestamp(1), from_peer(7, 0, Body::ReadQuery { incarnation: 1, round: 1 })).unwrap();
+    r.poll_actions(&mut out);
+    assert!(matches!(&out[..], [Action::Send(o)] if o.to == NodeId(7)), "{out:?}");
+    let rejected = r.metrics().messages_rejected;
+    r.handle(Timestamp(1), from_peer(7, 0, Body::ReadReply { incarnation: 1, round: 1, high: Slot(5) }))
+        .unwrap();
+    assert_eq!(r.metrics().messages_rejected, rejected + 1);
+}
+
+/// The incarnation and round a read asked `peer` with, from what `r` sent.
+fn read_round_sent(r: &mut Replica, peer: u32) -> (u64, u64) {
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    out.iter()
+        .find_map(|a| match a {
+            Action::Send(o) if o.to == NodeId(peer) => {
+                match Message::decode(&o.bytes, &r_wire()).map(|m| m.body) {
+                    Ok(Body::ReadQuery { incarnation, round }) => Some((incarnation, round)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .expect("a read query")
+}
+
+#[test]
+fn an_answer_to_a_previous_incarnations_read_does_not_count() {
+    let cfg = || Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    let mut records = Vec::new();
+    let mut r = Replica::new(cfg(), [], Timestamp(0)).unwrap();
+    persist_all(&mut r, &mut records);
+    r.read_barrier(Timestamp(1)).unwrap();
+    let old = read_round_sent(&mut r, 1);
+    // Restarted, with slot 0 decided since: a fresh read needs a majority's answers.
+    let mut r = Replica::new(cfg(), records.clone(), Timestamp(2)).unwrap();
+    persist_all(&mut r, &mut Vec::new());
+    r.handle(Timestamp(2), from_peer(1, 0, Body::Decided { slot: Slot(0), proposal: proposal(1, 1, 0) }))
+        .unwrap();
+    persist_all(&mut r, &mut Vec::new());
+    let read = r.read_barrier(Timestamp(3)).unwrap();
+    let new = read_round_sent(&mut r, 1);
+    assert_eq!((new.0, new.1), (old.0 + 1, old.1), "the round number repeats; the incarnation does not");
+    // A reply to the old round, delivered late, is not an answer to this one.
+    r.handle(
+        Timestamp(3),
+        from_peer(1, 0, Body::ReadReply { incarnation: old.0, round: old.1, high: Slot(1) }),
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    assert!(!out.iter().any(|a| matches!(a, Action::ReadReady { id, .. } if *id == read)), "{out:?}");
+}

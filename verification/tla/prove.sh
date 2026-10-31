@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks the TLAPS proofs: QuePaxa.tla is safe (QuePaxaSafety.tla, QuePaxaRecordStep.tla,
 # QuePaxaInductive.tla), and so are Membership.tla's window rule and retirement
-# (MembershipProof.tla, MembershipRecover.tla). Uses tlapm 1.6, fetched (pinned, checksum
+# (MembershipProof.tla, MembershipRecover.tla) and Reads.tla's reads with fixed membership
+# (ReadsProof.tla). Uses tlapm 1.6, fetched (pinned, checksum
 # verified) into target/tlapm-<digest>. On Linux x86_64 it runs directly; elsewhere, in a
 # linux/amd64 ubuntu:24.04 container (needs Docker). Arguments go to tlapm, e.g. --cleanfp
 # to re-prove every obligation instead of reusing proved ones.
@@ -35,14 +36,15 @@ fi
 
 mkdir -p "$work"
 modules=(QuePaxaSafety.tla QuePaxaRecordStep.tla QuePaxaInductive.tla MembershipProof.tla
-  MembershipRecover.tla)
+  MembershipRecover.tla ReadsProof.tla)
 # A module that states a theorem and is not listed here would never be checked.
 for f in "$here"/*.tla; do
   if grep -Eq '^[[:space:]]*(THEOREM|LEMMA|PROPOSITION|COROLLARY)\b' "$f" && [[ " ${modules[*]} " != *" $(basename "$f") "* ]]; then
     echo "prove.sh: $(basename "$f") states a theorem but is not in modules"; exit 1
   fi
 done
-cp "$here"/QuePaxa.tla "$here"/QuePaxaProof.tla "$here"/Membership.tla "${modules[@]/#/$here/}" "$work/"
+cp "$here"/QuePaxa.tla "$here"/QuePaxaProof.tla "$here"/Membership.tla "$here"/Reads.tla \
+  "${modules[@]/#/$here/}" "$work/"
 if [[ $(uname -sm) == "Linux x86_64" ]]; then
   cd "$work" && exec "$tools/bin/tlapm" "$@" "${modules[@]}"
 fi

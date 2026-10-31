@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/reads.rs b/crates/quepaxa/src/replica/reads.rs
+--- a/crates/quepaxa/src/replica/reads.rs
++++ b/crates/quepaxa/src/replica/reads.rs
+@@ -69,8 +69,6 @@
+     pub(super) fn high_water(&self) -> u64 {
+         let past = |s: Option<&Slot>| s.map_or(0, |s| s.0.saturating_add(1));
+         past(self.registers.last_key_value().map(|(s, _)| s))
+-            .max(past(self.log.last_key_value().map(|(s, _)| s)))
+-            .max(self.floor)
+     }
+ 
+     pub(super) fn on_read_query(&mut self, from: NodeId, incarnation: u64, round: u64) {

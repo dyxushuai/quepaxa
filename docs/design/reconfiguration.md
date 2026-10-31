@@ -24,7 +24,7 @@ members) are discussed but deferred.
 
 ### A. Epoch change through the log, effective a window later (recommended)
 
-A reconfiguration is a control entry in a batch (like a read barrier), carrying the new
+A reconfiguration is a control entry in a batch (like the retirement barrier), carrying the new
 epoch number, members and leader order. If it is decided in slot `s`, slots `>= s + 64`
 belong to the new epoch: their recorders are the new members, quorums are majorities of
 the new members, and their messages carry the new `config_epoch`. Slots `< s + 64` finish
@@ -100,7 +100,7 @@ restriction buys nothing.
     that have not reported `commit_index >= from`, on the retransmit timer, and records
     their progress from `Entries` replies.
   - Once a majority report `>= from`, it must still not retire on a stale view: a later
-    change may already have added it back. It submits a read barrier of its own (never
+    change may already have added it back. It submits a barrier entry of its own (never
     reported to the caller) and reports `Retired` when that commits, if it is still
     removed from the same epoch; every change decided before the barrier is applied by
     then. Only a change decided after the barrier can still add it back, which the

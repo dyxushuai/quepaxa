@@ -21,12 +21,27 @@ for f in "$dir"/*-steady.txt; do
     }' "$f"
 done
 echo
+echo "### Read-heavy (open loop, 90% linearizable ranges and 10% puts, all members)"
+echo
+echo "| System | Offered | Completed/s | p50 | p99 | max | Errors | Unanswered |"
+echo "|---|---|---|---|---|---|---|---|"
+for f in "$dir"/*-mixed.txt; do
+  [ -e "$f" ] || continue
+  awk -v sys="$(basename "$f" -mixed.txt)" '
+    function field(s, k,   i, n, kv) { n = split(s, kv, " "); for (i = 1; i <= n; i++) if (index(kv[i], k "=") == 1) return substr(kv[i], length(k) + 2); return "" }
+    function ms(v) { sub(/us$/, "", v); return sprintf("%.1f ms", v / 1000) }
+    NR == 1 {
+      printf "| %s | %s | %s | %s | %s | %s | %s | %s |\n", sys, field($0, "offered"), field($0, "throughput"),
+        ms(field($0, "p50")), ms(field($0, "p99")), ms(field($0, "max")), field($0, "errors"), field($0, "unanswered")
+    }' "$f"
+done
+echo
 echo "### Faults (open-loop load on the followers; latency from each request's due time)"
 echo
 echo "| System | Scenario | p50 | p99 | max | Errors | Unanswered | Longest gap | Degraded |"
 echo "|---|---|---|---|---|---|---|---|---|"
 for f in "$dir"/*.txt; do
-  case $f in *-steady.txt | */env.txt) continue ;; esac
+  case $f in *-steady.txt | *-mixed.txt | */env.txt) continue ;; esac
   name=$(basename "$f" .txt)
   system=${name%-*}
   case $name in *-slow-disk) system=${name%-slow-disk}; scenario=slow-disk ;;

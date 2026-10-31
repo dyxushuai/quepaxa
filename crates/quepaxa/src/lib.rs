@@ -71,7 +71,7 @@
 //! - **Crash recovery:** replies never leave before the state they report is durable, and a
 //!   restarted replica never contradicts what it said before — given storage that keeps
 //!   the promises in [`guide::durability`].
-//! - **Linearizable reads** through [read barriers](guide::reads).
+//! - **Linearizable reads** on any replica, without a log slot ([quorum reads](guide::reads)).
 //! - **Liveness** whenever a majority of the members can communicate, without depending on
 //!   timeouts or a stable leader.
 //!

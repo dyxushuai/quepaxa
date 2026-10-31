@@ -49,7 +49,7 @@ takes effect without traffic.
   decided by the old members, and if a majority of them leave before the new members know
   those slots durably, nobody can recover them and the cluster stalls. So a removed
   replica asks the new members for their progress, and once a majority of them durably
-  know every slot before `from`, takes a read barrier of its own; it reports `Retired`
+  know every slot before `from`, proposes a barrier entry of its own through the log; it reports `Retired`
   when the barrier commits and no change decided before it has added the replica back.
   Only a change decided after that can still add it back: whoever proposes one keeps the
   replica running (or restarts it). A replica that was down for its whole removal learns

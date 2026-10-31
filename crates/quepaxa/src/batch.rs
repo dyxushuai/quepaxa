@@ -30,7 +30,7 @@ pub struct Entry {
 pub(crate) enum Kind {
     /// Application data, handed to the application in `Commit`.
     App,
-    /// A read barrier (empty payload) that only marks a log position.
+    /// A barrier entry (empty payload) that only marks a log position; retirement uses it.
     Barrier,
     /// A membership change (payload: `crate::schedule::encode_members`).
     Reconfigure,

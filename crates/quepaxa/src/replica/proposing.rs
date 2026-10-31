@@ -272,11 +272,13 @@ impl Replica {
             .chain(hedge)
             .chain(catch_up)
             .chain(self.retire_probe)
+            .chain(self.reads.resend_at())
             .chain(self.startup_probe)
             .min()
     }
 
     pub(super) fn fire_timers(&mut self) {
+        self.resend_reads();
         let now = self.now;
         if self.startup_probe.is_some_and(|t| t <= now) {
             self.probe_peers();

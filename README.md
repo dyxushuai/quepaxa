@@ -114,7 +114,7 @@ readable in [`crates/quepaxa/docs`](https://github.com/dyxushuai/quepaxa/tree/ma
 | [Driving the replica](https://docs.rs/quepaxa/latest/quepaxa/guide/driving/index.html) | The event loop, every action, persist-before-send, timers, threads |
 | [Durability and restart](https://docs.rs/quepaxa/latest/quepaxa/guide/durability/index.html) | What storage must promise, recovery, what breaks safety |
 | [Snapshots](https://docs.rs/quepaxa/latest/quepaxa/guide/snapshots/index.html) | Compacting the log, installing a peer's snapshot |
-| [Linearizable reads](https://docs.rs/quepaxa/latest/quepaxa/guide/reads/index.html) | Read barriers, and reading on any replica |
+| [Linearizable reads](https://docs.rs/quepaxa/latest/quepaxa/guide/reads/index.html) | Quorum reads on any replica, without a log slot |
 | [Membership and leaders](https://docs.rs/quepaxa/latest/quepaxa/guide/membership/index.html) | Adding and removing members, choosing the leader order |
 | [Tuning](https://docs.rs/quepaxa/latest/quepaxa/guide/tuning/index.html) | Every `Config` field, WAN settings, metrics |
 | [How the protocol works](https://docs.rs/quepaxa/latest/quepaxa/guide/protocol/index.html) | QuePaxa in a few pages, and a glossary |
@@ -139,7 +139,7 @@ The first three share a small in-memory driver,
 - **Crash recovery:** replies never leave before the state they report is durable
   ([ADR 0002](https://github.com/dyxushuai/quepaxa/blob/main/docs/adr/0002-structural-persist-before-send.md)); a restarted replica
   never contradicts what it said before.
-- **Linearizable reads** through read barriers.
+- **Linearizable reads** on any replica: one round to a majority, no log slot and no write.
 - **Membership changes through the log** (`Replica::propose_reconfiguration`), effective
   64 slots after they are decided, and a configurable leader order (`Config::leader_order`)
   to put the leader where a majority is closest

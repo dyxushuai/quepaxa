@@ -5,11 +5,16 @@ directly can return a value older than a write that already completed elsewhere.
 **read barrier** gives a read point that is linearizable — it reflects every write that
 completed before the read started, on any replica.
 
-[`Replica::read_barrier`](crate::Replica::read_barrier) proposes an empty marker through the
-log. When it is decided at slot `s`, the replica emits
-[`ReadReady { id, slot: s }`](crate::Action::ReadReady). Once the application has applied every
-commit up to and including `s` — `ReadReady` is emitted in log order, after the `Commit`
-of `s`, so with an in-order applier this is already true — read your state and answer.
+[`Replica::read_barrier`](crate::Replica::read_barrier) asks recorders for their
+*high-water mark*: the first slot past every slot they hold state for. A write completes
+only once its slot is decided, and a slot is decided only after a majority of its members
+recorded it durably, so the largest mark from a majority is past every completed write.
+The replica waits until it has applied every slot below that mark (catching up, or driving
+a slot nobody finishes), checks that a majority of every member set from there on answered
+(two, while a membership change is pending), and emits
+[`ReadReady { id, slot }`](crate::Action::ReadReady) with the last slot it applied.
+`ReadReady` follows the `Commit` of `slot`, so with an in-order applier your state is
+already there: read it and answer.
 
 ```
 use bytes::Bytes;
@@ -56,9 +61,19 @@ assert_eq!(answer.as_deref(), Some(&b"1"[..]));
 
 ## Costs and alternatives
 
-A barrier costs one slot of consensus (it is batched with concurrent writes and barriers,
-so under load many reads share one). Reads that may be stale — monitoring, caches — can
-read local state directly. The reference runtime offers both (`GET` and `STALE`).
+A read costs one round trip to a majority: no slot is decided and nothing is written.
+Reads requested while a round is out share the next one, so many reads share each round.
+While writes are in flight, the mark may point past slots still being decided, and the
+read waits for them: about one commit latency, never longer than the slowest write it
+must reflect. Reads that may be stale — monitoring, caches — can read local state directly.
+The reference runtime offers both (`GET` and `STALE`).
 
-A barrier also makes a lagging replica catch up: it cannot report the barrier before it
-has applied everything decided before it.
+A read also makes a lagging replica catch up: every answer carries the replier's decided
+prefix, and the replica cannot report the read before it has applied everything the
+majority has.
+
+The rule is modelled in `verification/tla/Reads.tla` (checked with TLC across membership
+changes) and proved for fixed membership in `ReadsProof.tla`. Reads count against
+[`Config::max_outstanding_proposals`](crate::Config::max_outstanding_proposals) together
+with proposals, and are reported [`Dropped`](crate::Action::Dropped) when the replica
+fences.
