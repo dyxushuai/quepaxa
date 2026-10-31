@@ -213,6 +213,15 @@ What the table says, and what it does not:
   the added delay on every commit for the whole fault; tuned etcd does worse (p99 1.1 s),
   with 50 ms each way close to its 100 ms election timeout. Which mechanism costs it the
   time was not traced.
+- QuePaxa's slow-disk row varies between runs: in six reruns its longest gap ranged from
+  26 to 296 ms and its max from 160 to 313 ms, with brief stalls at random times during and
+  after the fault. A trace of one showed the mechanism: while the throttled replica's
+  writeback slows the shared disk, the healthy leader's commits briefly exceed the hedge
+  delay (about 20 ms), the follower hedges every waiting entry at once (600 in 250 ms),
+  and those proposals contend with the leader's for the same slots, stretching a hiccup of
+  tens of ms to 150-300 ms. The code before the hedge-delay fix behaves alike (max 150-200 ms
+  in five reruns). Limiting how much a follower hedges at once would damp it, at the cost
+  of a slower rotation away from a dead leader; it is not done.
 - etcd's numbers vary between runs more than QuePaxa's: in an earlier run on the same
   host, default etcd's p99 after a crash was 110 ms instead of 16 ms and after a slow
   disk 1.5 s instead of 395 ms, depending on where the election and the backlog fell.
