@@ -113,6 +113,13 @@ impl Schedule {
         self.history.iter().any(|(_, order)| order.contains(&node))
     }
 
+    /// The member sets of every epoch in force at `slot` or later, with repeats where an
+    /// entry only rotates the leader.
+    pub fn member_sets_from(&self, slot: Slot) -> impl Iterator<Item = &[NodeId]> {
+        let first = self.history.partition_point(|(from, _)| *from <= slot.0).saturating_sub(1);
+        self.history[first..].iter().map(|(_, order)| order.as_slice())
+    }
+
     /// Everyone in any epoch still in the schedule, without duplicates.
     pub fn everyone(&self) -> Vec<NodeId> {
         let mut all: Vec<NodeId> = self.history.iter().flat_map(|(_, o)| o.iter().copied()).collect();

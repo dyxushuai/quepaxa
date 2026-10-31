@@ -152,11 +152,12 @@ impl Replica {
                     Body::Forward { batch } => self.on_forward(&batch),
                     Body::Compacted { through } => self.on_compacted(from, through),
                     Body::ReadQuery { round } => self.on_read_query(from, round),
-                    Body::ReadReply { .. } => {}
+                    Body::ReadReply { round, high } => self.on_read_reply(from, round, high),
                 }
             }
             // Before driving: a retirement barrier it submits is proposed in this round.
             self.check_retired();
+            self.check_reads();
             self.drive();
             if self.inbox.is_empty() {
                 break;

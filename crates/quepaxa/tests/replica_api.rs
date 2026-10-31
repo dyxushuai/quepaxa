@@ -218,7 +218,7 @@ fn garbage_network_input_is_counted_and_ignored() {
 }
 
 #[test]
-fn read_barrier_reports_a_slot_after_earlier_commits() {
+fn read_barrier_covers_earlier_commits_without_a_log_entry() {
     let mut r = Replica::new(config(&[0]), [], T0).unwrap();
     let mut disk = Vec::new();
     settle(&mut r, &mut disk);
@@ -233,12 +233,10 @@ fn read_barrier_reports_a_slot_after_earlier_commits() {
             _ => None,
         })
         .expect("write committed");
-    assert!(seen.iter().any(|a| matches!(a, Action::ReadReady { id, slot } if *id == read && *slot > ws)));
+    assert!(seen.iter().any(|a| matches!(a, Action::ReadReady { id, slot } if *id == read && *slot >= ws)));
     assert!(
-        !seen
-            .iter()
-            .any(|a| matches!(a, Action::Commit { entries, .. } if entries.iter().any(|e| e.id == read))),
-        "barriers never reach the application"
+        !seen.iter().any(|a| matches!(a, Action::Commit { slot, .. } if *slot > ws)),
+        "a read takes no slot"
     );
 }
 
