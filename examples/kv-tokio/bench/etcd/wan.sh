@@ -68,7 +68,7 @@ gen_ip() { echo "$prefix.$((20 + $1))"; }
 results=$root/target/bench-etcd/wan-$(date +%Y%m%d-%H%M%S)
 data=$root/target/bench-etcd/data
 mkdir -p "$results" "$data"
-# shellcheck source=lib.sh
+# shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$here/lib.sh"
 
 replicas=()

@@ -46,7 +46,7 @@ mkdir -p "$results" "$data"
 if [ "$(df -T "$data" | awk 'NR==2 {print $2}')" = tmpfs ]; then
   echo "warning: $data is on tmpfs; fsync is free there" >&2
 fi
-# shellcheck source=lib.sh
+# shellcheck source-path=SCRIPTDIR source=lib.sh
 source "$here/lib.sh"
 
 nodes=()
