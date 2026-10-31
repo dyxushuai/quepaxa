@@ -5,7 +5,7 @@
 //! ```text
 //! kv-bench --targets 127.0.0.1:7200,127.0.0.1:7201 --rate 20000 --secs 10 --conns 16 [--gets 0.5]
 //! kv-bench --protocol etcd --targets 127.0.0.1:2379 --rate 5000 --secs 60 \
-//!          [--timeline 100] [--fault-at 20] [--samples out.csv] [--start-at UNIX_MS]
+//!          [--timeline 100] [--fault-at 20] [--samples out.csv] [--start-at UNIX_MS] [--seed 1]
 //! ```
 //!
 //! Prints achieved throughput and latency percentiles. Results are measurements of one
@@ -17,7 +17,8 @@
 //! latency, `--fault-at SECS` the longest stretch without a completion after that time and
 //! how long throughput was down, and `--samples FILE` writes every request as
 //! `due_us,done_us,outcome`. `--start-at` starts the run at that wall-clock time (Unix
-//! milliseconds), so a fault injector on the same host can share its time zero.
+//! milliseconds), so a fault injector on the same host can share its time zero. `--seed`
+//! (default 1) seeds arrivals and keys, so generators started together do not send in step.
 
 mod etcd;
 #[path = "../../pb.rs"]
@@ -192,6 +193,7 @@ async fn main() {
     let (mut rate, mut secs, mut conns, mut gets) = (1000.0, 10.0, 8usize, 0.5);
     let (mut protocol, mut samples_path, mut timeline_ms, mut fault_at, mut start_at) =
         (String::from("lines"), None, None, None, None);
+    let mut seed = 1;
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let v = it.next().unwrap_or_default();
@@ -211,6 +213,7 @@ async fn main() {
                 let ms = v.parse().expect("--start-at: Unix milliseconds");
                 start_at = Some(std::time::UNIX_EPOCH + Duration::from_millis(ms));
             }
+            "--seed" => seed = v.parse().expect("--seed: integer"),
             other => panic!("unknown flag {other}"),
         }
     }
@@ -218,7 +221,7 @@ async fn main() {
     match protocol.as_str() {
         "lines" => assert!(start_at.is_none(), "--start-at needs --protocol etcd"),
         "etcd" => {
-            let load = etcd::Load { targets, rate, secs, conns, gets, start_at };
+            let load = etcd::Load { targets, rate, secs, conns, gets, start_at, seed };
             let (samples, end_us) = etcd::run(&load).await;
             report(&samples, end_us, rate, secs, timeline_ms, fault_at, samples_path.as_deref());
             return;
@@ -231,7 +234,7 @@ async fn main() {
     let tasks: Vec<_> = (0..conns)
         .map(|c| {
             let addr = targets[c % targets.len()];
-            tokio::spawn(connection(addr, rate / conns as f64, until, gets, c as u64 + 1, stats.clone()))
+            tokio::spawn(connection(addr, rate / conns as f64, until, gets, seed + c as u64, stats.clone()))
         })
         .collect();
     for t in tasks {

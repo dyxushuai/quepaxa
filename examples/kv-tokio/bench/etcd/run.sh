@@ -37,8 +37,6 @@ slow_iops=${SLOW_IOPS:-50}
 far_ms=${FAR_MS:-50}
 mixed_rate=${MIXED_RATE:-40000}
 
-image=qpx-bench:local
-etcd_image=gcr.io/etcd-development/etcd:v3.7.2@sha256:7c6c239825d00e3f6328a69caafd54be92063acf0c2ce78b8394699f52b75dc3
 net=qpx-bench
 prefix=172.31.250
 results=$root/target/bench-etcd/$(date +%Y%m%d-%H%M%S)
@@ -48,35 +46,23 @@ mkdir -p "$results" "$data"
 if [ "$(df -T "$data" | awk 'NR==2 {print $2}')" = tmpfs ]; then
   echo "warning: $data is on tmpfs; fsync is free there" >&2
 fi
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+source "$here/lib.sh"
 
 nodes=()
 cleanup() {
   docker rm -f "${nodes[@]}" qpx-gen >/dev/null 2>&1 || true
-  # Files written in the containers belong to root: remove them from a container.
-  docker run --rm -v "$data:/d" "$image" sh -c 'rm -rf /d/*' >/dev/null 2>&1 || true
+  wipe_data 2>/dev/null || true
 }
 trap 'cleanup; docker network rm "$net" >/dev/null 2>&1 || true' EXIT
 
-echo "building $image"
-docker build -q -t "$image" -f "$here/Dockerfile" "$root" >/dev/null
-docker pull -q "$etcd_image" >/dev/null
+build_images
 docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet "$prefix.0/24" "$net" >/dev/null
 
 {
-  echo "date: $(date -u +%FT%TZ)"
-  echo "commit: $(git -C "$root" rev-parse HEAD)"
-  echo "kernel: $(uname -sr)"
-  echo "cpu: $(nproc) x $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | xargs)"
-  echo "docker: $(docker version --format '{{.Server.Version}}')"
-  echo "image: $(docker image inspect --format '{{.Id}}' "$image")"
-  echo "etcd image: $etcd_image"
-  echo "data filesystem: $(df -T "$data" | awk 'NR==2 {print $1, $2}')"
+  describe_host
   echo "rate: $rate/s, run ${secs}s, fault at ${fault}s, heal at ${heal}s, smoke=$smoke"
   echo "cpus: nodes ${node_cpus[*]}, generator $gen_cpus"
-  # 200 appends of 512 bytes, each fsynced, in a container on the data disk.
-  t=$(docker run --rm -v "$data:/d" "$image" sh -c \
-    'start=$(date +%s%N); for i in $(seq 200); do dd if=/dev/zero of=/d/fsync bs=512 count=1 oflag=append conv=notrunc,fsync 2>/dev/null; done; echo $(( ($(date +%s%N) - start) / 200000 ))')
-  echo "fsync: ${t}us per 512-byte append (mean of 200)"
 } > "$results/env.txt"
 cat "$results/env.txt"
 
@@ -132,27 +118,7 @@ ready() {
 
 stop() {
   docker rm -f "${nodes[@]}" >/dev/null 2>&1 || true
-  docker run --rm -v "$data:/d" "$image" sh -c 'rm -rf /d/*' >/dev/null
-}
-
-# sidecar <command>: runs in the leader's network namespace, with the host's cgroups.
-sidecar() {
-  docker run --rm --privileged --network "container:$leader" -v /sys/fs/cgroup:/sys/fs/cgroup "$image" sh -c "$1"
-}
-
-cgroup_of() {
-  local id cg
-  id=$(docker inspect -f '{{.Id}}' "$1")
-  cg=$(find /sys/fs/cgroup -maxdepth 3 -type d \( -name "docker-$id.scope" -o -name "$id" \) | head -1)
-  # Without it the fault would silently not happen.
-  [ -n "$cg" ] || { echo "no cgroup v2 directory for $1" >&2; exit 1; }
-  echo "$cg"
-}
-
-# sleep_until <Unix ms>
-sleep_until() {
-  local ms=$(($1 - $(date +%s%3N)))
-  [ "$ms" -le 0 ] || sleep "$((ms / 1000)).$(printf %03d $((ms % 1000)))"
+  wipe_data
 }
 
 inject() {
@@ -160,24 +126,24 @@ inject() {
   case $1 in
     crash) docker kill -s KILL "$leader" >/dev/null ;;
     partition)
-      sidecar "for f in $f1 $f2; do iptables -A INPUT -s \$f -j DROP; iptables -A OUTPUT -d \$f -j DROP; done" ;;
+      sidecar "$leader" "for f in $f1 $f2; do iptables -A INPUT -s \$f -j DROP; iptables -A OUTPUT -d \$f -j DROP; done" ;;
     slow-disk)
       local cg
       cg=$(cgroup_of "$leader")
-      sidecar "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=$slow_iops' > $cg/io.max" ;;
-    far-leader) sidecar "tc qdisc add dev eth0 root netem delay ${far_ms}ms" ;;
+      sidecar "$leader" "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=$slow_iops' > $cg/io.max" ;;
+    far-leader) sidecar "$leader" "tc qdisc add dev eth0 root netem delay ${far_ms}ms" ;;
   esac
 }
 
 heal() {
   case $1 in
     crash) ;;
-    partition) sidecar "iptables -F" ;;
+    partition) sidecar "$leader" "iptables -F" ;;
     slow-disk)
       local cg
       cg=$(cgroup_of "$leader")
-      sidecar "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=max' > $cg/io.max" ;;
-    far-leader) sidecar "tc qdisc del dev eth0 root" ;;
+      sidecar "$leader" "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=max' > $cg/io.max" ;;
+    far-leader) sidecar "$leader" "tc qdisc del dev eth0 root" ;;
   esac
 }
 
