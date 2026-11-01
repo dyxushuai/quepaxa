@@ -12,6 +12,7 @@ mod proposing;
 mod reads;
 mod retire;
 mod snapshot;
+mod watch;
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -119,6 +120,8 @@ pub struct Replica {
     hedged: VecDeque<Item>,
     /// Own entries handed to the leader, with when.
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
+    /// Whether this replica suspects the leader it hands entries to (`watch.rs`).
+    watch: watch::Watch,
     /// Own proposals awaiting commit: when they were made, what they are, and whether they
     /// were hedged.
     outstanding: BTreeMap<ProposalId, (Timestamp, Kind, bool)>,
@@ -275,6 +278,7 @@ impl Replica {
             pending: VecDeque::new(),
             hedged: VecDeque::new(),
             forwarded: BTreeMap::new(),
+            watch: watch::Watch::default(),
             outstanding: BTreeMap::new(),
             reads: reads::Reads::default(),
             commit_latency: None,
@@ -603,3 +607,5 @@ impl Replica {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod watch_tests;

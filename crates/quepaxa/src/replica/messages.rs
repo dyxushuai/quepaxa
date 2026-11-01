@@ -52,6 +52,7 @@ impl Replica {
             self.inbox.push_back((from, msg.body));
             return;
         }
+        self.heard_from(from);
         if msg.env.commit_index > self.peer_committed {
             self.peer_committed = msg.env.commit_index;
             self.ahead_peer = Some(from);

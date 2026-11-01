@@ -1,7 +1,8 @@
 //! Proposer side: batching, forwarding to the leader, hedging, and driving slots.
 //!
 //! A replica that does not lead forwards its entries to the leader and proposes them
-//! itself only if they are not committed within the hedge delay δ; commit-time dedup
+//! itself only if they are not committed within the hedge delay δ (after which it suspects
+//! the leader and proposes directly, `watch.rs`); commit-time dedup
 //! makes the occasional double inclusion harmless. A slot someone else started is driven
 //! by this replica after `(position + 1) · δ` without progress, so a crashed proposer
 //! never leaves a gap. δ adapts to four times the smoothed commit latency of entries that
@@ -111,7 +112,7 @@ impl Replica {
         if self.fenced {
             return;
         }
-        if !self.leads_now() {
+        if !self.proposes_directly() {
             self.forward_pending();
         }
         // Batches whose entries all committed elsewhere are dead weight.
@@ -154,11 +155,12 @@ impl Replica {
         self.metrics.forwarded += 1;
     }
 
-    /// A local batch lost its slot. The leader proposes it again in another slot; a follower
-    /// hands its entries back to the leader instead, since a follower's proposal loses to a
-    /// live leader's in slot after slot, and hedges them again only if the leader stays silent.
+    /// A local batch lost its slot. The leader, or a follower that suspects it (`watch.rs`),
+    /// proposes it again in another slot; any other follower hands its entries back to the
+    /// leader, since a follower's proposal loses to a live leader's in slot after slot, and
+    /// hedges them again only if the leader stays silent.
     pub(super) fn lost_slot(&mut self, seq: u64) {
-        if self.leads_now() {
+        if self.proposes_directly() {
             if let Some(b) = self.batches.get_mut(&seq) {
                 b.slot = None;
             }
@@ -176,7 +178,7 @@ impl Replica {
 
     /// Cuts the next batch: hedged entries always, pending ones only while leading.
     fn cut_batch(&mut self) -> Option<u64> {
-        let lead = self.leads_now();
+        let lead = self.proposes_directly();
         let mut entries = batch::Builder::new(self.cfg.max_batch_bytes as usize);
         loop {
             let queue = if !self.hedged.is_empty() {
@@ -299,6 +301,7 @@ impl Replica {
                 }
                 self.metrics.hedged += 1;
                 self.hedged.push_back(e);
+                self.suspect_leader();
             }
         }
         if self.peer_committed > self.committed + 1 && self.catch_up_due() {
