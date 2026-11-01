@@ -1,9 +1,10 @@
 //! Proposer side: batching, forwarding to the leader, hedging, and driving slots.
 //!
-//! A replica that does not lead forwards its entries to the leader and proposes them
-//! itself only if they are not committed within the hedge delay δ (after which it suspects
-//! the leader and proposes directly, `watch.rs`); commit-time dedup
-//! makes the occasional double inclusion harmless. A slot someone else started is driven
+//! A replica that does not lead forwards its entries to the leader. If they are not
+//! committed within the hedge delay δ (sooner if the leader is silent), it suspects the
+//! leader and hands them to the next member instead, or proposes them itself when that is
+//! this replica (`watch.rs`); commit-time dedup makes the occasional double inclusion
+//! harmless. A slot someone else started is driven
 //! by this replica after `(position + 1) · δ` without progress, so a crashed proposer
 //! never leaves a gap. δ adapts to four times the smoothed commit latency of entries that
 //! were not hedged, within `[hedge_min, hedge_max]`. None of these timers affects safety.
@@ -92,7 +93,8 @@ impl Replica {
         self.commit_latency.map_or(hi / 4, |l| l.saturating_mul(4)).clamp(lo, hi)
     }
 
-    /// A batch of entries the leader received from a follower.
+    /// A batch of entries a follower handed to this replica: as the leader, or as the deputy
+    /// of a leader that follower suspects (`watch.rs`), which proposes them itself.
     pub(super) fn on_forward(&mut self, bytes: &bytes::Bytes) {
         let Ok(entries) = batch::decode(bytes) else {
             self.metrics.messages_rejected += 1;
@@ -100,14 +102,15 @@ impl Replica {
         };
         let cap =
             self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
-        if !self.leads_now() || self.pending.len() + entries.len() > cap {
+        let queue = if self.leads_now() { &mut self.pending } else { &mut self.relayed };
+        if queue.len() + entries.len() > cap {
             return; // the origin hedges
         }
-        self.pending.extend(entries);
+        queue.extend(entries);
     }
 
-    /// Starts as many slots as the window allows, after handing entries to the leader if
-    /// this replica does not lead.
+    /// Starts as many slots as the window allows, after handing entries to the target if
+    /// this replica does not propose them itself.
     pub(super) fn drive(&mut self) {
         if self.fenced {
             return;
@@ -136,7 +139,8 @@ impl Replica {
         if self.pending.is_empty() {
             return;
         }
-        let leader = self.schedule.leader(Slot(self.committed));
+        let leader = self.target();
+        self.forwarded_now();
         let entries: Vec<Item> = self.pending.drain(..).collect();
         for i in
             entries.iter().filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)
@@ -176,13 +180,14 @@ impl Replica {
         }));
     }
 
-    /// Cuts the next batch: hedged entries always, pending ones only while leading.
+    /// Cuts the next batch: relayed entries always, own pending ones only when proposing them
+    /// directly.
     fn cut_batch(&mut self) -> Option<u64> {
         let lead = self.proposes_directly();
         let mut entries = batch::Builder::new(self.cfg.max_batch_bytes as usize);
         loop {
-            let queue = if !self.hedged.is_empty() {
-                &mut self.hedged
+            let queue = if !self.relayed.is_empty() {
+                &mut self.relayed
             } else if lead && !self.pending.is_empty() {
                 &mut self.pending
             } else {
@@ -249,21 +254,17 @@ impl Replica {
 
     /// Undecided slots in the window someone else drives, with when to take them over.
     fn stalled(&self) -> impl Iterator<Item = (Slot, Timestamp)> + '_ {
-        let delta = self.hedge_delay();
         let end = Slot(self.committed + self.window());
         self.seen
             .range(..end)
             .filter(|(s, _)| !self.log.contains_key(s) && !self.proposers.contains_key(s))
-            .map(move |(s, t)| {
-                let wait = (self.schedule.position(self.me, *s) + 1).saturating_mul(delta);
-                (*s, t.after(wait))
-            })
+            .map(|(s, t)| (*s, self.takeover_at(*s, *t)))
     }
 
     pub(super) fn earliest_timer(&self) -> Option<Timestamp> {
         let resend = self.proposers.values().map(|a| a.resend_at);
         let stall = self.stalled().map(|(_, at)| at);
-        let hedge = self.forwarded.values().map(|(_, at)| *at).min().map(|t| t.after(self.hedge_delay()));
+        let hedge = self.forwarded.values().map(|(_, at)| self.hedge_at(*at)).min();
         // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
         let behind = self.peer_committed > self.committed + 1
             && self.catch_up.or(self.ahead_peer.map(|p| (p, self.now))).is_some();
@@ -291,18 +292,8 @@ impl Replica {
             self.metrics.retransmits += 1;
             self.send_requests(slot, true);
         }
-        let delta = self.hedge_delay();
-        let late: Vec<_> =
-            self.forwarded.iter().filter(|(_, (_, at))| at.after(delta) <= now).map(|(id, _)| *id).collect();
-        for id in late {
-            if let Some((e, _)) = self.forwarded.remove(&id) {
-                if let Some(o) = self.outstanding.get_mut(&id) {
-                    o.2 = true;
-                }
-                self.metrics.hedged += 1;
-                self.hedged.push_back(e);
-                self.suspect_leader();
-            }
+        if self.forwarded.values().any(|(_, at)| self.hedge_at(*at) <= now) {
+            self.suspect_target();
         }
         if self.peer_committed > self.committed + 1 && self.catch_up_due() {
             // Prefer the most advanced peer; the previous target may be the one that failed.

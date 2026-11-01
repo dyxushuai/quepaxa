@@ -114,10 +114,12 @@ pub struct Replica {
     // Proposer side.
     proposers: BTreeMap<Slot, Active>,
     batches: BTreeMap<u64, LocalBatch>,
-    /// Entries to batch if this replica leads, else to forward to the leader.
+    /// Own entries to batch if this replica proposes them itself, else to forward to its
+    /// target (`watch.rs`).
     pending: VecDeque<Item>,
-    /// Own entries the leader did not commit in time; this replica proposes them itself.
-    hedged: VecDeque<Item>,
+    /// Entries a follower handed to this replica as the deputy of a leader it suspects;
+    /// this replica proposes them itself (`watch.rs`).
+    relayed: VecDeque<Item>,
     /// Own entries handed to the leader, with when.
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
     /// Whether this replica suspects the leader it hands entries to (`watch.rs`).
@@ -276,7 +278,7 @@ impl Replica {
             proposers: BTreeMap::new(),
             batches: BTreeMap::new(),
             pending: VecDeque::new(),
-            hedged: VecDeque::new(),
+            relayed: VecDeque::new(),
             forwarded: BTreeMap::new(),
             watch: watch::Watch::default(),
             outstanding: BTreeMap::new(),
@@ -564,7 +566,7 @@ impl Replica {
         self.drop_reads();
         self.proposers.clear();
         self.pending.clear();
-        self.hedged.clear();
+        self.relayed.clear();
         self.forwarded.clear();
         self.batches.clear();
         self.inbox.clear();
