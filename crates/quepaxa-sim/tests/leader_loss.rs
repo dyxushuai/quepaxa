@@ -1,13 +1,15 @@
 //! Losing the leader's region on a WAN: how long the other regions stop committing, and
 //! how long their backlog takes to drain. Five regions with the `wan_leaders` round trips;
-//! the leader (replica 0) sits in the region farthest from a majority and is killed.
+//! the leader (replica 0) sits in the region farthest from a majority, or the nearest, and
+//! is killed.
 //!
-//! `cargo test -p quepaxa-sim --test leader_loss -- --nocapture` prints the numbers.
+//! `cargo test --release -p quepaxa-sim --test leader_loss -- --nocapture` prints the
+//! numbers; `QPX_SIM_SEEDS` runs more seeds.
 //!
-//! Before the follower-side changes (seed 0, far leader, killed at 10 s): followers hedge
-//! forwarded entries from 11.1 s, one entry per batch, but nothing commits until the dead
-//! leader's in-flight slots are taken over at 12.4 s, 2δ after they were seen (δ about
-//! 1.3 s); the backlog then drains in single-entry slots (p99 about 8 s).
+//! Before followers suspected a silent leader (seed 0, far leader, killed at 10 s), they
+//! hedged forwarded entries one per batch from 11.1 s, but nothing committed until the dead
+//! leader's in-flight slots were taken over at 12.4 s, 2δ after they were seen (δ about
+//! 1.3 s), and the backlog drained slowly: a 2.6-4.6 s stall, p99 about 8 s.
 
 use quepaxa_sim::{Report, Sim, SimConfig};
 
@@ -19,8 +21,14 @@ const RTT_MS: [[u64; 5]; 5] = [
     [180, 110, 230, 0, 300],
     [120, 170, 190, 300, 0],
 ];
-const KILL_MS: u64 = 10_000;
-const RUN_MS: u64 = 25_000;
+const FAR: usize = 3;
+const NEAR: usize = 0;
+const KILL_MS: u64 = 6_000;
+const RUN_MS: u64 = 12_000;
+
+fn seeds() -> u64 {
+    std::env::var("QPX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(1)
+}
 
 /// One-way link delays with region `site` as replica 0 (the first leader).
 fn links(site: usize) -> Vec<Vec<u64>> {
@@ -29,7 +37,7 @@ fn links(site: usize) -> Vec<Vec<u64>> {
     order.iter().map(|&a| order.iter().map(|&b| RTT_MS[a][b] / 2).collect()).collect()
 }
 
-fn run(site: usize, seed: u64) -> Report {
+fn run(site: usize, seed: u64, kill: bool) -> Report {
     let cfg = SimConfig {
         drop: 0,
         dup: 0,
@@ -46,7 +54,7 @@ fn run(site: usize, seed: u64) -> Report {
         heal_budget_ms: 120_000,
         // Per mille per 1 ms tick: about 200 writes/s over the cluster.
         propose: 200,
-        kill: Some((0, KILL_MS)),
+        kill: kill.then_some((0, KILL_MS)),
         ..SimConfig::hostile(5, seed)
     };
     Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"))
@@ -54,8 +62,8 @@ fn run(site: usize, seed: u64) -> Report {
 
 /// What the replicas other than the killed one saw after the kill: the longest stretch
 /// without an acknowledged write at any of them, and the p99 commit latency of writes
-/// proposed from the kill to five seconds after it.
-fn after_kill(r: &Report) -> (u64, u64, usize) {
+/// proposed from the kill to four seconds after it.
+fn after_kill(r: &Report) -> (u64, u64) {
     let (kill, end) = (KILL_MS * 1_000, RUN_MS * 1_000);
     let mut gap = 0;
     for node in 1..5 {
@@ -71,34 +79,42 @@ fn after_kill(r: &Report) -> (u64, u64, usize) {
     let mut lat: Vec<u64> = r
         .commits
         .iter()
-        .filter(|c| c.0 != 0 && c.1 >= kill && c.1 < kill + 5_000_000)
+        .filter(|c| c.0 != 0 && c.1 >= kill && c.1 < kill + 4_000_000)
         .map(|c| c.2 - c.1)
         .collect();
+    assert!(!lat.is_empty(), "writes after the kill commit");
     lat.sort_unstable();
-    let p99 = lat.get((lat.len().saturating_sub(1)) * 99 / 100).copied().unwrap_or(0);
-    (gap / 1_000, p99 / 1_000, lat.len())
+    (gap / 1_000, lat[(lat.len() - 1) * 99 / 100] / 1_000)
 }
 
-#[test]
-fn a_lost_far_leader_stalls_the_other_regions() {
-    for seed in 0..3 {
-        let r = run(3, seed);
-        let (gap, p99, n) = after_kill(&r);
-        let hedged: u64 = r.metrics.iter().map(|m| m.hedged).sum();
-        let forwarded: u64 = r.metrics.iter().map(|m| m.forwarded).sum();
-        println!(
-            "far leader, seed {seed}: gap {gap} ms, p99 {p99} ms over {n} writes, hedged {hedged}, forwards {forwarded}"
-        );
-        assert!(n > 0, "writes after the kill commit");
+/// Writes resume within about two commit latencies (a far leader's is 400-600 ms here)
+/// and the backlog drains within a few more.
+fn recovers(site: usize, name: &str) {
+    for seed in 0..seeds() {
+        let (gap, p99) = after_kill(&run(site, seed, true));
+        println!("{name} leader killed, seed {seed}: gap {gap} ms, p99 {p99} ms");
+        assert!(gap < 1_500, "{name} leader, seed {seed}: writes stalled {gap} ms");
+        assert!(p99 < 2_500, "{name} leader, seed {seed}: p99 {p99} ms after the kill");
     }
 }
 
 #[test]
-fn a_lost_near_leader_stalls_them_less() {
-    for seed in 0..3 {
-        let r = run(0, seed);
-        let (gap, p99, n) = after_kill(&r);
-        println!("near leader, seed {seed}: gap {gap} ms, p99 {p99} ms over {n} writes");
-        assert!(n > 0, "writes after the kill commit");
+fn losing_a_far_leader_stalls_the_other_regions_briefly() {
+    recovers(FAR, "far");
+}
+
+#[test]
+fn losing_a_near_leader_stalls_the_other_regions_briefly() {
+    recovers(NEAR, "near");
+}
+
+#[test]
+fn a_healthy_far_leader_is_not_hedged_around() {
+    for seed in 0..seeds() {
+        let r = run(FAR, seed, false);
+        let hedged: u64 = r.metrics.iter().map(|m| m.hedged).sum();
+        let entries = r.commits.len() as u64;
+        println!("healthy far leader, seed {seed}: {hedged} of {entries} writes hedged");
+        assert!(hedged * 100 <= entries, "seed {seed}: {hedged} of {entries} writes hedged");
     }
 }

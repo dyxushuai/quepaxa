@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
+--- a/crates/quepaxa/src/replica/watch.rs
++++ b/crates/quepaxa/src/replica/watch.rs
+@@ -101,7 +101,7 @@ impl Replica {
+ 
+     /// Whether `node` has said nothing since `t`.
+     fn silent_since(&self, node: NodeId, t: Timestamp) -> bool {
+-        self.watch.heard.get(&node).is_none_or(|h| *h <= t)
++        self.watch.heard.get(&node).is_none_or(|h| *h <= t) || t.0 > 0
+     }
+ 
+     /// When an entry forwarded at `at` counts as late.

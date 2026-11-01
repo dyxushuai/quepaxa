@@ -16,3 +16,5 @@ proposer-uses-configured-members	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run 
 retire-without-the-new-majority	-	cargo nextest run -p quepaxa --lib caught_up_majority	retired with only one of three
 trace-phase0-adopts-the-first-reply	-	verification/tla/traces.sh	REJECTED
 retire-without-the-barrier	-	cargo nextest run -p quepaxa --test membership_api added_back_after	retired although it was added back
+suspect-forwards-to-the-leader	-	cargo nextest run --release -p quepaxa-sim --test leader_loss	writes stalled|p99 [0-9]+ ms after the kill
+silence-ignores-the-forward-time	-	cargo nextest run --release -p quepaxa-sim --test leader_loss	writes hedged
