@@ -124,6 +124,9 @@ pub struct Report {
     pub local_batches: usize,
     /// Propose-to-`Committed` latency of every acknowledged write, in microseconds.
     pub commit_latencies_us: Vec<u64>,
+    /// Every acknowledged write: the replica it was proposed at, and when it was proposed
+    /// and acknowledged (virtual microseconds).
+    pub commits: Vec<(usize, u64, u64)>,
     /// Membership changes applied (by the first replica to apply each).
     pub reconfigurations: u64,
 }

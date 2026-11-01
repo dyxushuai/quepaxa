@@ -86,6 +86,7 @@ impl Sim {
                 let n = &mut self.nodes[i];
                 if let Some(at) = n.proposed_at.remove(&id) {
                     self.report.commit_latencies_us.push((self.now - at) / 1_000);
+                    self.report.commits.push((i, at / 1_000, self.now / 1_000));
                 }
                 let payload = n.incarnation_payloads.get(&id).cloned();
                 n.outstanding.remove(&id);
