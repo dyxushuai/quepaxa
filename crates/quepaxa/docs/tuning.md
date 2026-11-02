@@ -25,6 +25,9 @@ into the next batch, so batches grow with load without any tuning. `max_in_fligh
 pipelines slots; more helps on high-latency links, at the cost of more contention when
 replicas compete. `max_outstanding_proposals` bounds memory: beyond it `propose` returns
 [`Busy`](crate::Error::Busy) and the client should back off rather than queue unboundedly.
+The default holds a few hundred milliseconds of a busy server's load; a server that bounds
+its own client queues can raise it to their size, so a brief CPU stall queues requests
+instead of failing them.
 
 On disk, latency is a few `fsync`s per commit and throughput depends on how many writes
 each `fsync` carries: write on a dedicated thread and acknowledge in groups
