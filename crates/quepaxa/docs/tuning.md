@@ -16,6 +16,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `max_outstanding_proposals` | 4096 | Local proposals not yet committed before [`Busy`](crate::Error::Busy). |
 | `retransmit_interval` | 50 ms | When an unanswered request is sent again. |
 | `hedge_min`, `hedge_max` | 1 ms, 1 s | Bounds of the adaptive hedge delay. |
+| `silent_leader_takeover` | off | Stop waiting for a leader that is silent for a commit latency; turn on across regions. |
 
 ## Throughput
 
@@ -36,8 +37,15 @@ The defaults assume round trips of a few milliseconds.
 - **`retransmit_interval`** must exceed the round trip to the farthest member of a
   majority, or every request is sent several times.
 - **`hedge_max`** must exceed the slowest client commit path (forward to the leader, one
-  round trip to a majority, decision back). Below it, followers stop waiting for the
-  leader and propose themselves, which costs throughput.
+  round trip to a majority, decision back). Below it, followers stop waiting for a live
+  leader and propose its entries themselves, which costs throughput.
+- **`silent_leader_takeover`**: turn it on. A follower that hears nothing at all from the
+  leader for about a commit latency after forwarding then hands its entries to the next
+  member of the leader order and takes over the leader's unfinished slots, instead of
+  waiting up to `hedge_max` (recovery from a lost leader region drops from several
+  seconds to about a second in the repository's five-region benchmark). Leave it off on a
+  fast network: there a leader stalled on its disk is silent longer than a commit takes,
+  and followers would work around it for nothing.
 - **`leader_order`**: put the leader where a majority is closest.
 
 The repository's simulated five-region benchmark (`docs/benchmarks.md`) shows each effect.

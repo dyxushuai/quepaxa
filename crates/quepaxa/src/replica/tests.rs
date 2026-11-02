@@ -9,7 +9,8 @@ fn replica() -> Replica {
 }
 
 pub(super) fn replica_as(me: u32) -> Replica {
-    let cfg = Config::new([3; 16], NodeId(me), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    let mut cfg = Config::new([3; 16], NodeId(me), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    cfg.silent_leader_takeover = true;
     let mut r = Replica::new(cfg, [], Timestamp(0)).unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);

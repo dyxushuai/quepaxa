@@ -27,6 +27,8 @@ fn suspecting() -> (Replica, ProposalId) {
     let mut r = replica_as(1);
     let mut out = Vec::new();
     r.commit_latency = Some(20 * MS);
+    r.watch.reply = Some(5 * MS);
+    r.cfg.hedge_max = 80 * MS;
     let id = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 1);
@@ -57,6 +59,8 @@ fn suspecting_hedges_every_entry_already_forwarded() {
     let mut r = replica_as(1);
     let mut out = Vec::new();
     r.commit_latency = Some(20 * MS);
+    r.watch.reply = Some(5 * MS);
+    r.cfg.hedge_max = 80 * MS;
     let first = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     // A second entry forwarded later: its own hedge deadline is further away.
@@ -121,6 +125,8 @@ fn hearing_from_the_leader_again_ends_the_suspicion() {
 /// from a forward to the leader's next message.
 fn with_latency(reply_ms: Option<u64>) -> Replica {
     let mut r = replica_as(1);
+    r.cfg.retransmit_interval = 10 * MS;
+    r.cfg.hedge_max = 80 * MS;
     r.commit_latency = Some(20 * MS);
     r.watch.reply = reply_ms.map(|ms| ms * MS);
     r
@@ -171,14 +177,19 @@ fn an_idle_spell_before_the_forward_is_not_silence() {
 }
 
 #[test]
-fn sigma_stays_between_the_hedge_floor_and_the_hedge_delay_and_covers_twice_r() {
+fn sigma_counts_only_below_the_hedge_delay_and_covers_twice_r() {
     let mut r = with_latency(Some(60));
-    assert_eq!(r.silence_wait(), Some(80 * MS), "2R past δ: capped at δ");
+    assert_eq!(r.silence_wait(), None, "2R past δ: silence says nothing δ does not");
+    r.cfg.hedge_max = 400 * MS;
     r.commit_latency = Some(40 * MS);
     assert_eq!(r.silence_wait(), Some(120 * MS), "a leader slow to answer (R = 60 ms) is given 2R");
-    r.commit_latency = Some(MS / 10);
+    r.commit_latency = Some(5 * MS);
     r.watch.reply = Some(MS / 100);
-    assert_eq!(r.silence_wait(), Some(r.cfg.hedge_min), "never below hedge_min");
+    assert_eq!(r.silence_wait(), Some(10 * MS), "never below the retransmit interval");
+    r.cfg.retransmit_interval = MS / 100;
+    r.cfg.hedge_max = 2 * MS;
+    r.commit_latency = Some(MS);
+    assert_eq!(r.silence_wait(), Some(r.cfg.hedge_min), "nor below hedge_min");
     r.watch.reply = None;
     assert_eq!(r.silence_wait(), None);
 }
@@ -200,6 +211,8 @@ fn a_follower_behind_the_deputy_hands_its_entries_to_the_deputy() {
     let mut r = replica_as(2);
     let mut out = Vec::new();
     r.commit_latency = Some(20 * MS);
+    r.watch.reply = Some(5 * MS);
+    r.cfg.hedge_max = 80 * MS;
     let id = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 1);
@@ -250,4 +263,52 @@ fn entries_handed_to_a_leader_this_replica_now_is_are_not_left_waiting() {
     r.poll_actions(&mut out);
     assert!(!r.forwarded.contains_key(&id));
     assert!(r.next_deadline().is_none_or(|t| t > at), "no timer left due");
+}
+
+#[test]
+fn a_slow_but_talking_leader_is_hedged_around_entry_by_entry_and_not_suspected() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    let id = r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    r.handle(Timestamp(4 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: 0 })).unwrap();
+    r.poll_actions(&mut out);
+    r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(
+        r.batches.values().any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == id)),
+        "after δ the entry is proposed here"
+    );
+    out.clear();
+    let next = r.propose(r.now, Bytes::from_static(b"y")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 1, "the leader was talking: not suspected");
+    assert!(r.forwarded.contains_key(&next));
+}
+
+#[test]
+fn r_rises_at_once_to_a_slower_answer() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    r.handle(Timestamp(MS + 30 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: 0 })).unwrap();
+    assert_eq!(r.watch.reply, Some(30 * MS), "a leader whose disk slowed: σ covers it at once");
+}
+
+#[test]
+fn without_silent_leader_takeover_a_silent_leader_is_waited_for_the_hedge_delay() {
+    let mut r = with_latency(Some(5));
+    r.cfg.silent_leader_takeover = false;
+    let mut out = Vec::new();
+    r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.next_deadline(), Some(Timestamp(MS + 80 * MS)), "δ, as before the option");
+    r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    out.clear();
+    let next = r.propose(r.now, Bytes::from_static(b"y")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 1, "the leader is not suspected");
+    assert!(r.forwarded.contains_key(&next));
 }

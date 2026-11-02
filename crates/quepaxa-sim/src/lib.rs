@@ -282,6 +282,7 @@ impl Sim {
         let mut cfg = Config::new(cluster_id(), NodeId(i as u32), members, seed);
         cfg.retransmit_interval = self.cfg.retransmit_ms * MS;
         cfg.hedge_max = self.cfg.hedge_max_ms * MS;
+        cfg.silent_leader_takeover = self.cfg.silent_leader_takeover;
         cfg.max_in_flight_slots = self.cfg.in_flight_slots;
         cfg.max_batch_bytes = 4096;
         cfg.max_message_bytes = self.cfg.max_message_bytes;

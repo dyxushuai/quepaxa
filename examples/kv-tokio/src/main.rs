@@ -3,11 +3,14 @@
 //! ```text
 //! kv-tokio --id 0 --members 0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102 \
 //!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
-//!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379] [--retransmit-ms 400] [--hedge-max-ms 3000]
+//!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379] [--retransmit-ms 400] [--hedge-max-ms 3000] \
+//!          [--silent-leader-takeover]
 //! ```
 //!
 //! `--retransmit-ms` and `--hedge-max-ms` set the replica's `retransmit_interval` and
 //! `hedge_max`; raise them above the longest round trip and commit path on a WAN.
+//! `--silent-leader-takeover` turns on the replica's `silent_leader_takeover` (across
+//! regions).
 //!
 //! `--members` are the configured members; `--peers` are replicas that may join later (a
 //! joining replica runs with the same `--members` and finds its own address in `--peers`).
@@ -74,6 +77,7 @@ struct Args {
     leader_order: Vec<NodeId>,
     retransmit_ms: Option<u64>,
     hedge_max_ms: Option<u64>,
+    silent_leader_takeover: bool,
 }
 
 const MILLI: u64 = 1_000_000;
@@ -81,7 +85,7 @@ const MILLI: u64 = 1_000_000;
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
     let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
-    let (mut retransmit_ms, mut hedge_max_ms) = (None, None);
+    let (mut retransmit_ms, mut hedge_max_ms, mut silent_leader_takeover) = (None, None, false);
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -95,6 +99,10 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             .collect()
     };
     while let Some(flag) = it.next() {
+        if flag == "--silent-leader-takeover" {
+            silent_leader_takeover = true;
+            continue;
+        }
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--id" => id = Some(value.parse().map_err(|e| format!("--id: {e}"))?),
@@ -134,6 +142,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         leader_order,
         retransmit_ms,
         hedge_max_ms,
+        silent_leader_takeover,
     })
 }
 
@@ -150,6 +159,7 @@ fn config(args: &Args) -> Config {
     if let Some(ms) = args.hedge_max_ms {
         cfg.hedge_max = ms.saturating_mul(MILLI);
     }
+    cfg.silent_leader_takeover = args.silent_leader_takeover;
     cfg
 }
 
@@ -419,6 +429,9 @@ mod tests {
         );
         let zero = config(&args(&format!("{base} --hedge-max-ms 0")).unwrap());
         assert!(Replica::new(zero, [], Timestamp(0)).is_err(), "the replica's own validation refuses it");
+        assert!(!plain.silent_leader_takeover);
+        let wan = config(&args(&format!("{base} --silent-leader-takeover --retransmit-ms 400")).unwrap());
+        assert!(wan.silent_leader_takeover && wan.retransmit_interval == 400 * MILLI);
         let bad = args(&format!("{base} --retransmit-ms soon")).err().unwrap();
         assert!(bad.starts_with("--retransmit-ms"), "{bad}");
     }

@@ -56,7 +56,12 @@ What the paper leaves open, the crate fixes as follows:
 - **Hedging.** Followers forward entries to the leader and propose them themselves only if
   they are not committed within an adaptive delay; duplicates are filtered when committed.
   A follower whose batch loses its slot forwards the entries to the leader again rather
-  than competing with it for the next slot.
+  than competing with it for the next slot. With `silent_leader_takeover` (for wide-area
+  clusters), a leader that says nothing at all for about a commit latency after a forward
+  is suspected: the follower hands its entries to the next member of the leader order,
+  which proposes them, so followers do not contend for slots before the schedule rotates,
+  and the leader's unfinished slots are taken over as soon. Hearing from it ends the
+  suspicion.
 - **Durability.** Recorder state is written before any reply that reports it leaves.
 - **Snapshots, catch-up, membership.** See the other chapters.
 

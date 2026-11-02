@@ -292,8 +292,21 @@ impl Replica {
             self.metrics.retransmits += 1;
             self.send_requests(slot, true);
         }
-        if self.forwarded.values().any(|(_, at)| self.hedge_at(*at) <= now) {
+        if self.forwarded.values().any(|(_, at)| self.silent_at(*at).is_some_and(|t| t <= now)) {
             self.suspect_target();
+        }
+        // The target talks but is slow: entries it left uncommitted for δ are proposed here.
+        let delta = self.hedge_delay();
+        let late: Vec<_> =
+            self.forwarded.iter().filter(|(_, (_, at))| at.after(delta) <= now).map(|(id, _)| *id).collect();
+        for id in late {
+            if let Some((e, _)) = self.forwarded.remove(&id) {
+                if let Some(o) = self.outstanding.get_mut(&id) {
+                    o.2 = true;
+                }
+                self.metrics.hedged += 1;
+                self.relayed.push_back(e);
+            }
         }
         if self.peer_committed > self.committed + 1 && self.catch_up_due() {
             // Prefer the most advanced peer; the previous target may be the one that failed.

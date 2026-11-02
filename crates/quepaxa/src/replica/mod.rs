@@ -117,8 +117,9 @@ pub struct Replica {
     /// Own entries to batch if this replica proposes them itself, else to forward to its
     /// target (`watch.rs`).
     pending: VecDeque<Item>,
-    /// Entries a follower handed to this replica as the deputy of a leader it suspects;
-    /// this replica proposes them itself (`watch.rs`).
+    /// Entries this replica proposes itself whatever it leads: handed to it as the deputy of
+    /// a leader another follower suspects, or its own the leader left uncommitted for δ
+    /// (`watch.rs`).
     relayed: VecDeque<Item>,
     /// Own entries handed to the leader, with when.
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,

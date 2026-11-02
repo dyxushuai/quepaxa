@@ -65,6 +65,14 @@ pub struct Config {
     /// until a commit latency has been observed. Keep it above the slowest client commit
     /// path (through the leader) or followers hedge routinely, which costs throughput.
     pub hedge_max: u64,
+    /// Whether a follower stops waiting for a leader that has said nothing at all since it
+    /// forwarded entries, after about one commit latency instead of the hedge delay: it
+    /// hands its entries to the next member of the leader order and takes over the
+    /// leader's unfinished slots. Off by default. Turn it on across regions, where it cuts
+    /// recovery from a lost leader region from several seconds to about one commit latency;
+    /// leave it off on a fast network, where a leader stalled on its disk can look silent
+    /// for longer than a commit takes and would be worked around for nothing.
+    pub silent_leader_takeover: bool,
     /// Preferred leaders, first to last: every member once. Empty (the default) means by
     /// id. Put the member with the fastest path to a majority first: on a WAN the
     /// placement alone can change client latency about 2x. The leader moves down this
@@ -95,6 +103,7 @@ impl Config {
             retransmit_interval: 50 * MILLI,
             hedge_min: MILLI,
             hedge_max: 1000 * MILLI,
+            silent_leader_takeover: false,
             leader_order: Vec::new(),
         }
     }

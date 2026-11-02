@@ -3,6 +3,18 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- `quepaxa`: `Config::silent_leader_takeover` (off by default) shortens recovery from a lost
+  leader across regions from several hedge delays to about one commit latency. A follower
+  whose leader says nothing at all for about a commit latency after a forward suspects it,
+  hands everything to the next member of the leader order, which proposes it, and takes
+  over the leader's unfinished slots as soon. Before, followers waited a hedge delay per
+  entry, then each proposed on its own and contended for slots, until the schedule
+  rotated. In the five-region simulation the stall falls from 2.6-4.6 s to 0.7-1.0 s and
+  p99 after the loss from 8-10 s to 1.0-1.5 s. Off by default because on a fast network a
+  leader stalled on its disk looks silent and would be worked around for nothing.
+
 ## 0.5.0 — 2026-10-31
 
 - `quepaxa` (breaking): linearizable reads no longer go through the log. `read_barrier` asks a

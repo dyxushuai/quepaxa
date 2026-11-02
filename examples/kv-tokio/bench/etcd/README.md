@@ -85,8 +85,8 @@ generator reaches its local replica in under 1 ms.
   and, for `calm-best`, nearest (us-east, 80 ms): QuePaxa through `--leader-order` (the
   rest of the order by the same rank), etcd through `etcdctl move-leader`, confirmed before
   any load. The summary records which region led after the fault.
-- **Timers.** QuePaxa runs with `--retransmit-ms 400 --hedge-max-ms 3000`, the WAN values
-  in `quepaxa::Config`'s docs. etcd runs with its defaults (100 ms, 1000 ms) and tuned per
+- **Timers.** QuePaxa runs with `--retransmit-ms 400 --hedge-max-ms 3000
+  --silent-leader-takeover`, the WAN settings in `quepaxa::Config`'s docs. etcd runs with its defaults (100 ms, 1000 ms) and tuned per
   its guide: heartbeat at the largest round trip (300 ms), election timeout ten times it.
 - **Load.** `RATE` (1000 writes/s) split evenly over a generator per region, each with its
   own seed, writing only to its region's replica.

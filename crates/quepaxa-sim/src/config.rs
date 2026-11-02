@@ -31,6 +31,8 @@ pub struct SimConfig {
     pub retransmit_ms: u64,
     /// Replica `hedge_max`, in milliseconds.
     pub hedge_max_ms: u64,
+    /// Replica `silent_leader_takeover`.
+    pub silent_leader_takeover: bool,
     /// Extra replicas that start outside the cluster and may join it by reconfiguration.
     pub spares: usize,
     /// Probability per tick (per mille) of proposing a new membership of `nodes` replicas
@@ -81,6 +83,7 @@ impl SimConfig {
             links_ms: None,
             retransmit_ms: 20,
             hedge_max_ms: 400,
+            silent_leader_takeover: false,
             spares: 0,
             reconfigure: 0,
             max_persist_ms: 5,

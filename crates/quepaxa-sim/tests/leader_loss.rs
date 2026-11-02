@@ -48,6 +48,7 @@ fn run(site: usize, seed: u64, kill: bool) -> Report {
         links_ms: Some(links(site)),
         retransmit_ms: 400,
         hedge_max_ms: 3_000,
+        silent_leader_takeover: true,
         compact_every: None,
         in_flight_slots: 8,
         fault_phase_ms: RUN_MS,

@@ -88,7 +88,7 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
   echo "rate: $rate/s in total, run ${secs}s, fault at ${fault}s, heal at ${heal}s, repeats $repeats, smoke=$smoke"
   echo "slow: +${slow_ms}ms; jitter: ${jitter_ms}ms, ${loss}% loss"
   echo "cpus: replicas ${replica_cpus[*]}, generators $gen_cpus"
-  echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms; etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
+  echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms, silent_leader_takeover; etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
 } > "$results/env.txt"
 cat "$results/env.txt"
 
@@ -99,7 +99,7 @@ start_quepaxa() {
     docker run -d --name "qpx-r$i" --network "$net" --ip "$(replica_ip "$i")" --cpuset-cpus "${replica_cpus[$i]}" \
       -v "$data/r$i:/data" "$image" \
       kv-tokio --id "$i" --members "$members" --client 0.0.0.0:7100 --etcd 0.0.0.0:2379 --data /data \
-      --leader-order "$(leader_order "$1")" --retransmit-ms 400 --hedge-max-ms 3000 >/dev/null
+      --leader-order "$(leader_order "$1")" --retransmit-ms 400 --hedge-max-ms 3000 --silent-leader-takeover >/dev/null
   done
 }
 

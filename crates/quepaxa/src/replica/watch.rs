@@ -1,9 +1,10 @@
 //! A follower's watch on the replica it hands its entries to: when to stop waiting for it.
 //!
 //! A follower hands its entries to its target: the first member of the leader order it does
-//! not suspect, normally the leader. When an entry handed over stays uncommitted for the
-//! hedge delay, the follower suspects the target and hands everything still waiting to the
-//! next member instead: the deputy, the one the schedule would rotate to. A deputy proposes
+//! not suspect, normally the leader. An entry the target leaves uncommitted for the hedge
+//! delay δ is proposed here, as before; the target is still talking, only slow. A target
+//! that says nothing at all, though, is suspected, and the follower hands everything still
+//! waiting to the next member instead: the deputy, the one the schedule would rotate to. A deputy proposes
 //! what it is handed itself; when the deputy is this replica, it proposes its own entries
 //! too, and a batch of them that loses its slot is proposed again rather than handed back.
 //! One proposer at a time, so followers do not contend for slots while the schedule has not
@@ -11,14 +12,19 @@
 //! new leader moves the target with it. A dead leader's own values deciding (its in-flight
 //! slots, taken over by others) say nothing about whether it is alive.
 //!
-//! A target that says nothing at all is not waited for as long. An alive one that got a
-//! forward sends this replica something (a record request at least) within R, the usual
-//! delay from a forward to its first message, which takes in the leader's own durability
-//! waits. So once σ = max(commit latency, 2R), within `[hedge_min, δ]`, passes with no word
-//! from the target since an entry was forwarded, the entry counts as late; and a slot whose
+//! Silence is judged against R, the delay from a forward to the target's next message,
+//! which takes in its durability waits: it rises at once to a slower sample (a leader
+//! whose disk slows is not mistaken for a dead one) and decays slowly. Silence shorter than
+//! `retransmit_interval` proves nothing either: the configuration says a round trip may
+//! take that long. Once σ = max(commit latency, 2R, `retransmit_interval`) passes with no
+//! word from the target since an entry was forwarded, the target is suspected; and a slot whose
 //! leader is suspected, or silent since the slot was seen, is taken over after
-//! `position · σ` instead of `(position + 1) · δ`. A slow target still talks and is waited
-//! for as before.
+//! `position · σ` instead of `(position + 1) · δ`. Only while σ < δ: otherwise silence is no
+//! earlier a sign than the hedge delay, and the follower behaves as without it. A slow
+//! target still talks and is waited for as before.
+//!
+//! Silence counts only with `Config::silent_leader_takeover`; without it a follower waits
+//! the hedge delay and hedges entry by entry, as before.
 //!
 //! Only who proposes, and when, changes; any replica may propose in any slot, so none of
 //! this affects safety.
@@ -84,7 +90,10 @@ impl Replica {
             && let Some(at) = self.watch.asked.take()
         {
             let sample = self.now.0.saturating_sub(at.0);
-            self.watch.reply = Some(self.watch.reply.map_or(sample, |avg| avg - avg / 8 + sample / 8));
+            self.watch.reply = Some(match self.watch.reply {
+                Some(avg) if sample < avg => avg - avg / 8 + sample / 8,
+                _ => sample,
+            });
         }
     }
 
@@ -93,10 +102,16 @@ impl Replica {
         self.watch.asked.get_or_insert(self.now);
     }
 
-    /// σ, once both the commit latency and R have been observed.
+    /// σ, once both the commit latency and R have been observed, and only while it is
+    /// shorter than δ: silence that cannot be judged before δ adds nothing to it.
     pub(super) fn silence_wait(&self) -> Option<u64> {
+        if !self.cfg.silent_leader_takeover {
+            return None;
+        }
         let (latency, reply) = (self.commit_latency?, self.watch.reply?);
-        Some(latency.max(reply.saturating_mul(2)).clamp(self.cfg.hedge_min, self.hedge_delay()))
+        let floor = self.cfg.retransmit_interval.max(self.cfg.hedge_min);
+        let sigma = latency.max(reply.saturating_mul(2)).max(floor);
+        (sigma < self.hedge_delay()).then_some(sigma)
     }
 
     /// Whether `node` has said nothing since `t`.
@@ -104,12 +119,17 @@ impl Replica {
         self.watch.heard.get(&node).is_none_or(|h| *h <= t)
     }
 
-    /// When an entry forwarded at `at` counts as late.
+    /// When the target has been silent for σ since `at`, if it has.
+    pub(super) fn silent_at(&self, at: Timestamp) -> Option<Timestamp> {
+        let sigma = self.silence_wait()?;
+        self.silent_since(self.target(), at).then(|| at.after(sigma))
+    }
+
+    /// When an entry forwarded at `at` is acted on: hedged after δ, or sooner, with its
+    /// target suspected, if the target stays silent.
     pub(super) fn hedge_at(&self, at: Timestamp) -> Timestamp {
-        match self.silence_wait() {
-            Some(sigma) if self.silent_since(self.target(), at) => at.after(sigma),
-            _ => at.after(self.hedge_delay()),
-        }
+        let delta = at.after(self.hedge_delay());
+        self.silent_at(at).map_or(delta, |s| s.min(delta))
     }
 
     /// When to take over `slot`, seen at `seen`, from whoever started it.
