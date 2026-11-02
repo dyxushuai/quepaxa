@@ -58,7 +58,7 @@ What the paper leaves open, the crate fixes as follows:
   A follower whose batch loses its slot forwards the entries to the leader again rather
   than competing with it for the next slot. With `silent_leader_takeover` (the default), a
   leader that says nothing at all for about a commit latency after a forward is suspected
-  (it acknowledges every forward at once, before any write, so a slow disk does not make
+  (it acknowledges forwards at once, before any write, so a slow disk does not make
   it silent): the follower hands its entries to the next member of the leader order,
   which proposes them, so followers do not contend for slots before the schedule rotates,
   and the leader's unfinished slots are taken over as soon. Hearing from it ends the

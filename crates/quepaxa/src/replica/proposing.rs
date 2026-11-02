@@ -107,8 +107,7 @@ impl Replica {
             return; // the origin hedges
         }
         queue.extend(entries);
-        // Before any write: a leader waiting on its disk still shows it is alive.
-        self.send(from, Body::ForwardAck);
+        self.ack_forward(from);
     }
 
     /// Starts as many slots as the window allows, after handing entries to the target if

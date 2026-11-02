@@ -69,8 +69,9 @@ pub struct Config {
     /// forwarded entries, after about one commit latency instead of the hedge delay: it
     /// hands its entries to the next member of the leader order and takes over the
     /// leader's unfinished slots. Across regions this cuts recovery from a lost leader
-    /// region from several seconds to about one commit latency. A leader acknowledges every
-    /// forward at once, before any write, so one stalled on its disk is not taken for
+    /// region from several seconds to about one commit latency. A leader acknowledges
+    /// forwards at once, before any write (at most once per eighth of
+    /// `retransmit_interval` per follower), so one stalled on its disk is not taken for
     /// silent. On by default; off, a follower waits the hedge delay as it always did.
     pub silent_leader_takeover: bool,
     /// Preferred leaders, first to last: every member once. Empty (the default) means by

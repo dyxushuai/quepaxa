@@ -13,8 +13,9 @@ All notable changes to this project are documented here. The project follows
   waited a hedge delay per entry, then each proposed on its own and contended for slots,
   until the schedule rotated. In the five-region simulation the stall falls from 2.6-4.6 s
   to 0.7-1.1 s and p99 after the loss from 8-10 s to 1.0-1.5 s. A new message kind
-  (`ForwardAck`, sent at once, before any write) keeps a leader stalled on its disk from
-  looking silent; peers of older versions reject it.
+  (`ForwardAck`, sent at once, before any write, at most once per eighth of
+  `retransmit_interval` per follower) keeps a leader stalled on its disk from looking
+  silent; peers of older versions reject it.
 
 ## 0.5.0 — 2026-10-31
 

@@ -340,6 +340,18 @@ fn a_leader_acknowledges_a_forward_before_its_writes_are_durable() {
         _ => false,
     });
     assert!(acked, "the ack does not wait for the disk: {out:?}");
+    // Another forward within an eighth of the retransmit interval goes unacknowledged.
+    let acks = |r: &mut Replica, at: u64| {
+        let mut out = Vec::new();
+        r.handle(Timestamp(at), from_peer(1, 0, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+        r.poll_actions(&mut out);
+        out.iter()
+            .filter(|a| matches!(a, Action::Send(o) if matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck, .. }))))
+            .count()
+    };
+    let every = r.cfg.retransmit_interval / 8;
+    assert_eq!(acks(&mut r, 2 + every - 1), 0);
+    assert_eq!(acks(&mut r, 2 + every), 1);
 }
 
 #[test]
