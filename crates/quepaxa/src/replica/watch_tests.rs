@@ -185,8 +185,7 @@ fn sigma_counts_only_below_the_hedge_delay_and_covers_twice_r() {
     assert_eq!(r.silence_wait(), Some(120 * MS), "a leader slow to answer (R = 60 ms) is given 2R");
     r.commit_latency = Some(5 * MS);
     r.watch.reply = Some(MS / 100);
-    assert_eq!(r.silence_wait(), Some(10 * MS), "never below the retransmit interval");
-    r.cfg.retransmit_interval = MS / 100;
+    assert_eq!(r.silence_wait(), Some(5 * MS), "a quick reply leaves the commit latency");
     r.cfg.hedge_max = 2 * MS;
     r.commit_latency = Some(MS);
     assert_eq!(r.silence_wait(), Some(r.cfg.hedge_min), "nor below hedge_min");

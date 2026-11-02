@@ -12,16 +12,15 @@
 //! new leader moves the target with it. A dead leader's own values deciding (its in-flight
 //! slots, taken over by others) say nothing about whether it is alive.
 //!
-//! Silence is judged against R, the delay from a forward to the target's next message,
-//! which takes in its durability waits: it rises at once to a slower sample (a leader
-//! whose disk slows is not mistaken for a dead one) and decays slowly. Silence shorter than
-//! `retransmit_interval` proves nothing either: the configuration says a round trip may
-//! take that long. Once σ = max(commit latency, 2R, `retransmit_interval`) passes with no
-//! word from the target since an entry was forwarded, the target is suspected; and a slot is
-//! taken over after `position · σ` instead of `(position + 1) · δ` once its leader has said
-//! nothing for σ (a busy leader whose slots queue keeps talking, and is waited for). Only while σ < δ: otherwise silence is no
-//! earlier a sign than the hedge delay, and the follower behaves as without it. A slow
-//! target still talks and is waited for as before.
+//! Silence is judged against R, the delay from a forward to the target's next message. A
+//! target acknowledges every forward at once, before any write, so R is about a round trip
+//! even while its disk is slow; R rises at once to a slower sample and decays slowly. Once
+//! σ = max(commit latency, 2R, `hedge_min`) passes with no word from the target since an
+//! entry was forwarded, the target is suspected; and a slot is taken over after
+//! `position · σ` instead of `(position + 1) · δ` once its leader has said nothing for σ (a
+//! busy leader whose slots queue keeps talking, and is waited for). Only while σ < δ:
+//! otherwise silence is no earlier a sign than the hedge delay, and the follower behaves as
+//! without it. A slow target still talks and is waited for as before.
 //!
 //! Silence counts only with `Config::silent_leader_takeover`; without it a follower waits
 //! the hedge delay and hedges entry by entry, as before.
@@ -109,7 +108,7 @@ impl Replica {
             return None;
         }
         let (latency, reply) = (self.commit_latency?, self.watch.reply?);
-        let floor = self.cfg.retransmit_interval.max(self.cfg.hedge_min);
+        let floor = self.cfg.hedge_min;
         let sigma = latency.max(reply.saturating_mul(2)).max(floor);
         (sigma < self.hedge_delay()).then_some(sigma)
     }

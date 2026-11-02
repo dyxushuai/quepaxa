@@ -44,8 +44,8 @@ The defaults assume round trips of a few milliseconds.
   member of the leader order and takes over the leader's unfinished slots, instead of
   waiting up to `hedge_max`. In the repository's five-region benchmark, recovery from a
   lost leader region drops from several seconds to under a second. A leader acknowledges
-  forwards before any write, so a slow disk does not make it look silent; on a fast
-  network, silence shorter than `retransmit_interval` is never counted.
+  forwards before any write, so a slow disk does not make it look silent; silence shorter
+  than twice that acknowledgement's round trip, or than `hedge_min`, is never counted.
 - **`leader_order`**: put the leader where a majority is closest.
 
 The repository's simulated five-region benchmark (`docs/benchmarks.md`) shows each effect.
