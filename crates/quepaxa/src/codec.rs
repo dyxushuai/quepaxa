@@ -22,6 +22,7 @@ const KIND_FORWARD: u8 = 6;
 const KIND_COMPACTED: u8 = 7;
 const KIND_READ_QUERY: u8 = 8;
 const KIND_READ_REPLY: u8 = 9;
+const KIND_FORWARD_ACK: u8 = 10;
 
 const VALUE_INLINE: u8 = 0;
 
@@ -95,6 +96,9 @@ pub(crate) enum Body {
     Forward {
         batch: Bytes,
     },
+    /// The sender took a `Forward`: it is alive, whatever its disk is doing. Sent at once,
+    /// it reports no state.
+    ForwardAck,
     /// The sender no longer has slots up to `through`; fetch its snapshot instead.
     Compacted {
         through: Slot,
@@ -130,7 +134,8 @@ impl Body {
             Body::CatchUp { .. }
             | Body::Compacted { .. }
             | Body::ReadQuery { .. }
-            | Body::ReadReply { .. } => 0,
+            | Body::ReadReply { .. }
+            | Body::ForwardAck => 0,
         }
     }
 }
@@ -181,6 +186,7 @@ impl Message {
             Body::Compacted { .. } => KIND_COMPACTED,
             Body::ReadQuery { .. } => KIND_READ_QUERY,
             Body::ReadReply { .. } => KIND_READ_REPLY,
+            Body::ForwardAck => KIND_FORWARD_ACK,
         });
         let e = &self.env;
         out.put_slice(&e.cluster_id);
@@ -215,6 +221,7 @@ impl Message {
                 }
             }
             Body::Forward { batch } => put_value(&mut out, batch),
+            Body::ForwardAck => {}
             Body::Compacted { through } => out.put_u64_le(through.0),
             Body::ReadQuery { incarnation, round } => {
                 out.put_u64_le(*incarnation);
@@ -237,7 +244,8 @@ impl Message {
             Body::CatchUp { .. }
             | Body::Compacted { .. }
             | Body::ReadQuery { .. }
-            | Body::ReadReply { .. } => 0,
+            | Body::ReadReply { .. }
+            | Body::ForwardAck => 0,
             Body::Forward { batch } => batch.len(),
             Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len() + 33).sum(),
         }
@@ -297,6 +305,7 @@ impl Message {
                 Body::Entries { first, proposals }
             }
             KIND_FORWARD => Body::Forward { batch: r.value()? },
+            KIND_FORWARD_ACK => Body::ForwardAck,
             KIND_COMPACTED => Body::Compacted { through: Slot(r.u64()?) },
             KIND_READ_QUERY => Body::ReadQuery { incarnation: r.u64()?, round: r.u64()? },
             KIND_READ_REPLY => {
@@ -506,6 +515,12 @@ mod tests {
     }
 
     #[test]
+    fn forward_ack_matches_golden_bytes_v1() {
+        let ack = Message { env: env(), body: Body::ForwardAck };
+        assert_eq!(ack.encode().to_vec(), golden("0a", ""));
+    }
+
+    #[test]
     fn read_query_and_reply_match_golden_bytes_v1() {
         let query = Message { env: env(), body: Body::ReadQuery { incarnation: 3, round: 7 } };
         assert_eq!(query.encode().to_vec(), golden("08", "0300000000000000 0700000000000000"));
@@ -641,6 +656,7 @@ mod tests {
                 Body::Compacted { through: Slot(from) },
                 Body::ReadQuery { incarnation: from, round },
                 Body::ReadReply { incarnation: from, round, high: Slot(from) },
+                Body::ForwardAck,
             ] {
                 let m = Message { env: env(), body };
                 proptest::prop_assert_eq!(Message::decode(&m.encode(), &CTX).unwrap(), m);

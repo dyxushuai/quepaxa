@@ -68,10 +68,10 @@ pub struct Config {
     /// Whether a follower stops waiting for a leader that has said nothing at all since it
     /// forwarded entries, after about one commit latency instead of the hedge delay: it
     /// hands its entries to the next member of the leader order and takes over the
-    /// leader's unfinished slots. Off by default. Turn it on across regions, where it cuts
-    /// recovery from a lost leader region from several seconds to about one commit latency;
-    /// leave it off on a fast network, where a leader stalled on its disk can look silent
-    /// for longer than a commit takes and would be worked around for nothing.
+    /// leader's unfinished slots. Across regions this cuts recovery from a lost leader
+    /// region from several seconds to about one commit latency. A leader acknowledges every
+    /// forward at once, before any write, so one stalled on its disk is not taken for
+    /// silent. On by default; off, a follower waits the hedge delay as it always did.
     pub silent_leader_takeover: bool,
     /// Preferred leaders, first to last: every member once. Empty (the default) means by
     /// id. Put the member with the fastest path to a majority first: on a WAN the
@@ -103,7 +103,7 @@ impl Config {
             retransmit_interval: 50 * MILLI,
             hedge_min: MILLI,
             hedge_max: 1000 * MILLI,
-            silent_leader_takeover: false,
+            silent_leader_takeover: true,
             leader_order: Vec::new(),
         }
     }

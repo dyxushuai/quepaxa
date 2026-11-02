@@ -95,7 +95,7 @@ impl Replica {
 
     /// A batch of entries a follower handed to this replica: as the leader, or as the deputy
     /// of a leader that follower suspects (`watch.rs`), which proposes them itself.
-    pub(super) fn on_forward(&mut self, bytes: &bytes::Bytes) {
+    pub(super) fn on_forward(&mut self, from: NodeId, bytes: &bytes::Bytes) {
         let Ok(entries) = batch::decode(bytes) else {
             self.metrics.messages_rejected += 1;
             return;
@@ -107,6 +107,8 @@ impl Replica {
             return; // the origin hedges
         }
         queue.extend(entries);
+        // Before any write: a leader waiting on its disk still shows it is alive.
+        self.send(from, Body::ForwardAck);
     }
 
     /// Starts as many slots as the window allows, after handing entries to the target if

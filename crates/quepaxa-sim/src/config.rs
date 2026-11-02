@@ -83,7 +83,7 @@ impl SimConfig {
             links_ms: None,
             retransmit_ms: 20,
             hedge_max_ms: 400,
-            silent_leader_takeover: false,
+            silent_leader_takeover: true,
             spares: 0,
             reconfigure: 0,
             max_persist_ms: 5,

@@ -312,3 +312,33 @@ fn without_silent_leader_takeover_a_silent_leader_is_waited_for_the_hedge_delay(
     assert_eq!(forwards_to(&out, 0), 1, "the leader is not suspected");
     assert!(r.forwarded.contains_key(&next));
 }
+
+#[test]
+fn a_leader_acknowledges_a_forward_before_its_writes_are_durable() {
+    let mut r = replica_as(0);
+    let mut out = Vec::new();
+    // A write of its own in flight: the leader's disk is busy.
+    r.propose(Timestamp(1), Bytes::from_static(b"own")).unwrap();
+    r.poll_actions(&mut out);
+    assert!(out.iter().any(|a| matches!(a, Action::Persist { .. })), "a write is in flight");
+    out.clear();
+    let entries = [batch::Item {
+        entry: crate::batch::Entry {
+            origin: NodeId(1),
+            incarnation: 1,
+            id: ProposalId(3),
+            payload: Bytes::from_static(b"x"),
+        },
+        kind: batch::Kind::App,
+    }];
+    r.handle(Timestamp(2), from_peer(1, 0, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.poll_actions(&mut out);
+    let acked = out.iter().any(|a| match a {
+        Action::Send(o) => {
+            o.to == NodeId(1)
+                && matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck, .. }))
+        }
+        _ => false,
+    });
+    assert!(acked, "the ack does not wait for the disk: {out:?}");
+}

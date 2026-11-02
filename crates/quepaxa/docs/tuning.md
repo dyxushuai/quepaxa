@@ -16,7 +16,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `max_outstanding_proposals` | 4096 | Local proposals not yet committed before [`Busy`](crate::Error::Busy). |
 | `retransmit_interval` | 50 ms | When an unanswered request is sent again. |
 | `hedge_min`, `hedge_max` | 1 ms, 1 s | Bounds of the adaptive hedge delay. |
-| `silent_leader_takeover` | off | Stop waiting for a leader that is silent for a commit latency; turn on across regions. |
+| `silent_leader_takeover` | on | Stop waiting for a leader that has said nothing for about a commit latency since a forward. |
 
 ## Throughput
 
@@ -39,13 +39,13 @@ The defaults assume round trips of a few milliseconds.
 - **`hedge_max`** must exceed the slowest client commit path (forward to the leader, one
   round trip to a majority, decision back). Below it, followers stop waiting for a live
   leader and propose its entries themselves, which costs throughput.
-- **`silent_leader_takeover`**: turn it on. A follower that hears nothing at all from the
-  leader for about a commit latency after forwarding then hands its entries to the next
+- **`silent_leader_takeover`** (on by default): a follower that hears nothing at all from
+  the leader for about a commit latency after forwarding hands its entries to the next
   member of the leader order and takes over the leader's unfinished slots, instead of
-  waiting up to `hedge_max` (recovery from a lost leader region drops from several
-  seconds to about a second in the repository's five-region benchmark). Leave it off on a
-  fast network: there a leader stalled on its disk is silent longer than a commit takes,
-  and followers would work around it for nothing.
+  waiting up to `hedge_max`. In the repository's five-region benchmark, recovery from a
+  lost leader region drops from several seconds to under a second. A leader acknowledges
+  forwards before any write, so a slow disk does not make it look silent; on a fast
+  network, silence shorter than `retransmit_interval` is never counted.
 - **`leader_order`**: put the leader where a majority is closest.
 
 The repository's simulated five-region benchmark (`docs/benchmarks.md`) shows each effect.

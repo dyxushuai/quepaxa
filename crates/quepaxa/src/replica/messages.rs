@@ -150,7 +150,9 @@ impl Replica {
                             }
                         }
                     }
-                    Body::Forward { batch } => self.on_forward(&batch),
+                    Body::Forward { batch } => self.on_forward(from, &batch),
+                    // Arriving at all is the point (`heard_from`, `watch.rs`).
+                    Body::ForwardAck => {}
                     Body::Compacted { through } => self.on_compacted(from, through),
                     Body::ReadQuery { incarnation, round } => self.on_read_query(from, incarnation, round),
                     Body::ReadReply { incarnation, round, high } => {
