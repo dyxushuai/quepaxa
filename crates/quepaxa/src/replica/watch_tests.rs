@@ -247,6 +247,33 @@ fn a_deputy_proposes_what_it_is_handed() {
 }
 
 #[test]
+fn a_deputy_proposes_a_handed_entry_again_when_its_batch_loses_the_slot() {
+    let mut r = replica_as(1);
+    let mut out = Vec::new();
+    let entries = [batch::Item {
+        entry: crate::batch::Entry {
+            origin: NodeId(2),
+            incarnation: 1,
+            id: ProposalId(7),
+            payload: Bytes::from_static(b"x"),
+        },
+        kind: batch::Kind::App,
+    }];
+    r.handle(Timestamp(1), from_peer(2, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.poll_actions(&mut out);
+    let slot = r.batches.values().find_map(|b| b.slot).expect("the deputy proposes the entry");
+    out.clear();
+    // Another value takes the slot; this replica itself never suspected leader 0.
+    r.handle(r.now, from_peer(0, 1, Body::Decided { slot, proposal: proposal(1, 0, 0) })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 0, "not handed to the leader replica 2 gave up on");
+    assert!(
+        r.batches.values().any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == ProposalId(7))),
+        "proposed again in a slot of the deputy's own"
+    );
+}
+
+#[test]
 fn entries_handed_to_a_leader_this_replica_now_is_are_not_left_waiting() {
     // Replica 1 forwarded to leader 0, then came to lead itself (here: 0 suspected and
     // 1 first in line): the late entries must leave `forwarded`, or their timer fires

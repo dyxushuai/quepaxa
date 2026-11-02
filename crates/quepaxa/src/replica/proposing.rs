@@ -161,9 +161,10 @@ impl Replica {
     }
 
     /// A local batch lost its slot. The leader, or a follower that suspects it (`watch.rs`),
-    /// proposes it again in another slot; any other follower hands its entries back to the
+    /// proposes it again in another slot; any other follower hands its own entries back to the
     /// leader, since a follower's proposal loses to a live leader's in slot after slot, and
-    /// hedges them again only if the leader stays silent.
+    /// hedges them again only if the leader stays silent. Entries another follower handed
+    /// here are proposed again here: that follower judged the leader, this one may not have.
     pub(super) fn lost_slot(&mut self, seq: u64) {
         if self.proposes_directly() {
             if let Some(b) = self.batches.get_mut(&seq) {
@@ -174,11 +175,13 @@ impl Replica {
         let Some(b) = self.batches.remove(&seq) else { return };
         // Our own encoding: it decodes.
         let entries = batch::decode(&b.value).unwrap_or_default();
-        let dedup = &self.dedup;
-        self.pending.extend(entries.into_iter().filter(|e| {
+        for e in entries {
             let (o, inc, id) = e.key();
-            !dedup.contains(o, inc, id)
-        }));
+            if self.dedup.contains(o, inc, id) {
+                continue;
+            }
+            if o == self.me { self.pending.push_back(e) } else { self.relayed.push_back(e) }
+        }
     }
 
     /// Cuts the next batch: relayed entries always, own pending ones only when proposing them
