@@ -17,9 +17,9 @@
 //! whose disk slows is not mistaken for a dead one) and decays slowly. Silence shorter than
 //! `retransmit_interval` proves nothing either: the configuration says a round trip may
 //! take that long. Once σ = max(commit latency, 2R, `retransmit_interval`) passes with no
-//! word from the target since an entry was forwarded, the target is suspected; and a slot whose
-//! leader is suspected, or silent since the slot was seen, is taken over after
-//! `position · σ` instead of `(position + 1) · δ`. Only while σ < δ: otherwise silence is no
+//! word from the target since an entry was forwarded, the target is suspected; and a slot is
+//! taken over after `position · σ` instead of `(position + 1) · δ` once its leader has said
+//! nothing for σ (a busy leader whose slots queue keeps talking, and is waited for). Only while σ < δ: otherwise silence is no
 //! earlier a sign than the hedge delay, and the follower behaves as without it. A slow
 //! target still talks and is waited for as before.
 //!
@@ -136,12 +136,15 @@ impl Replica {
     pub(super) fn takeover_at(&self, slot: Slot, seen: Timestamp) -> Timestamp {
         let position = self.schedule.position(self.me, slot);
         let leader = self.schedule.leader(slot);
-        let suspected = self.watch.suspects.contains_key(&leader);
+        let usual = seen.after((position + 1).saturating_mul(self.hedge_delay()));
         match self.silence_wait() {
-            Some(sigma) if leader != self.me && (suspected || self.silent_since(leader, seen)) => {
-                seen.after(position.max(1).saturating_mul(sigma))
+            // Sooner only once the leader has been silent for σ: a leader still talking
+            // (busy, its slots queued) keeps pushing this back.
+            Some(sigma) if leader != self.me => {
+                let silent = self.watch.heard.get(&leader).map_or(seen, |h| (*h).max(seen)).after(sigma);
+                seen.after(position.max(1).saturating_mul(sigma)).max(silent).min(usual)
             }
-            _ => seen.after((position + 1).saturating_mul(self.hedge_delay())),
+            _ => usual,
         }
     }
 }

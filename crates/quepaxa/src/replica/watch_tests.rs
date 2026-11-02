@@ -342,3 +342,20 @@ fn a_leader_acknowledges_a_forward_before_its_writes_are_durable() {
     });
     assert!(acked, "the ack does not wait for the disk: {out:?}");
 }
+
+#[test]
+fn a_leader_still_talking_keeps_its_slow_slot() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    let request = Body::RecordRequest { slot: Slot(0), step: 4, proposal: proposal(1, 0, 9) };
+    r.handle(Timestamp(MS), from_peer(0, 1, request)).unwrap();
+    r.poll_actions(&mut out);
+    // The slot is slow to decide, but the leader keeps sending (its other slots).
+    r.handle(Timestamp(15 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: 0 })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(
+        r.next_deadline(),
+        Some(Timestamp(35 * MS)),
+        "σ after the leader last spoke, not after the slot"
+    );
+}
