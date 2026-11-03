@@ -12,11 +12,12 @@
 //! new leader moves the target with it. A dead leader's own values deciding (its in-flight
 //! slots, taken over by others) say nothing about whether it is alive.
 //!
-//! Silence is judged against R, the delay from a forward to the target's next message. A
-//! target acknowledges forwards at once, before any write (`ack_forward`), so R is about a
-//! round trip even while its disk is slow; R rises at once to a slower sample and decays slowly. Once
-//! σ = max(commit latency, 2R, `hedge_min`) passes with no word from the target since an
-//! entry was forwarded, the target is suspected; and a slot is taken over after
+//! Silence is judged against R, the delay from a forward to a member's next message, kept per
+//! member: a deputy may be farther than the leader. A member acknowledges forwards at once,
+//! before any write (`ack_forward`), so R is about a round trip even while its disk is slow;
+//! R rises at once to a slower sample and decays slowly. Once σ = max(commit latency, 2R +
+//! the acknowledgement cooldown, `hedge_min`) passes with no word from the target since an
+//! entry was forwarded to it, the target is suspected; and a slot is taken over after
 //! `position · σ` instead of `(position + 1) · δ` once its leader has said nothing for σ (a
 //! busy leader whose slots queue keeps talking, and is waited for). Only while σ < δ:
 //! otherwise silence is no earlier a sign than the hedge delay, and the follower behaves as
