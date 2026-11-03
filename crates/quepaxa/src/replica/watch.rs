@@ -42,10 +42,10 @@ pub(super) struct Watch {
     pub(super) suspects: BTreeMap<NodeId, Timestamp>,
     /// When a message last arrived from each member.
     pub(super) heard: BTreeMap<NodeId, Timestamp>,
-    /// The first forward the target has not said anything since.
-    pub(super) asked: Option<Timestamp>,
-    /// Smoothed delay from a forward to the target's next message (R), in nanoseconds.
-    pub(super) reply: Option<u64>,
+    /// The first forward the member it went to has not said anything since.
+    pub(super) asked: Option<(NodeId, Timestamp)>,
+    /// Smoothed delay from a forward to each member's next message (R), in nanoseconds.
+    pub(super) reply: BTreeMap<NodeId, u64>,
     /// When this replica last acknowledged a forward from each member.
     pub(super) acked: BTreeMap<NodeId, Timestamp>,
 }
@@ -88,24 +88,28 @@ impl Replica {
     pub(super) fn heard_from(&mut self, from: NodeId) {
         self.watch.suspects.remove(&from);
         self.watch.heard.insert(from, self.now);
-        if from == self.target()
-            && let Some(at) = self.watch.asked.take()
+        if let Some((to, at)) = self.watch.asked
+            && to == from
         {
+            self.watch.asked = None;
             let sample = self.now.0.saturating_sub(at.0);
-            self.watch.reply = Some(match self.watch.reply {
-                Some(avg) if sample < avg => avg - avg / 8 + sample / 8,
-                _ => sample,
-            });
+            let avg = self.watch.reply.entry(from).or_insert(sample);
+            *avg = if sample < *avg { *avg - *avg / 8 + sample / 8 } else { sample };
         }
+    }
+
+    /// How long a forward may wait for its acknowledgement after an earlier one was sent.
+    fn ack_every(&self) -> u64 {
+        self.cfg.retransmit_interval / 8
     }
 
     /// Acknowledges a forward before any write, so a leader waiting on its disk still shows
     /// it is alive; at most once per eighth of `retransmit_interval` per member. Every
     /// message is a packet a lossy link can lose, stalling the stream behind it: an ack per
-    /// forward tripled the p99 across regions with 1% loss on the leader's links. R takes
-    /// in the wait, so σ covers it.
+    /// forward tripled the p99 across regions with 1% loss on the leader's links. σ covers
+    /// the wait.
     pub(super) fn ack_forward(&mut self, from: NodeId) {
-        let every = self.cfg.retransmit_interval / 8;
+        let every = self.ack_every();
         if self.watch.acked.get(&from).is_none_or(|t| self.now.0 >= t.0.saturating_add(every)) {
             self.watch.acked.insert(from, self.now);
             self.send(from, Body::ForwardAck);
@@ -114,18 +118,22 @@ impl Replica {
 
     /// Entries were just handed to the target.
     pub(super) fn forwarded_now(&mut self) {
-        self.watch.asked.get_or_insert(self.now);
+        let target = self.target();
+        if self.watch.asked.is_none_or(|(to, _)| to != target) {
+            self.watch.asked = Some((target, self.now));
+        }
     }
 
-    /// σ, once both the commit latency and R have been observed, and only while it is
-    /// shorter than δ: silence that cannot be judged before δ adds nothing to it.
-    pub(super) fn silence_wait(&self) -> Option<u64> {
+    /// σ for `node`, once the commit latency and its R have been observed, and only while it
+    /// is shorter than δ: silence that cannot be judged before δ adds nothing to it. It
+    /// covers twice R plus the wait for a rate-limited acknowledgement (`ack_forward`).
+    pub(super) fn silence_wait(&self, node: NodeId) -> Option<u64> {
         if !self.cfg.silent_leader_takeover {
             return None;
         }
-        let (latency, reply) = (self.commit_latency?, self.watch.reply?);
-        let floor = self.cfg.hedge_min;
-        let sigma = latency.max(reply.saturating_mul(2)).max(floor);
+        let (latency, reply) = (self.commit_latency?, *self.watch.reply.get(&node)?);
+        let answer = reply.saturating_mul(2).saturating_add(self.ack_every());
+        let sigma = latency.max(answer).max(self.cfg.hedge_min);
         (sigma < self.hedge_delay()).then_some(sigma)
     }
 
@@ -136,8 +144,9 @@ impl Replica {
 
     /// When the target has been silent for σ since `at`, if it has.
     pub(super) fn silent_at(&self, at: Timestamp) -> Option<Timestamp> {
-        let sigma = self.silence_wait()?;
-        self.silent_since(self.target(), at).then(|| at.after(sigma))
+        let target = self.target();
+        let sigma = self.silence_wait(target)?;
+        self.silent_since(target, at).then(|| at.after(sigma))
     }
 
     /// When an entry forwarded at `at` is acted on: hedged after δ, or sooner, with its
@@ -152,7 +161,7 @@ impl Replica {
         let position = self.schedule.position(self.me, slot);
         let leader = self.schedule.leader(slot);
         let usual = seen.after((position + 1).saturating_mul(self.hedge_delay()));
-        match self.silence_wait() {
+        match self.silence_wait(leader) {
             // Sooner only once the leader has been silent for σ: a leader still talking
             // (busy, its slots queued) keeps pushing this back.
             Some(sigma) if leader != self.me => {

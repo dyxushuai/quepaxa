@@ -75,6 +75,7 @@ fn after_kill(r: &Report) -> (u64, u64) {
             gap = gap.max(t - prev);
             prev = t;
         }
+        gap = gap.max(end - prev);
     }
     let mut lat: Vec<u64> = r
         .commits
