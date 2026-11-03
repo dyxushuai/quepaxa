@@ -19,6 +19,9 @@ pub(crate) const MAX_STEP: Step = u32::MAX - 16;
 /// Slots past this are rejected so slot arithmetic (window, reservations) cannot overflow.
 pub(crate) const MAX_SLOT: u64 = u64::MAX - (1 << 32);
 
+/// Reads use the upper half of the id space so logged entries stay contiguous for dedup.
+pub(crate) const READ_ID_BASE: u64 = 1 << 63;
+
 /// Monotonic time in nanoseconds, supplied by the caller with every call; the epoch is the
 /// caller's choice (process start is typical). Only differences matter, and the replica
 /// never lets its clock move backwards, so a slightly stale reading is harmless.
@@ -36,6 +39,8 @@ impl Timestamp {
 /// `read_barrier`, `propose_reconfiguration`), unique within one incarnation of a
 /// replica. Entries in [`crate::Action::Commit`] carry it with their origin and
 /// incarnation, which together identify an entry cluster-wide.
+/// Treat ids as opaque: reads and logged proposals use separate ranges, so interleaved
+/// calls do not return ids in increasing order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProposalId(pub u64);
 

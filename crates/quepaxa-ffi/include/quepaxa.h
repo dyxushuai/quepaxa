@@ -32,7 +32,8 @@
 // 0.7: opaque `qpx_config` (`qpx_config_new`, `qpx_config_set`, `qpx_config_set_leader_order`,
 // `qpx_config_free`) and `qpx_metric` replace the `qpx_config` and `qpx_metrics` structs,
 // `qpx_config_init` and `qpx_get_metrics` (incompatible).
-#define QPX_ABI_VERSION_MINOR 7
+// 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range.
+#define QPX_ABI_VERSION_MINOR 8
 
 // Success.
 #define QPX_OK 0
@@ -75,6 +76,9 @@
 
 // A membership change has not taken effect yet (ABI 0.5).
 #define QPX_ERR_RECONFIGURATION_PENDING -10
+
+// Request ids exhausted in this incarnation; restart from durable records (ABI 0.8).
+#define QPX_ERR_REQUEST_ID_EXHAUSTED -11
 
 // The library panicked; the handle is now poisoned.
 #define QPX_ERR_PANIC -100
@@ -276,6 +280,7 @@ int32_t qpx_propose_reconfiguration(qpx_replica *h,
                                     uint64_t *out_id);
 
 // Requests a linearizable read point; its id is written to `out_id`.
+// Ids are opaque unsigned 64-bit values; read ids use the high bit (ABI 0.8).
 //
 // # Safety
 // `h` must be a live handle; `out_id` writable.

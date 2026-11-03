@@ -131,6 +131,30 @@ fn three_replicas_commit_through_the_c_abi() {
 }
 
 #[test]
+fn read_ids_survive_the_c_abi_without_colliding_with_writes() {
+    let (rc, h) = replica_from(config(0, &[0]), &[]);
+    assert_eq!(rc, QPX_OK);
+    let (mut net, mut commits) = (Vec::new(), Vec::new());
+    unsafe { drain(&[h], 0, &mut net, &mut commits) };
+    let mut write = 0;
+    assert_eq!(unsafe { qpx_propose(h, 0, b"x".as_ptr(), 1, &mut write) }, QPX_OK);
+    unsafe { drain(&[h], 0, &mut net, &mut commits) };
+    let mut read = 0;
+    assert_eq!(unsafe { qpx_read_barrier(h, 0, &mut read) }, QPX_OK);
+    assert!(read > i64::MAX as u64, "read ids must preserve their high bit");
+    assert_ne!(read, write);
+    let mut action = empty_action();
+    assert_eq!(unsafe { qpx_poll(h, &mut action) }, QPX_OK);
+    assert_eq!((action.kind, action.id), (QPX_ACTION_READ_READY, read));
+    assert_eq!(unsafe { qpx_poll(h, &mut action) }, QPX_EMPTY);
+    let mut next_write = 0;
+    assert_eq!(unsafe { qpx_propose(h, 0, b"y".as_ptr(), 1, &mut next_write) }, QPX_OK);
+    assert_eq!(next_write, write + 1, "reads leave the write sequence contiguous");
+    unsafe { drain(&[h], 0, &mut net, &mut commits) };
+    unsafe { qpx_replica_free(h) };
+}
+
+#[test]
 fn contract_violations_are_reported_not_undefined() {
     let members = [0, 1, 2];
     let h = unsafe { new_replica(0, &members) };

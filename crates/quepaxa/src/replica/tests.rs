@@ -8,8 +8,9 @@ fn replica() -> Replica {
     replica_as(0)
 }
 
-fn replica_as(me: u32) -> Replica {
-    let cfg = Config::new([3; 16], NodeId(me), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+pub(super) fn replica_as(me: u32) -> Replica {
+    let mut cfg = Config::new([3; 16], NodeId(me), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    cfg.silent_leader_takeover = true;
     let mut r = Replica::new(cfg, [], Timestamp(0)).unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
@@ -18,7 +19,7 @@ fn replica_as(me: u32) -> Replica {
     r
 }
 
-fn proposal(priority: u64, origin: u32, seq: u64) -> Proposal {
+pub(super) fn proposal(priority: u64, origin: u32, seq: u64) -> Proposal {
     Proposal {
         priority,
         key: ValueKey { origin: NodeId(origin), incarnation: 1, seq },
@@ -233,7 +234,7 @@ fn requests_below_the_floor_or_beyond_the_window_get_no_vote() {
     assert!(replies(10 + window).0.is_empty());
 }
 
-fn r_wire() -> WireCtx {
+pub(super) fn r_wire() -> WireCtx {
     WireCtx { cluster_id: [3; 16], config_epoch: 0, max_message_bytes: 16 << 20, max_value_bytes: 1 << 20 }
 }
 
@@ -702,7 +703,7 @@ fn a_hedged_entry_does_not_stretch_the_hedge_delay() {
     assert_eq!(r.hedge_delay(), delta);
 }
 
-fn from_peer(from: u32, to: u32, body: Body) -> Input {
+pub(super) fn from_peer(from: u32, to: u32, body: Body) -> Input {
     let env = Envelope {
         cluster_id: [3; 16],
         config_epoch: 0,

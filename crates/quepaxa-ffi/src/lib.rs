@@ -117,7 +117,8 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// 0.7: opaque `qpx_config` (`qpx_config_new`, `qpx_config_set`, `qpx_config_set_leader_order`,
 /// `qpx_config_free`) and `qpx_metric` replace the `qpx_config` and `qpx_metrics` structs,
 /// `qpx_config_init` and `qpx_get_metrics` (incompatible).
-pub const QPX_ABI_VERSION_MINOR: u32 = 7;
+/// 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range.
+pub const QPX_ABI_VERSION_MINOR: u32 = 8;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -147,6 +148,8 @@ pub const QPX_ERR_UNKNOWN_PERSIST_ID: i32 = -8;
 pub const QPX_ERR_INVALID_CORE_STATE: i32 = -9;
 /// A membership change has not taken effect yet (ABI 0.5).
 pub const QPX_ERR_RECONFIGURATION_PENDING: i32 = -10;
+/// Request ids exhausted in this incarnation; restart from durable records (ABI 0.8).
+pub const QPX_ERR_REQUEST_ID_EXHAUSTED: i32 = -11;
 /// The library panicked; the handle is now poisoned.
 pub const QPX_ERR_PANIC: i32 = -100;
 /// The handle panicked earlier and is unusable.
@@ -260,6 +263,7 @@ fn code(e: Error) -> i32 {
         Error::UnknownPersistId => QPX_ERR_UNKNOWN_PERSIST_ID,
         Error::InvalidCoreState => QPX_ERR_INVALID_CORE_STATE,
         Error::ReconfigurationPending => QPX_ERR_RECONFIGURATION_PENDING,
+        Error::RequestIdExhausted => QPX_ERR_REQUEST_ID_EXHAUSTED,
         _ => QPX_ERR_INVALID_ARGUMENT,
     }
 }
@@ -340,6 +344,7 @@ pub extern "C" fn qpx_status_str(status: i32) -> *const std::ffi::c_char {
         QPX_ERR_UNKNOWN_PERSIST_ID => b"unknown persist id\0",
         QPX_ERR_INVALID_CORE_STATE => b"invalid core state\0",
         QPX_ERR_RECONFIGURATION_PENDING => b"a membership change has not taken effect yet\0",
+        QPX_ERR_REQUEST_ID_EXHAUSTED => b"request id space exhausted; restart from durable records\0",
         QPX_ERR_PANIC => b"internal panic; handle poisoned\0",
         QPX_ERR_POISONED => b"handle poisoned by an earlier panic\0",
         _ => b"unknown status\0",
@@ -490,6 +495,7 @@ unsafe fn ids_from(ptr: *const u32, len: usize) -> Option<Vec<NodeId>> {
 }
 
 /// Requests a linearizable read point; its id is written to `out_id`.
+/// Ids are opaque unsigned 64-bit values; read ids use the high bit (ABI 0.8).
 ///
 /// # Safety
 /// `h` must be a live handle; `out_id` writable.
@@ -741,6 +747,14 @@ pub unsafe extern "C" fn qpx_last_error(buf: *mut std::ffi::c_char, cap: usize, 
 mod tests {
     use super::*;
     use quepaxa::Config;
+
+    #[test]
+    fn request_id_exhaustion_has_an_explicit_status() {
+        assert_eq!(code(Error::RequestIdExhausted), QPX_ERR_REQUEST_ID_EXHAUSTED);
+        // SAFETY: the returned status description is static and NUL-terminated.
+        let message = unsafe { std::ffi::CStr::from_ptr(qpx_status_str(QPX_ERR_REQUEST_ID_EXHAUSTED)) };
+        assert_eq!(message.to_str().unwrap(), Error::RequestIdExhausted.to_string());
+    }
 
     #[test]
     fn a_panic_poisons_the_handle() {

@@ -3,6 +3,35 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- `quepaxa`: coalesces rate-limited forward acknowledgements and sends them when the
+  cooldown expires, even while persistence is stalled. Silence detection follows the
+  actual forwarding destination and does not reuse an earlier target's deadline.
+- `quepaxa`: reads use a separate proposal-id range, keeping logged request ids contiguous
+  so deduplication state no longer grows with every write after a read. `ProposalId` stays
+  opaque and unique per incarnation; interleaved reads and writes are not ordered by id.
+  Exhausting either range returns `RequestIdExhausted` (restart from durable records).
+  Wire and durable encodings are unchanged. Existing dedup windows are preserved until
+  normal incarnation eviction; old gaps cannot safely be discarded during an upgrade.
+- `examples/kv-tokio`: associates client results only with entries from the current
+  `Replica::incarnation()`. A delayed pre-restart request sharing an id, payload and slot
+  with a new request can no longer answer the new client with its old transaction result.
+- `quepaxa-ffi`: ABI 0.8 adds `QPX_ERR_REQUEST_ID_EXHAUSTED`. Request ids remain `uint64_t`;
+  read ids now use its high bit. Function signatures and output layouts are unchanged.
+
+- `quepaxa`: losing the leader across regions stalls the other regions about one commit
+  latency instead of several hedge delays (`Config::silent_leader_takeover`, on by
+  default). A follower whose leader says nothing at all for about a commit latency after a
+  forward suspects it, hands everything to the next member of the leader order, which
+  proposes it, and takes over the leader's unfinished slots as soon. Before, followers
+  waited a hedge delay per entry, then each proposed on its own and contended for slots,
+  until the schedule rotated. In the five-region simulation the stall falls from 2.6-4.6 s
+  to 0.7-1.1 s and p99 after the loss from 8-10 s to 1.0-1.5 s. A new message kind
+  (`ForwardAck`, sent at once, before any write, at most once per eighth of
+  `retransmit_interval` per follower) keeps a leader stalled on its disk from looking
+  silent; peers of older versions reject it.
+
 ## 0.5.0 — 2026-10-31
 
 - `quepaxa` (breaking): linearizable reads no longer go through the log. `read_barrier` asks a

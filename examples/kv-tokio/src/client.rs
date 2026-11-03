@@ -75,8 +75,8 @@ impl Pending {
     }
 
     /// An entry this replica originated was applied in `slot`. Its result is kept only if a
-    /// client waits on that id with the same payload: an earlier incarnation's entry decided
-    /// late can carry an id that is pending again.
+    /// client waits on that id with the same payload. The caller must first filter entries
+    /// to the current incarnation: payload equality cannot distinguish two identical requests.
     pub fn applied(&mut self, slot: u64, id: ProposalId, payload: &[u8], applied: Applied) {
         if self.writes.get(&id).is_some_and(|(p, _)| p == payload) {
             self.results.entry(id).or_default().push((slot, applied));

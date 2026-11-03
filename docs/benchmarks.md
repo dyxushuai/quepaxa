@@ -74,7 +74,7 @@ bound set by CPU and loopback I/O. Until 2026-10-15 `run-local.sh` put its data 
 | 250,000/s | 240,314/s | 48,629 (`Busy`) | 1.1 ms | 752 ms | 2,253 ms |
 
 Here saturation sets in near 200k operations/s, where `max_outstanding_proposals` (4096
-per replica) pushes back with `Busy`. Before #50 it was near 100k/s (p90 30.7 ms, p99
+per replica, `kv-tokio`'s setting then; 65,536 since `812f26f`) pushes back with `Busy`. Before #50 it was near 100k/s (p90 30.7 ms, p99
 124 ms at 100k/s). The changes, each found by measurement:
 
 - **Peer and client I/O batching** (`perf`: 65% of CPU in Tokio workers, about half of
@@ -144,11 +144,10 @@ majority, and `hedge_max` above the slowest client commit path.
 three etcd v3.7.2 members, one system at a time, each node in its own container with
 three cores, data on the VM's ext4 disk (one 512-byte append + `fsync`: 1.7 ms mean). Both
 are driven through etcd's v3 KV gRPC API by the same clients, which `kv-tokio` serves with
-`--etcd`; QuePaxa runs its default `Config`. Steady state and the read-heavy run measured
-2026-10-31 with reads that take no log slot (`20ae43b`), raw results in
-`target/bench-etcd/20261031-183234/`; faults 2026-10-30 with the hedge-delay fix
-(`01bf73e`), `target/bench-etcd/20261030-233953/` (the fault load is write-only, and the
-write path has not changed since).
+`--etcd`; QuePaxa runs its default `Config` except `max_outstanding_proposals`, which
+`kv-tokio` raises to 65,536. Measured 2026-11-03 at `77c0577`, with followers that stop
+waiting for a silent leader (`silent_leader_takeover`), raw results in
+`target/bench-etcd/20261103-030942/`.
 
 ### Steady state
 
@@ -157,11 +156,11 @@ members):
 
 | Workload | etcd req/s | etcd p50 / p99 | QuePaxa req/s | QuePaxa p50 / p99 |
 |---|---|---|---|---|
-| put, unlimited | 24,221 | 10.4 / 19.5 ms | 31,985 | 7.3 / 13.7 ms |
-| put, 5,000/s | 4,866 | 8.0 / 93.8 ms | 4,999 | 5.9 / 11.1 ms |
-| txn-put | 22,580 | 10.9 / 22.7 ms | 32,650 | 7.2 / 12.7 ms |
-| range, linearizable | 100,116 | 1.4 / 12.6 ms | 147,466 | 1.0 / 5.5 ms |
-| range, serializable | 143,705 | 0.9 / 6.6 ms | 154,484 | 0.9 / 5.1 ms |
+| put, unlimited | 23,761 | 10.6 / 19.5 ms | 30,113 | 7.4 / 16.4 ms |
+| put, 5,000/s | 4,998 | 7.9 / 15.6 ms | 4,997 | 5.9 / 11.1 ms |
+| txn-put | 23,055 | 10.8 / 21.2 ms | 31,499 | 7.4 / 13.5 ms |
+| range, linearizable | 98,665 | 1.4 / 12.5 ms | 152,542 | 1.0 / 5.2 ms |
+| range, serializable | 144,853 | 1.0 / 6.2 ms | 151,537 | 0.9 / 5.4 ms |
 
 Writes: QuePaxa commits in fewer `fsync`s on the path (a decision is applied before its
 local record is durable), so 30% more throughput at lower latency. Linearizable reads ask
@@ -182,13 +181,19 @@ round trip more:
 |---|---|---|---|
 | reads through the log (`22a016b`) | 7.4 ms | 12.5-13.2 ms | 139-165 ms |
 | reads without a log slot (`20ae43b`) | 8.0-8.2 ms | 14.4-15.3 ms | 34-141 ms |
+| the same, 65,536 outstanding (`812f26f`, `77c0577`) | 8.1 ms | 14.5-14.6 ms | 30-35 ms |
 | etcd | 9.7-10.7 ms | 21-26 ms | 37-115 ms |
 
 Ranges over the runs without errors (four with reads through the log, three without a log
-slot, alternated). The host is shared and was noisy
-(load average 5-9 from other tenants): in noisy runs both QuePaxa versions and etcd
-degraded alike (p99 into hundreds of ms, and QuePaxa refusing reads with `Busy` once 4,096
-were outstanding), so those runs are left out rather than averaged. An earlier version of
+slot, alternated; one each at `812f26f` and `77c0577`, etcd 21.6-22.1 ms p99 in both). The host is shared and was noisy (load average 5-9
+from other tenants): in noisy runs both QuePaxa versions and etcd degraded alike (p99 into
+hundreds of ms), and QuePaxa refused reads with `Busy` once 4,096 were outstanding, so
+those runs are left out rather than averaged. To reproduce the noise on purpose, busy
+loops pinned to the nodes' and generator's cores (0-12) ran alongside the benchmark: with 4
+and 7 of them QuePaxa's p99 was 14.6 and 19.3 ms against etcd's 68 and 86 ms; with 10 the
+host is overloaded, and with the 4,096 limit QuePaxa failed 24,339 requests with `Busy`
+(p99 3.7 s) where etcd failed none (p99 9.1 s). With 65,536 the same overload costs
+QuePaxa no request (p99 0.4-0.7 s over two runs) and etcd 22,507-195,993 (p99 12-19 s). An earlier version of
 the waiting rule drove every slot below the mark itself, contending with their proposers:
 p99 45-200 ms here, fixed before these runs.
 
@@ -203,18 +208,18 @@ local network (10 ms, 100 ms).
 
 | Fault | System | p99 | max | Errors | Longest gap | Degraded |
 |---|---|---|---|---|---|---|
-| crash (`SIGKILL`) | etcd | 16 ms | 1,087 ms | 5,402 | 1,075 ms | 1,250 ms |
-| | etcd, tuned | 16 ms | 139 ms | 603 | 127 ms | 250 ms |
-| | QuePaxa | 15 ms | 130 ms | 0 | 40 ms | 0 ms |
-| partition (15 s) | etcd | 75 ms | 1,094 ms | 5,483 | 1,082 ms | 2,000 ms |
-| | etcd, tuned | 16 ms | 141 ms | 613 | 124 ms | 250 ms |
-| | QuePaxa | 12 ms | 138 ms | 0 | 36 ms | 250 ms |
-| slow disk (50 write IOPS, 15 s) | etcd | 395 ms | 506 ms | 0 | 227 ms | 4,750 ms |
-| | etcd, tuned | 391 ms | 700 ms | 628 | 385 ms | 1,750 ms |
-| | QuePaxa | 14 ms | 176 ms | 0 | 160 ms | 250 ms |
-| far leader (+50 ms, 15 s) | etcd | 243 ms | 535 ms | 0 | 90 ms | 500 ms |
-| | etcd, tuned | 1,126 ms | 1,716 ms | 0 | 548 ms | 1,750 ms |
-| | QuePaxa | 13 ms | 166 ms | 0 | 40 ms | 250 ms |
+| crash (`SIGKILL`) | etcd | 18 ms | 1,069 ms | 5,184 | 1,060 ms | 1,250 ms |
+| | etcd, tuned | 16 ms | 136 ms | 536 | 123 ms | 250 ms |
+| | QuePaxa | 12 ms | 39 ms | 0 | 13 ms | 0 ms |
+| partition (15 s) | etcd | 518 ms | 1,943 ms | 5,395 | 1,931 ms | 2,000 ms |
+| | etcd, tuned | 819 ms | 1,192 ms | 641 | 772 ms | 2,500 ms |
+| | QuePaxa | 42 ms | 118 ms | 0 | 101 ms | 0 ms |
+| slow disk (50 write IOPS, 15 s) | etcd | 982 ms | 1,395 ms | 0 | 544 ms | 5,250 ms |
+| | etcd, tuned | 236 ms | 415 ms | 535 | 198 ms | 2,250 ms |
+| | QuePaxa | 27 ms | 160 ms | 0 | 51 ms | 0 ms |
+| far leader (+50 ms, 15 s) | etcd | 170 ms | 295 ms | 0 | 86 ms | 250 ms |
+| | etcd, tuned | 1,867 ms | 2,222 ms | 85 | 839 ms | 3,500 ms |
+| | QuePaxa | 18 ms | 249 ms | 0 | 225 ms | 0 ms |
 
 What the table says, and what it does not:
 
@@ -222,13 +227,23 @@ What the table says, and what it does not:
   it has no leader (its client retries them): thousands with default timeouts, hundreds
   tuned, and tuned etcd fails requests even when the leader is only slow, because its
   100 ms elections fire anyway.
-- **A dead or cut-off leader** costs etcd with default timeouts one election: about 1.1 s
-  without completions. Tuned etcd recovers in about 130 ms. QuePaxa needs no election:
-  followers propose themselves after the hedge delay (four times the smoothed commit
-  latency, a few tens of ms here) and the leader rotates out after eight slots it did not
-  lead, so its longest gap is about 40 ms. etcd's p99 is as low as QuePaxa's because the
-  requests it fails during the election leave the percentiles; QuePaxa delays them by at
-  most 140 ms instead.
+- **A dead or cut-off leader** costs etcd with default timeouts one election: 1.1-1.9 s
+  without completions. Tuned etcd recovers in 0.1-0.8 s. QuePaxa needs no election: a
+  follower that hears nothing from the leader for about a commit latency after forwarding
+  hands its writes to the next member of the leader order and takes over the leader's
+  unfinished slots, and the leader rotates out after eight slots it did not lead. Its
+  longest gap was 13 ms after a crash and 101 ms after a partition. The partition row
+  varies with host load: in three quiet reruns QuePaxa's longest gap was 13-15 ms and its
+  p99 12-13 ms; in six noisy ones, alternated with the code before the silence wait lost
+  its `retransmit_interval` floor, 36-345 ms (median 144 ms) against 158-777 ms (median
+  538 ms). In one earlier full run tuned etcd's p99 after a partition (19 ms) was below
+  QuePaxa's (68 ms), with 640 requests failed and so left out of its percentiles.
+- **QuePaxa's longest gap with a distant leader** (225 ms here) is the one cell above
+  default etcd's (86 ms), and not only in this run: over ten runs of `812f26f` and
+  `77c0577` it ranged from 20 to 743 ms (median about 140 ms), against 86-96 ms for
+  default etcd in three. The stalls fall mostly while the leader is distant and grow with
+  host load; QuePaxa's p99 stayed below default etcd's in eight of the ten. Not traced
+  yet.
 - **A slow leader disk** barely shows in QuePaxa's numbers: the two other recorders form
   the majority, so commits never wait for the slow one. Every etcd write goes through the
   leader, whose raft loop waits on its own log write before taking the next batch, so its
@@ -238,8 +253,9 @@ What the table says, and what it does not:
   the added delay on every commit for the whole fault; tuned etcd does worse (p99 1.1 s),
   with 50 ms each way close to its 100 ms election timeout. Which mechanism costs it the
   time was not traced.
-- QuePaxa's slow-disk row varies between runs: in six reruns its longest gap ranged from
-  26 to 296 ms and its max from 160 to 313 ms, with brief stalls at random times during and
+- QuePaxa's slow-disk row varies between runs: in six earlier reruns its longest gap
+  ranged from 26 to 296 ms and its max from 160 to 313 ms (76-210 ms in three noisy ones at
+  `6a2720d`), with brief stalls at random times during and
   after the fault. A trace of one showed the mechanism: while the throttled replica's
   writeback slows the shared disk, the healthy leader's commits briefly exceed the hedge
   delay (about 20 ms), the follower hedges every waiting entry at once (600 in 250 ms),
@@ -274,50 +290,59 @@ for 40 s; faults hit the leader's region from 10 s to 25 s. The leader is pinned
 whose second-nearest peer is the farthest (180 ms; a majority is three of five), or to
 us-east (80 ms) for the best-placed control. QuePaxa runs with WAN timers (retransmit
 400 ms, hedge cap 3 s), etcd with its defaults (heartbeat 100 ms, election 1 s) and tuned
-per its guide for the 300 ms largest round trip (300 ms, 3 s). Medians of six runs, range
-in parentheses, latency in ms. The no-fault, crash and partition cases are two sets of
-three (`target/bench-etcd/wan-20261031-235204/` and `wan-20261101-011133/`, at `876bc6b`);
-the slow and jitter cases are one set of six at `bb2f5dc` (`wan-20261101-030954/`), after
-a harness fix that stopped faults from dropping the packets queued on a link.
+per its guide for the 300 ms largest round trip (300 ms, 3 s). Medians of three runs, range
+in parentheses, latency in ms: QuePaxa at `77c0577` (`target/bench-etcd/wan-20261103-032219/`),
+etcd from the night before with the same harness (`wan-20261102-225414/`). QuePaxa's rows
+from before silent-leader takeover are from `876bc6b` and `bb2f5dc`
+(`wan-20261031-235204/`, `wan-20261101-011133/`, `wan-20261101-030954/`).
 
 With the leader's region alive, on all five regions' writes:
 
-| Leader's region | QuePaxa p99 | etcd p99 | etcd tuned p99 | Errors (QuePaxa / etcd / tuned) |
-|---|---|---|---|---|
-| far, no fault | 656 (612-683) | 2,782 (1,006-4,038) | 1,169 (892-1,460) | 0 / 0 (0-381) / 0 |
-| best-placed, no fault | 327 (320-333) | 514 (491-844) | 500 (497-967) | 0 / 0 / 0 |
-| far, +100 ms on its links | 888 (814-1,443) | 2,246 (1,809-3,622) | 1,167 (1,119-9,679) | 0 / 0 (0-652) / 0 (0-72) |
-| far, jitter (σ 50 ms) and 1% loss on its links | 885 (839-2,151) | 6,341 (4,986-6,788) | 5,326 (4,385-7,345) | 0 / 2,047 (1,241-6,026) / 1,357 (0-2,627) |
+| Leader's region | p99 (QuePaxa / etcd / tuned) | Longest gap (QuePaxa / etcd / tuned) | Errors (QuePaxa / etcd / tuned) |
+|---|---|---|---|
+| far, no fault | 655 (633-655) / 3,781 (3,153-4,067) / 1,229 (1,070-1,354) | 191 / 318 / 363 | 0 / 0 (0-595) / 0 |
+| best-placed, no fault | 339 (293-362) / 515 (488-515) / 510 (502-514) | 183 / 201 / 370 | 0 / 0 / 0 |
+| far, +100 ms on its links | 923 (830-926) / 3,166 (2,038-3,825) / 1,207 (1,117-1,657) | 289 / 412 / 428 | 0 / 0 / 0 |
+| far, jitter (σ 50 ms) and 1% loss on its links | 1,435 (862-3,111) / 6,423 (6,290-6,522) / 6,880 (6,262-8,182) | 614 / 11,139 / 5,511 | 0 / 2,527 (998-4,497) / 3 (0-1,262) |
 
 With the leader's region crashed or cut off, on the other four regions' writes (its own
 clients cannot write at all):
 
 | Fault | System | Errors | Longest gap | p99 | max |
 |---|---|---|---|---|---|
-| crash | QuePaxa | 0 | 3,248 (3,204-3,453) | 7,089 (6,564-7,553) | 8,049 |
-| | etcd | 1,200 (947-1,360) | 1,844 (1,709-2,284) | 2,837 (2,299-5,692) | 4,002 |
-| | etcd, tuned | 3,255 (2,667-4,327) | 4,850 (3,454-6,021) | 2,053 (1,416-6,081) | 5,478 |
-| partition | QuePaxa | 0 | 3,249 (3,179-3,300) | 7,287 (6,913-8,135) | 8,140 |
-| | etcd | 1,339 (1,162-1,476) | 2,319 (1,752-2,532) | 3,234 (2,483-4,988) | 4,155 |
-| | etcd, tuned | 3,158 (2,843-3,861) | 4,695 (4,123-6,056) | 1,814 (1,046-4,018) | 5,233 |
+| crash | QuePaxa | 0 | 859 (705-860) | 974 (898-977) | 1,817 |
+| | QuePaxa before | 0 | 3,248 (3,204-3,453) | 7,089 (6,564-7,553) | 8,049 |
+| | etcd | 1,273 (1,155-1,631) | 2,224 (2,048-2,528) | 4,233 (4,097-5,533) | 5,789 |
+| | etcd, tuned | 3,747 (3,533-4,036) | 4,967 (4,687-5,658) | 3,145 (2,467-5,507) | 5,458 |
+| partition | QuePaxa | 0 | 708 (685-794) | 904 (870-919) | 1,624 |
+| | QuePaxa before | 0 | 3,249 (3,179-3,300) | 7,287 (6,913-8,135) | 8,140 |
+| | etcd | 1,366 (1,225-1,388) | 2,300 (2,266-2,675) | 2,732 (2,455-2,934) | 3,413 |
+| | etcd, tuned | 3,419 (3,062-4,074) | 4,628 (4,132-6,497) | 3,110 (1,060-3,747) | 5,234 |
 
 What the tables say, and what they do not:
 
 - **No QuePaxa request failed** in any case. etcd fails writes whenever it loses or
   changes its leader: with jitter on the leader's links both etcd configurations elect
-  again and again (default etcd 1,200-6,000 errors per run), and default etcd's 1 s
-  election timeout once fired with no fault at all.
-- **With the leader alive but far, slow or jittery**, QuePaxa's p99 is the lowest of the
-  three, and with the leader slow or jittery its longest gap is too (284 and 567 ms
-  against tuned etcd's 435 ms and 5.6 s). Placement matters for all three: moving the
-  leader from ap-ne to us-east at least halves the p99.
-- **Losing the leader's region costs QuePaxa a 3.2 s stall** in every other region: longer
-  than default etcd's election (about 2 s), shorter than tuned etcd's (4-5 s). The gap is
-  close to the hedge cap (3 s) plus a round trip: followers propose their own entries only
-  after the hedge delay, which on these round trips reaches the cap. After the stall the
-  backlog drains slowly, so QuePaxa's p99 (7-8 s) is well above the gap; etcd's p99 is
-  lower partly because the requests it fails leave the percentiles. Both are follow-up
-  work for the engine (`STRATEGY.md`, cross-region track), not fixed here.
+  again and again (default etcd 1,000-4,500 errors per run), and default etcd's 1 s
+  election timeout fired once with no fault at all.
+- **With the leader alive but far, slow or jittery**, QuePaxa has the lowest p99 and the
+  shortest longest gap of the three in every case. Placement matters for all three:
+  moving the leader from ap-ne to us-east at least halves the p99.
+- **Losing the leader's region costs QuePaxa 0.7-0.9 s** in every other region, down from
+  3.2 s, against about 2.2 s for default etcd's election and 4.6-5 s for tuned etcd's;
+  the p99 after the loss fell from 7-8 s to about 1 s. Before, followers proposed their
+  own entries only after the hedge delay, which on these round trips reaches its 3 s cap,
+  and the leader's unfinished slots waited longer still. Now a follower that hears
+  nothing from the leader for about a commit latency after forwarding hands its entries
+  to the next member of the leader order and takes over the leader's slots
+  (`silent_leader_takeover`).
+- **The leader's acknowledgements must stay rare.** A leader acknowledges a forward at
+  once so that waiting on its disk does not look like silence. One acknowledgement per
+  forward tripled QuePaxa's p99 in the jitter case (3.2-3.5 s against 0.96-1.0 s without,
+  and 7.4 s with takeover off): every message is a packet the 1% loss can drop, stalling
+  the TCP stream behind it. At most one per eighth of `retransmit_interval` per follower
+  brought it back (0.93 s in a separate set of three, 1.4 s here; the code before
+  takeover measured 0.89 s at `bb2f5dc` and 1.0 s at `5d6d384` on the day of these runs).
 - **The jitter case is mostly extra, uneven delay**, not ±50 ms: netem keeps jittered
   packets in order only when the link has a rate, and with one it holds each packet
   behind the one ahead, so under load the added delay skews toward the high end. The
@@ -326,16 +351,9 @@ What the tables say, and what they do not:
   the link's qdisc and dropped every queued packet, a loss burst at 10 s and 25 s. Those
   runs had QuePaxa and tuned etcd about even with +100 ms (p99 1,281 against 1,391) and
   one QuePaxa jitter run stalled for 11.6 s; neither recurred after the fix.
-- The two sets of the other cases reproduce each other: per system and case their p99
-  ranges overlap, except tuned etcd after a crash (1,416-1,977 against 2,129-6,081), and
-  QuePaxa and tuned etcd rank the same in each set on p99 and longest gap.
 - The `Degraded` column of `summary.md` is left out: at 200 writes/s per region, 250 ms
   buckets hold about 50 requests, and round-trip variation alone puts many of them under
   the 80% line even without a fault.
-- In the no-fault, crash and partition runs the leader after the fault was found with
-  short-lived probe containers during the last 7.5 s of the load, not pinned off the
-  replicas' cores; `wan.sh` now probes after the load. The post-heal tail may carry a
-  little of that noise.
 - One host: links are emulated, there is no bandwidth limit, and the five replicas share
   the disk and CPUs. Hypotheses for real regions, not production claims.
 

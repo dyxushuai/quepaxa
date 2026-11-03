@@ -52,6 +52,7 @@ impl Replica {
             self.inbox.push_back((from, msg.body));
             return;
         }
+        self.heard_from(from);
         if msg.env.commit_index > self.peer_committed {
             self.peer_committed = msg.env.commit_index;
             self.ahead_peer = Some(from);
@@ -149,7 +150,9 @@ impl Replica {
                             }
                         }
                     }
-                    Body::Forward { batch } => self.on_forward(&batch),
+                    Body::Forward { batch } => self.on_forward(from, &batch),
+                    // Arriving at all is the point (`heard_from`, `watch.rs`).
+                    Body::ForwardAck => {}
                     Body::Compacted { through } => self.on_compacted(from, through),
                     Body::ReadQuery { incarnation, round } => self.on_read_query(from, incarnation, round),
                     Body::ReadReply { incarnation, round, high } => {

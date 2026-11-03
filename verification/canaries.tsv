@@ -8,7 +8,7 @@ no-commit-dedup	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --t
 checkpoint-drops-registers	QPX_SIM_SEEDS=2000	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	agreement|G[1345] |not in the log
 local-read-barrier	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	linearizability
 read-mark-from-registers-only	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	linearizability|stale read
-read-ignores-an-epoch	QPX_SIM_SEEDS=2000	cargo nextest run --release -p quepaxa-sim --test replica_sim membership_changes	linearizability|stale read
+read-ignores-an-epoch	QPX_SIM_MEMBERSHIP_SEEDS=400	cargo nextest run --release -p quepaxa-sim --test replica_sim membership_changes	linearizability|stale read
 leader-reuses-h-after-restart	-	cargo nextest run --release -p quepaxa-sim --test model_check	G5 unique H|G4 fast-path lock|G1
 reconfiguration-takes-effect-early	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	G[1345] |agreement|InvalidCoreState|linearizability|did not converge
 reconfiguration-applied-twice	-	cargo nextest run -p quepaxa schedule	late duplicate
@@ -16,3 +16,5 @@ proposer-uses-configured-members	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run 
 retire-without-the-new-majority	-	cargo nextest run -p quepaxa --lib caught_up_majority	retired with only one of three
 trace-phase0-adopts-the-first-reply	-	verification/tla/traces.sh	REJECTED
 retire-without-the-barrier	-	cargo nextest run -p quepaxa --test membership_api added_back_after	retired although it was added back
+suspect-forwards-to-the-leader	-	cargo nextest run --release -p quepaxa-sim --test leader_loss	writes stalled|p99 [0-9]+ ms after the kill
+silence-ignores-the-forward-time	-	cargo nextest run --release -p quepaxa-sim --test leader_loss	writes hedged

@@ -12,6 +12,7 @@ mod proposing;
 mod reads;
 mod retire;
 mod snapshot;
+mod watch;
 
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
@@ -31,7 +32,7 @@ use crate::proposer::SlotProposer;
 use crate::recorder::Register;
 use crate::rng::ChaCha20;
 use crate::schedule::Schedule;
-use crate::types::{MAX_SLOT, MAX_STEP, NodeId, PersistId, ProposalId, Slot, Timestamp};
+use crate::types::{MAX_SLOT, MAX_STEP, NodeId, PersistId, ProposalId, READ_ID_BASE, Slot, Timestamp};
 
 #[cfg_attr(feature = "model", derive(Clone, Hash))]
 struct Decision {
@@ -113,12 +114,17 @@ pub struct Replica {
     // Proposer side.
     proposers: BTreeMap<Slot, Active>,
     batches: BTreeMap<u64, LocalBatch>,
-    /// Entries to batch if this replica leads, else to forward to the leader.
+    /// Own entries to batch if this replica proposes them itself, else to forward to its
+    /// target (`watch.rs`).
     pending: VecDeque<Item>,
-    /// Own entries the leader did not commit in time; this replica proposes them itself.
-    hedged: VecDeque<Item>,
+    /// Entries this replica proposes itself whatever it leads: handed to it as the deputy of
+    /// a leader another follower suspects, or its own the leader left uncommitted for δ
+    /// (`watch.rs`).
+    relayed: VecDeque<Item>,
     /// Own entries handed to the leader, with when.
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
+    /// Whether this replica suspects the leader it hands entries to (`watch.rs`).
+    watch: watch::Watch,
     /// Own proposals awaiting commit: when they were made, what they are, and whether they
     /// were hedged.
     outstanding: BTreeMap<ProposalId, (Timestamp, Kind, bool)>,
@@ -273,8 +279,9 @@ impl Replica {
             proposers: BTreeMap::new(),
             batches: BTreeMap::new(),
             pending: VecDeque::new(),
-            hedged: VecDeque::new(),
+            relayed: VecDeque::new(),
             forwarded: BTreeMap::new(),
+            watch: watch::Watch::default(),
             outstanding: BTreeMap::new(),
             reads: reads::Reads::default(),
             commit_latency: None,
@@ -317,6 +324,14 @@ impl Replica {
         self.me
     }
 
+    /// This start's incarnation, advanced on every recovery from durable records.
+    ///
+    /// Match it with [`Entry::incarnation`] and [`Replica::id`] when associating committed
+    /// entries with current client requests: an older start may have used the same proposal id.
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
+    }
+
     /// Number of contiguous decided slots from the start of the log (including slots
     /// covered by a snapshot): the next slot to be decided in order.
     pub fn commit_index(&self) -> u64 {
@@ -344,6 +359,7 @@ impl Replica {
     /// - [`Error::PayloadTooLarge`] if the entry alone exceeds [`Config::max_batch_bytes`].
     /// - [`Error::Fenced`] after a storage failure; [`Error::NotDrained`] if the previous
     ///   call's actions were not taken.
+    /// - [`Error::RequestIdExhausted`] after this incarnation used every logged request id.
     pub fn propose(&mut self, now: Timestamp, payload: Bytes) -> Result<ProposalId, Error> {
         self.enqueue(now, payload, Kind::App)
     }
@@ -359,7 +375,7 @@ impl Replica {
     /// # Errors
     ///
     /// [`Error::Busy`] (reads count against [`Config::max_outstanding_proposals`] with
-    /// proposals), [`Error::Fenced`], [`Error::NotDrained`].
+    /// proposals), [`Error::Fenced`], [`Error::NotDrained`], [`Error::RequestIdExhausted`].
     pub fn read_barrier(&mut self, now: Timestamp) -> Result<ProposalId, Error> {
         self.begin(now)?;
         let id = self.submit_read()?;
@@ -429,6 +445,9 @@ impl Replica {
         }
         if self.outstanding.len() + self.reads.len() >= self.cfg.max_outstanding_proposals as usize {
             return Err(Error::Busy);
+        }
+        if self.next_proposal >= READ_ID_BASE {
+            return Err(Error::RequestIdExhausted);
         }
         let id = ProposalId(self.next_proposal);
         let item =
@@ -560,7 +579,7 @@ impl Replica {
         self.drop_reads();
         self.proposers.clear();
         self.pending.clear();
-        self.hedged.clear();
+        self.relayed.clear();
         self.forwarded.clear();
         self.batches.clear();
         self.inbox.clear();
@@ -603,3 +622,5 @@ impl Replica {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod watch_tests;

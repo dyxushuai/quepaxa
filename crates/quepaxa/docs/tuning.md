@@ -16,6 +16,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `max_outstanding_proposals` | 4096 | Local proposals not yet committed before [`Busy`](crate::Error::Busy). |
 | `retransmit_interval` | 50 ms | When an unanswered request is sent again. |
 | `hedge_min`, `hedge_max` | 1 ms, 1 s | Bounds of the adaptive hedge delay. |
+| `silent_leader_takeover` | on | Stop waiting for a leader that has said nothing for about a commit latency since a forward. |
 
 ## Throughput
 
@@ -24,6 +25,9 @@ into the next batch, so batches grow with load without any tuning. `max_in_fligh
 pipelines slots; more helps on high-latency links, at the cost of more contention when
 replicas compete. `max_outstanding_proposals` bounds memory: beyond it `propose` returns
 [`Busy`](crate::Error::Busy) and the client should back off rather than queue unboundedly.
+The default holds a few hundred milliseconds of a busy server's load; a server that bounds
+its own client queues can raise it to their size, so a brief CPU stall queues requests
+instead of failing them.
 
 On disk, latency is a few `fsync`s per commit and throughput depends on how many writes
 each `fsync` carries: write on a dedicated thread and acknowledge in groups
@@ -36,8 +40,17 @@ The defaults assume round trips of a few milliseconds.
 - **`retransmit_interval`** must exceed the round trip to the farthest member of a
   majority, or every request is sent several times.
 - **`hedge_max`** must exceed the slowest client commit path (forward to the leader, one
-  round trip to a majority, decision back). Below it, followers stop waiting for the
-  leader and propose themselves, which costs throughput.
+  round trip to a majority, decision back). Below it, followers stop waiting for a live
+  leader and propose its entries themselves, which costs throughput.
+- **`silent_leader_takeover`** (on by default): a follower that hears nothing at all from
+  the leader for about a commit latency after forwarding hands its entries to the next
+  member of the leader order and takes over the leader's unfinished slots, instead of
+  waiting up to `hedge_max`. In the repository's five-region benchmark, recovery from a
+  lost leader region drops from several seconds to under a second. A leader acknowledges
+  forwards before any write (at most once per eighth of `retransmit_interval` per
+  follower), so a slow disk does not make it look silent; silence shorter
+  than twice that acknowledgement's round trip, than one round trip plus its cooldown, or
+  than `hedge_min`, is never counted.
 - **`leader_order`**: put the leader where a majority is closest.
 
 The repository's simulated five-region benchmark (`docs/benchmarks.md`) shows each effect.

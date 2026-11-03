@@ -16,6 +16,10 @@ a slot nobody finishes), checks that a majority of every member set from there o
 `ReadReady` follows the `Commit` of `slot`, so with an in-order applier your state is
 already there: read it and answer.
 
+Request ids are opaque `u64` values. Reads and logged proposals use separate ranges, so
+interleaving them does not produce increasing ids. Preserve all 64 bits when storing or
+passing an id across a language boundary.
+
 ```
 use bytes::Bytes;
 use quepaxa::{Action, Config, Input, NodeId, Replica, Timestamp};

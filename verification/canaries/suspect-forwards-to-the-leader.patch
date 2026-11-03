@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
+--- a/crates/quepaxa/src/replica/watch.rs
++++ b/crates/quepaxa/src/replica/watch.rs
+@@ -50,7 +50,7 @@ impl Replica {
+         order
+             .iter()
+             .copied()
+-            .find(|n| *n == self.me || !self.watch.suspects.contains_key(n))
++            .find(|n| *n == self.me || !self.watch.suspects.contains_key(n) || true)
+             .unwrap_or(self.me)
+     }
+ 

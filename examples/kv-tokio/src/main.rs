@@ -144,6 +144,10 @@ fn config(args: &Args) -> Config {
     cluster_id[..8].copy_from_slice(b"kv-tokio");
     let mut cfg = Config::new(cluster_id, NodeId(args.id), members, seed());
     cfg.leader_order = args.leader_order.clone();
+    // Room for seconds of a busy node's requests: with the default (4096), a CPU
+    // stall of a few hundred milliseconds under 40k requests/s fails requests with `Busy`
+    // instead of queueing them.
+    cfg.max_outstanding_proposals = 1 << 16;
     if let Some(ms) = args.retransmit_ms {
         cfg.retransmit_interval = ms.saturating_mul(MILLI);
     }
