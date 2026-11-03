@@ -49,8 +49,8 @@ The defaults assume round trips of a few milliseconds.
   lost leader region drops from several seconds to under a second. A leader acknowledges
   forwards before any write (at most once per eighth of `retransmit_interval` per
   follower), so a slow disk does not make it look silent; silence shorter
-  than twice that acknowledgement's round trip plus its cooldown, or than `hedge_min`, is
-  never counted.
+  than twice that acknowledgement's round trip, than one round trip plus its cooldown, or
+  than `hedge_min`, is never counted.
 - **`leader_order`**: put the leader where a majority is closest.
 
 The repository's simulated five-region benchmark (`docs/benchmarks.md`) shows each effect.

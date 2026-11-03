@@ -182,11 +182,15 @@ fn sigma_counts_only_below_the_hedge_delay_and_covers_twice_r() {
     assert_eq!(r.silence_wait(NodeId(0)), None, "2R past δ: silence says nothing δ does not");
     r.cfg.hedge_max = 400 * MS;
     r.commit_latency = Some(40 * MS);
+    assert_eq!(r.silence_wait(NodeId(0)), Some(120 * MS), "a leader slow to answer (R = 60 ms) is given 2R");
+    r.watch.reply.insert(NodeId(0), MS);
+    r.cfg.retransmit_interval = 400 * MS;
     assert_eq!(
         r.silence_wait(NodeId(0)),
-        Some(120 * MS + r.cfg.retransmit_interval / 8),
-        "a leader slow to answer (R = 60 ms) is given 2R and a rate-limited ack's wait"
+        Some(MS + 50 * MS),
+        "R and the wait for a rate-limited ack (retransmit_interval / 8)"
     );
+    r.cfg.retransmit_interval = 10 * MS;
     r.commit_latency = Some(5 * MS);
     r.watch.reply.insert(NodeId(0), MS / 100);
     assert_eq!(r.silence_wait(NodeId(0)), Some(5 * MS), "a quick reply leaves the commit latency");

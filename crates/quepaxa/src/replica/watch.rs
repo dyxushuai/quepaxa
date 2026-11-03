@@ -15,7 +15,7 @@
 //! Silence is judged against R, the delay from a forward to a member's next message, kept per
 //! member: a deputy may be farther than the leader. A member acknowledges forwards at once,
 //! before any write (`ack_forward`), so R is about a round trip even while its disk is slow;
-//! R rises at once to a slower sample and decays slowly. Once σ = max(commit latency, 2R +
+//! R rises at once to a slower sample and decays slowly. Once σ = max(commit latency, 2R, R +
 //! the acknowledgement cooldown, `hedge_min`) passes with no word from the target since an
 //! entry was forwarded to it, the target is suspected; and a slot is taken over after
 //! `position · σ` instead of `(position + 1) · δ` once its leader has said nothing for σ (a
@@ -127,13 +127,13 @@ impl Replica {
 
     /// σ for `node`, once the commit latency and its R have been observed, and only while it
     /// is shorter than δ: silence that cannot be judged before δ adds nothing to it. It
-    /// covers twice R plus the wait for a rate-limited acknowledgement (`ack_forward`).
+    /// covers twice R, and R plus the wait for a rate-limited acknowledgement (`ack_forward`).
     pub(super) fn silence_wait(&self, node: NodeId) -> Option<u64> {
         if !self.cfg.silent_leader_takeover {
             return None;
         }
         let (latency, reply) = (self.commit_latency?, *self.watch.reply.get(&node)?);
-        let answer = reply.saturating_mul(2).saturating_add(self.ack_every());
+        let answer = reply.saturating_mul(2).max(reply.saturating_add(self.ack_every()));
         let sigma = latency.max(answer).max(self.cfg.hedge_min);
         (sigma < self.hedge_delay()).then_some(sigma)
     }
