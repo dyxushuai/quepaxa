@@ -29,7 +29,7 @@ use core::mem;
 
 use crate::api::{Action, DropReason, Error};
 use crate::codec::Body;
-use crate::types::{NodeId, ProposalId, Slot, Timestamp};
+use crate::types::{NodeId, ProposalId, READ_ID_BASE, Slot, Timestamp};
 
 use super::Replica;
 
@@ -40,6 +40,8 @@ pub(super) struct Reads {
     queued: Vec<ProposalId>,
     round: Option<Round>,
     next_round: u64,
+    /// Reads never enter the log, so they must not consume the dedup sequence.
+    next_id: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -98,8 +100,11 @@ impl Replica {
         if self.outstanding.len() + self.reads.len() >= self.cfg.max_outstanding_proposals as usize {
             return Err(Error::Busy);
         }
-        let id = ProposalId(self.next_proposal);
-        self.next_proposal += 1;
+        if self.reads.next_id >= READ_ID_BASE {
+            return Err(Error::RequestIdExhausted);
+        }
+        let id = ProposalId(READ_ID_BASE + self.reads.next_id);
+        self.reads.next_id += 1;
         self.reads.queued.push(id);
         Ok(id)
     }
@@ -213,3 +218,6 @@ impl Replica {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

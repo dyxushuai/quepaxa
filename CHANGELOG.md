@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: reads use a separate proposal-id range, keeping logged request ids contiguous
+  so deduplication state no longer grows with every write after a read. `ProposalId` stays
+  opaque and unique per incarnation; interleaved reads and writes are not ordered by id.
+  Exhausting either range returns `RequestIdExhausted` (restart from durable records).
+  Wire and durable encodings are unchanged. Existing dedup windows are preserved until
+  normal incarnation eviction; old gaps cannot safely be discarded during an upgrade.
+- `quepaxa-ffi`: ABI 0.8 adds `QPX_ERR_REQUEST_ID_EXHAUSTED`. Request ids remain `uint64_t`;
+  read ids now use its high bit. Function signatures and output layouts are unchanged.
+
 - `quepaxa`: losing the leader across regions stalls the other regions about one commit
   latency instead of several hedge delays (`Config::silent_leader_takeover`, on by
   default). A follower whose leader says nothing at all for about a commit latency after a

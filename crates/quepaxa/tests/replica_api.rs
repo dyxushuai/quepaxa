@@ -46,6 +46,7 @@ fn restart_replays_committed_slots_from_durable_records() {
     r.propose(T0, Bytes::from_static(b"x")).unwrap();
     settle(&mut r, &mut disk);
     let mut r2 = Replica::new(config(&[0]), disk.clone(), T0).unwrap();
+    assert_eq!(r2.incarnation(), r.incarnation() + 1);
     let replay = drain(&mut r2);
     assert!(matches!(&replay[0], Action::Commit { slot: Slot(0), entries } if entries[0].payload == "x"));
     assert_eq!(r2.commit_index(), 1);

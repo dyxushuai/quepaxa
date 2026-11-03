@@ -336,6 +336,7 @@ pub struct Metrics {
 /// | Backpressure | [`Busy`](Error::Busy), [`ReconfigurationPending`](Error::ReconfigurationPending) | Retry later. |
 /// | Bad input | [`InvalidConfig`](Error::InvalidConfig), [`PayloadTooLarge`](Error::PayloadTooLarge), [`InvalidCoreState`](Error::InvalidCoreState) | Fix the argument. |
 /// | Storage | [`CorruptRecord`](Error::CorruptRecord), [`Fenced`](Error::Fenced) | Repair or restore the data; restart. |
+/// | Identity exhaustion | [`RequestIdExhausted`](Error::RequestIdExhausted) | Restart from durable records. |
 /// | Driver bug | [`NotDrained`](Error::NotDrained), [`UnknownPersistId`](Error::UnknownPersistId) | Fix the event loop ([`guide::driving`](crate::guide::driving)). |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -366,6 +367,9 @@ pub enum Error {
     /// A membership change is still waiting to take effect; propose the next one after its
     /// [`Action::Reconfigured`] slot is committed.
     ReconfigurationPending,
+    /// This incarnation has used all ids for reads or logged requests (2^63 of each).
+    /// Restart from durable records to obtain a new incarnation; never reset its storage.
+    RequestIdExhausted,
 }
 
 impl fmt::Display for Error {
@@ -380,6 +384,9 @@ impl fmt::Display for Error {
             Error::UnknownPersistId => f.write_str("unknown persist id"),
             Error::InvalidCoreState => f.write_str("invalid core state"),
             Error::ReconfigurationPending => f.write_str("a membership change has not taken effect yet"),
+            Error::RequestIdExhausted => {
+                f.write_str("request id space exhausted; restart from durable records")
+            }
         }
     }
 }
