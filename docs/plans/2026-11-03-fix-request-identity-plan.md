@@ -2,7 +2,7 @@
 title: Request Identity Fixes - Delivery Record
 type: fix
 date: 2026-11-03
-status: ready-for-push
+status: in-review
 ---
 
 # Request Identity Fixes - Delivery Record
@@ -18,8 +18,8 @@ formal review existed before the code was committed.
 - U1: `06feef69eec586872b2766818d7c524cd2aaeb4f` separates read and logged request ids.
 - U2: `9b44658e295dca19440068ac40d6fa56e158fcd6` fixes client-result association.
 - Existing leader-recovery work before the review base is outside this repair review.
-- PR #132 already tracks that earlier work. Its remote head was still the review base
-  when checked on 2026-11-03; its successful CI does not validate these repairs.
+- PR #132 tracks that earlier work and these repairs. The repairs and this record were
+  published at `6ce43ef` on 2026-11-03; CI on the current head is tracked in the PR.
 
 ## Requirements and Acceptance
 
@@ -36,7 +36,7 @@ formal review existed before the code was committed.
 
 The following checks passed in the implementation session against the source tree now
 represented by the two implementation commits. Commit preparation changed no executable
-code. These are local results, not CI results for the unpublished commits.
+code. These are local results, recorded before the commits were published.
 
 - `cargo +stable fmt --all --check`
 - `cargo +stable clippy --workspace --all-targets --all-features --locked -- -D warnings`
@@ -62,8 +62,8 @@ successful result. Both passed after the fixes.
 - [x] Preserve default Rust module paths for the new tests.
 - [x] Complete formal review and record its scope, findings, and coverage limits.
 - [x] Resolve retained findings and run affected checks if code changes (no findings or code changes).
-- [x] Prepare the PR description with Why, How, and Tests (local draft; not published).
-- [ ] Obtain push authorization and publish the repair branch/PR.
+- [x] Publish the PR description with Why, How, and Tests.
+- [x] Obtain push authorization and publish the repair branch/PR.
 - [ ] Verify CI on the actual published repair head.
 - [ ] Obtain review approval and merge; close this record only after delivery.
 
@@ -94,4 +94,5 @@ is claimed. The review does not certify the earlier commits in PR #132.
 The raw local receipt is retained under
 `/tmp/compound-engineering-1000/ce-code-review/request-identity-kvw_elbo/review.json`.
 This committed summary preserves its scope, outcome, and limits if temporary artifacts
-are later removed. The PR-body update is prepared locally; publishing awaits authorization.
+are later removed. The current publication and CI status is recorded in
+[PR #132](https://github.com/dyxushuai/quepaxa/pull/132).
