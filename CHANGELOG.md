@@ -11,6 +11,9 @@ All notable changes to this project are documented here. The project follows
   Exhausting either range returns `RequestIdExhausted` (restart from durable records).
   Wire and durable encodings are unchanged. Existing dedup windows are preserved until
   normal incarnation eviction; old gaps cannot safely be discarded during an upgrade.
+- `examples/kv-tokio`: associates client results only with entries from the current
+  `Replica::incarnation()`. A delayed pre-restart request sharing an id, payload and slot
+  with a new request can no longer answer the new client with its old transaction result.
 - `quepaxa-ffi`: ABI 0.8 adds `QPX_ERR_REQUEST_ID_EXHAUSTED`. Request ids remain `uint64_t`;
   read ids now use its high bit. Function signatures and output layouts are unchanged.
 

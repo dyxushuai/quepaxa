@@ -416,7 +416,7 @@ impl Node {
                             // applies as nothing on every replica alike.
                             let Some(req) = Request::decode(&e.payload) else { continue };
                             let applied = ops::apply(&mut self.kv, &req);
-                            if e.origin == me {
+                            if e.origin == me && e.incarnation == self.replica.incarnation() {
                                 self.pending_writes.applied(slot.0, e.id, &e.payload, applied);
                             }
                         }
@@ -552,6 +552,9 @@ fn write_persists(
         }
     }
 }
+
+#[cfg(test)]
+mod incarnation_tests;
 
 #[cfg(test)]
 mod tests {

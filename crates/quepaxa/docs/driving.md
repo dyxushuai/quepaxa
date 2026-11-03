@@ -46,6 +46,12 @@ slightly stale reading is harmless.
 `Action` is `#[non_exhaustive]`: keep a `_ => {}` arm so new actions in minor versions do
 not break your build.
 
+Apply every committed entry, including entries from older incarnations. When caching an
+entry's result for a current local client, match both `entry.origin == replica.id()` and
+`entry.incarnation == replica.incarnation()` before matching its proposal id. A delayed
+pre-restart entry can have the same id and payload as a new request but a different result.
+Return the cached result when `Committed` arrives.
+
 ### Persist before send
 
 The one rule that protects safety: **a message in `then` must not leave before `records`
