@@ -281,12 +281,18 @@ impl Replica {
             .chain(self.retire_probe)
             .chain(self.reads.resend_at())
             .chain(self.startup_probe)
+            .chain(self.watch.ack_due.values().copied())
             .min()
     }
 
     pub(super) fn fire_timers(&mut self) {
         self.resend_reads();
         let now = self.now;
+        let ack_due: Vec<_> =
+            self.watch.ack_due.iter().filter(|(_, at)| **at <= now).map(|(node, _)| *node).collect();
+        for node in ack_due {
+            self.ack_forward(node);
+        }
         if self.startup_probe.is_some_and(|t| t <= now) {
             self.probe_peers();
         }

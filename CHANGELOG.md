@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: coalesces rate-limited forward acknowledgements and sends them when the
+  cooldown expires, even while persistence is stalled. Silence detection follows the
+  actual forwarding destination and does not reuse an earlier target's deadline.
 - `quepaxa`: reads use a separate proposal-id range, keeping logged request ids contiguous
   so deduplication state no longer grows with every write after a read. `ProposalId` stays
   opaque and unique per incarnation; interleaved reads and writes are not ordered by id.

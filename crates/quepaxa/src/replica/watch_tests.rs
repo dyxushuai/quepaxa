@@ -409,6 +409,39 @@ fn a_leader_acknowledges_a_forward_before_its_writes_are_durable() {
     let every = r.cfg.retransmit_interval / 8;
     assert_eq!(acks(&mut r, 2 + every - 1), 0);
     assert_eq!(acks(&mut r, 2 + every), 1);
+    assert_eq!(acks(&mut r, 3 + every), 0);
+    let due = Timestamp(2 + 2 * every);
+    assert!(r.next_deadline().is_some_and(|at| at <= due), "the suppressed ack has a timer");
+    out.clear();
+    r.handle_timeout(due).unwrap();
+    r.poll_actions(&mut out);
+    assert!(
+        out.iter().any(|a| matches!(a, Action::Send(o) if o.to == NodeId(1)
+        && matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck, .. })))),
+        "a suppressed ack is eventually sent without another forward or durable write"
+    );
+}
+
+#[test]
+fn changing_target_does_not_reuse_an_old_forwards_silence_deadline() {
+    let mut r = replica_as(2);
+    let mut out = Vec::new();
+    r.commit_latency = Some(20 * MS);
+    r.cfg.hedge_max = 80 * MS;
+    r.watch.reply.insert(NodeId(0), 5 * MS);
+    r.watch.reply.insert(NodeId(1), 5 * MS);
+    let old_at = Timestamp(MS);
+    r.propose(old_at, Bytes::from_static(b"old target")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 1);
+    r.schedule = crate::schedule::Schedule::with_order(alloc::vec![NodeId(1), NodeId(0), NodeId(2)]);
+    assert_eq!(r.silent_at(old_at), None, "nothing has been forwarded to the new target");
+    let new_at = Timestamp(10 * MS);
+    r.propose(new_at, Bytes::from_static(b"new target")).unwrap();
+    out.clear();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 1), 1);
+    assert_eq!(r.silent_at(old_at), Some(new_at.after(20 * MS)));
 }
 
 #[test]

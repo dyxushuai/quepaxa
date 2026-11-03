@@ -45,10 +45,14 @@ pub(super) struct Watch {
     pub(super) heard: BTreeMap<NodeId, Timestamp>,
     /// The first forward the member it went to has not said anything since.
     pub(super) asked: Option<(NodeId, Timestamp)>,
+    /// Current forwarding destination and when it first received entries in this run.
+    pub(super) forwarded_to: Option<(NodeId, Timestamp)>,
     /// Smoothed delay from a forward to each member's next message (R), in nanoseconds.
     pub(super) reply: BTreeMap<NodeId, u64>,
     /// When this replica last acknowledged a forward from each member.
     pub(super) acked: BTreeMap<NodeId, Timestamp>,
+    /// Coalesced acknowledgements waiting for each member's cooldown to expire.
+    pub(super) ack_due: BTreeMap<NodeId, Timestamp>,
 }
 
 impl Replica {
@@ -107,19 +111,27 @@ impl Replica {
     /// Acknowledges a forward before any write, so a leader waiting on its disk still shows
     /// it is alive; at most once per eighth of `retransmit_interval` per member. Every
     /// message is a packet a lossy link can lose, stalling the stream behind it: an ack per
-    /// forward tripled the p99 across regions with 1% loss on the leader's links. σ covers
-    /// the wait.
+    /// forward tripled the p99 across regions with 1% loss on the leader's links. Suppressed
+    /// acknowledgements coalesce until the cooldown ends; σ covers that wait.
     pub(super) fn ack_forward(&mut self, from: NodeId) {
         let every = self.ack_every();
-        if self.watch.acked.get(&from).is_none_or(|t| self.now.0 >= t.0.saturating_add(every)) {
-            self.watch.acked.insert(from, self.now);
-            self.send(from, Body::ForwardAck);
+        if let Some(due) = self.watch.acked.get(&from).map(|t| t.after(every))
+            && self.now < due
+        {
+            self.watch.ack_due.insert(from, due);
+            return;
         }
+        self.watch.ack_due.remove(&from);
+        self.watch.acked.insert(from, self.now);
+        self.send(from, Body::ForwardAck);
     }
 
     /// Entries were just handed to the target.
     pub(super) fn forwarded_now(&mut self) {
         let target = self.target();
+        if self.watch.forwarded_to.is_none_or(|(to, _)| to != target) {
+            self.watch.forwarded_to = Some((target, self.now));
+        }
         if self.watch.asked.is_none_or(|(to, _)| to != target) {
             self.watch.asked = Some((target, self.now));
         }
@@ -146,6 +158,11 @@ impl Replica {
     /// When the target has been silent for σ since `at`, if it has.
     pub(super) fn silent_at(&self, at: Timestamp) -> Option<Timestamp> {
         let target = self.target();
+        let (to, since) = self.watch.forwarded_to?;
+        if to != target {
+            return None;
+        }
+        let at = at.max(since);
         let sigma = self.silence_wait(target)?;
         self.silent_since(target, at).then(|| at.after(sigma))
     }
