@@ -1,5 +1,6 @@
 target
 .git
+.context
 docs
 verification
 **/node_modules
