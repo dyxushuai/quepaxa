@@ -18,3 +18,4 @@ trace-phase0-adopts-the-first-reply	-	verification/tla/traces.sh	REJECTED
 retire-without-the-barrier	-	cargo nextest run -p quepaxa --test membership_api added_back_after	retired although it was added back
 suspect-forwards-to-the-leader	-	cargo nextest run --release -p quepaxa-sim --test leader_loss	writes stalled|p99 [0-9]+ ms after the kill
 silence-ignores-the-forward-time	-	cargo nextest run --release -p quepaxa-sim --test leader_loss	writes hedged
+hedge-a-busy-leader	-	cargo nextest run --release -p quepaxa-sim --test disk_faults sudden	hedged around a slow leader

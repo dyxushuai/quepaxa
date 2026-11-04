@@ -109,8 +109,12 @@ impl Replica {
     /// Extends the contiguous decided prefix, feeding each newly decided slot to the leader
     /// schedule in order.
     pub(super) fn advance_committed(&mut self) {
+        let target = self.target();
         while let Some(d) = self.log.get(&Slot(self.committed)) {
             let slot = Slot(self.committed);
+            if d.proposal.key.origin == target {
+                self.watch.progressed = self.now;
+            }
             self.schedule.observe(slot, d.proposal.key.origin);
             for (key, payload) in batch::changes(&d.proposal.value) {
                 if let Some(order) = crate::schedule::decode_order(&payload) {

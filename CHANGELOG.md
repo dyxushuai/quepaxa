@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: a follower no longer hedges around a leader that is slow but still deciding its
+  own values: an entry it forwarded is proposed here after four hedge delays instead of one
+  once such a value was decided since the forward, and hedges around a talking leader run
+  one slot at a time. In the simulator, a shared disk that suddenly slows from 2 to 40 ms
+  per write for half a second set off about 400 hedges and writes up to 210-410 ms; now
+  none, and at most 79-113 ms, as slow as a disk that was that slow all along.
 - `quepaxa`: coalesces rate-limited forward acknowledgements and sends them when the
   cooldown expires, even while persistence is stalled. Silence detection follows the
   actual forwarding destination and does not reuse an earlier target's deadline.

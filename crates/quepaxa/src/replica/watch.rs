@@ -49,6 +49,8 @@ pub(super) struct Watch {
     pub(super) forwarded_to: Option<(NodeId, Timestamp)>,
     /// Smoothed delay from a forward to each member's next message (R), in nanoseconds.
     pub(super) reply: BTreeMap<NodeId, u64>,
+    /// When a value of the target's own was last added to the decided prefix.
+    pub(super) progressed: Timestamp,
     /// When this replica last acknowledged a forward from each member.
     pub(super) acked: BTreeMap<NodeId, Timestamp>,
     /// Coalesced acknowledgements waiting for each member's cooldown to expire.
@@ -167,11 +169,20 @@ impl Replica {
         self.silent_since(target, at).then(|| at.after(sigma))
     }
 
-    /// When an entry forwarded at `at` is acted on: hedged after δ, or sooner, with its
+    /// When an entry forwarded at `at` is hedged although its target talks: after δ, or
+    /// after 4δ if a value of the target's own was decided since (it is working through a
+    /// backlog, and hedges would only contend with it; still hedged, in case the forward was
+    /// lost).
+    pub(super) fn late_at(&self, at: Timestamp) -> Timestamp {
+        let d = self.hedge_delay();
+        at.after(if self.watch.progressed > at { d.saturating_mul(4) } else { d })
+    }
+
+    /// When an entry forwarded at `at` is acted on: hedged when late, or sooner, with its
     /// target suspected, if the target stays silent.
     pub(super) fn hedge_at(&self, at: Timestamp) -> Timestamp {
-        let delta = at.after(self.hedge_delay());
-        self.silent_at(at).map_or(delta, |s| s.min(delta))
+        let late = self.late_at(at);
+        self.silent_at(at).map_or(late, |s| s.min(late))
     }
 
     /// When to take over `slot`, seen at `seen`, from whoever started it.

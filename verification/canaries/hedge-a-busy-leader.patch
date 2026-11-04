@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
+index 8a7c871..5cb4ba6 100644
+--- a/crates/quepaxa/src/replica/watch.rs
++++ b/crates/quepaxa/src/replica/watch.rs
+@@ -175,7 +175,7 @@ impl Replica {
+     /// lost).
+     pub(super) fn late_at(&self, at: Timestamp) -> Timestamp {
+         let d = self.hedge_delay();
+-        at.after(if self.watch.progressed > at { d.saturating_mul(4) } else { d })
++        at.after(d)
+     }
+ 
+     /// When an entry forwarded at `at` is acted on: hedged when late, or sooner, with its

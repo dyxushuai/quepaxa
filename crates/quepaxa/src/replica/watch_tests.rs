@@ -339,6 +339,45 @@ fn a_slow_but_talking_leader_is_hedged_around_entry_by_entry_and_not_suspected()
 }
 
 #[test]
+fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    let id = r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    // A value of the leader's own is decided after the forward: it is busy, not stuck.
+    r.handle(
+        Timestamp(4 * MS),
+        from_peer(0, 1, Body::Decided { slot: Slot(0), proposal: proposal(1, 0, 0) }),
+    )
+    .unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.next_deadline(), Some(Timestamp(MS + 4 * 80 * MS)), "4δ, not δ");
+    r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(r.forwarded.contains_key(&id), "still waiting for the leader after δ");
+    r.handle_timeout(Timestamp(MS + 4 * 80 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(!r.forwarded.contains_key(&id), "hedged after 4δ, in case the forward was lost");
+}
+
+#[test]
+fn hedging_around_a_talking_leader_drives_one_slot_at_a_time() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    r.cfg.max_batch_bytes = 128;
+    for i in 0..4u8 {
+        r.propose(Timestamp(MS), Bytes::from(alloc::vec![i; 80])).unwrap();
+        r.poll_actions(&mut out);
+    }
+    r.handle(Timestamp(4 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: 0 })).unwrap();
+    r.poll_actions(&mut out);
+    r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.proposers.len(), 1, "one hedged batch is proposed");
+    assert!(!r.relayed.is_empty(), "the rest wait for its slot, though they fill more batches");
+}
+
+#[test]
 fn r_rises_at_once_to_a_slower_answer() {
     let mut r = with_latency(Some(5));
     let mut out = Vec::new();
