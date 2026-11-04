@@ -1,0 +1,31 @@
+source: 617ee8f7cf6ad99cd52e55edcccee6c01caf5fe6
+run: target/bench-etcd/20261103-224449
+kind: diagnostic; excluded from baseline scores
+generator_start_unix_ms: 1793717116595
+trace: strace -f -ttt -T -e trace=fsync,fdatasync
+
+Raw syscall lines (resumed timestamps are return times):
+40602 1793717142.113531 <... fdatasync resumed>) = 0 <0.103641>
+40537 1793717142.114550 <... fdatasync resumed>) = 0 <0.103647>
+40483 1793717142.114672 <... fdatasync resumed>) = 0 <0.103757>
+
+Adjacent successful request samples around the longest gap:
+due_us,done_us,outcome
+25412350,25416346,Ok
+25414687,25520523,Ok
+
+Selected raw metric records:
+{"start": 1793717142.0044644, "end": 1793717142.0053408, "node": 2, "stats": "STATS Metrics { messages_rejected: 0, retransmits: 0, catch_up_retries: 0, slots_decided: 37040, fast_path_decisions: 0, corrupt_batches: 0, forwarded: 63253, hedged: 386, retained_slots: 7034, live_registers: 8 }\n"}
+{"start": 1793717142.1092043, "end": 1793717142.1096313, "node": 2, "stats": "STATS Metrics { messages_rejected: 0, retransmits: 8, catch_up_retries: 0, slots_decided: 37056, fast_path_decisions: 0, corrupt_batches: 0, forwarded: 63509, hedged: 596, retained_slots: 7050, live_registers: 18 }\n"}
+{"start": 1793717142.2121532, "end": 1793717142.217346, "node": 2, "stats": "STATS Metrics { messages_rejected: 0, retransmits: 8, catch_up_retries: 0, slots_decided: 37172, fast_path_decisions: 2, corrupt_batches: 0, forwarded: 63779, hedged: 859, retained_slots: 7166, live_registers: 4 }\n"}
+
+Calibrated kernel tracepoint diagnostic:
+run: target/bench-etcd/20261103-230539
+capture: perf record -k mono with fsync/fdatasync entry and exit tracepoints
+generator_start_unix_ms: 1793718347660
+clock_mapping: {"wall": 1793718342.0196018, "monotonic": 3971249.166043828}
+matched_sync_calls: 51080
+raw_trace_sha256: 8d6a41ff0f87f4061b5b4e7b8a64d336398135994874f2dd54b6574b27f95193
+longest_sync_duration_ms: 9.645709
+  86199 3971268.119680972: syscalls:sys_enter_fdatasync: fd: 0x0000000f
+  86199 3971268.129326681:  syscalls:sys_exit_fdatasync: 0x0

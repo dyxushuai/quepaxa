@@ -139,6 +139,14 @@ majority, and `hedge_max` above the slowest client commit path.
 
 ## Against etcd
 
+The [follow-up at `617ee8f`](optimize/etcd-degraded-leader-report.md) excludes
+local measurement artifacts from the Docker build and verifies one identical
+binary across three far-leader repetitions. QuePaxa's median p99 is 13.1 ms
+versus default etcd's 165.8 ms, and its median longest gap is 26 ms versus
+55 ms, both without errors. The report preserves the earlier rebuilt samples,
+WAN results, diagnostic traces, and their uncertainty. No new runtime gain
+is claimed; the tables below retain their original revisions.
+
 `examples/kv-tokio/bench/etcd/run.sh` (method, fairness rules and how to read each column:
 [its README](../examples/kv-tokio/bench/etcd/README.md)). Three `kv-tokio` replicas and
 three etcd v3.7.2 members, one system at a time, each node in its own container with
@@ -242,8 +250,8 @@ What the table says, and what it does not:
   default etcd's (86 ms), and not only in this run: over ten runs of `812f26f` and
   `77c0577` it ranged from 20 to 743 ms (median about 140 ms), against 86-96 ms for
   default etcd in three. The stalls fall mostly while the leader is distant and grow with
-  host load; QuePaxa's p99 stayed below default etcd's in eight of the ten. Not traced
-  yet.
+  host load; QuePaxa's p99 stayed below default etcd's in eight of the ten. Those
+  earlier runs were not traced; see the follow-up above for one later diagnostic.
 - **A slow leader disk** barely shows in QuePaxa's numbers: the two other recorders form
   the majority, so commits never wait for the slow one. Every etcd write goes through the
   leader, whose raft loop waits on its own log write before taking the next batch, so its
