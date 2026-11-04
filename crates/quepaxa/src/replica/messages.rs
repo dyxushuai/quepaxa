@@ -127,8 +127,13 @@ impl Replica {
                         self.on_reply(from, slot, req_step, step, first, prev_agg)
                     }
                     Body::Decided { slot, proposal } => {
-                        // The target decided a slot itself: it is busy, not stuck (`late_at`).
-                        if from == self.target() {
+                        // The target announced a slot it decided itself: it is busy, not stuck
+                        // (`late_at`). Not a repeat, nor its answer to a request of ours (it may
+                        // only have cached someone else's decision).
+                        if from == self.target()
+                            && !self.log.contains_key(&slot)
+                            && !self.proposers.contains_key(&slot)
+                        {
                             self.watch.progressed = self.now;
                         }
                         self.learn(slot, proposal, false)

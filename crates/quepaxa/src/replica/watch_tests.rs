@@ -363,6 +363,50 @@ fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
 }
 
 #[test]
+fn only_a_new_decision_the_target_announces_counts_as_its_progress() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    let decided = |slot| Body::Decided { slot: Slot(slot), proposal: proposal(1, 2, slot) };
+    // A decision this replica already holds, repeated by the leader.
+    r.handle(Timestamp(MS), from_peer(2, 1, decided(0))).unwrap();
+    r.poll_actions(&mut out);
+    r.handle(Timestamp(2 * MS), from_peer(0, 1, decided(0))).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.watch.progressed, Timestamp(0), "a repeat");
+    // Another replica's decision: not the leader deciding.
+    r.handle(Timestamp(3 * MS), from_peer(2, 1, decided(1))).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.watch.progressed, Timestamp(0));
+    r.handle(Timestamp(4 * MS), from_peer(0, 1, decided(2))).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.watch.progressed, Timestamp(4 * MS), "a slot the leader decided");
+}
+
+#[test]
+fn a_deputy_drives_the_whole_window_for_what_it_is_handed() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    r.cfg.max_batch_bytes = 128;
+    let entries: Vec<_> = (0..4u8)
+        .map(|i| batch::Item {
+            entry: crate::batch::Entry {
+                origin: NodeId(2),
+                incarnation: 1,
+                id: ProposalId(u64::from(i) + 1),
+                payload: Bytes::from(alloc::vec![i; 80]),
+            },
+            kind: batch::Kind::App,
+        })
+        .collect();
+    for e in &entries {
+        let forward = Body::Forward { batch: batch::encode(core::slice::from_ref(e)) };
+        r.handle(Timestamp(MS), from_peer(2, 1, forward)).unwrap();
+        r.poll_actions(&mut out);
+    }
+    assert!(r.proposers.len() > 1, "not one slot at a time: these are not hedges");
+}
+
+#[test]
 fn hedging_around_a_talking_leader_drives_one_slot_at_a_time() {
     let mut r = with_latency(Some(5));
     let mut out = Vec::new();

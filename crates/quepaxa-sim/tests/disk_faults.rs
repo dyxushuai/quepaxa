@@ -75,7 +75,13 @@ fn a_stalled_leader_disk_delays_followers_writes_less_than_the_stall() {
 #[test]
 fn writes_resume_right_after_a_shared_disk_stall() {
     for seed in 0..seeds() {
-        let max = worst(&run(vec![0, 1, 2], seed), &[0, 1, 2]);
+        let r = run(vec![0, 1, 2], seed);
+        // Nothing can be made durable meanwhile: once writes begun before the stall are done,
+        // nothing is acknowledged until it ends.
+        let (from, to) = ((STALL_AT_MS + 20) * 1_000, (STALL_AT_MS + STALL_MS) * 1_000);
+        let through = r.commits.iter().filter(|c| c.2 > from && c.2 < to).count();
+        assert_eq!(through, 0, "seed {seed}: {through} writes acknowledged through a stopped disk");
+        let max = worst(&r, &[0, 1, 2]);
         println!("shared disk stalled {STALL_MS} ms, seed {seed}: slowest write {max} ms");
         assert!(max < STALL_MS + 30, "seed {seed}: slowest write {max} ms: hedging stretched it");
     }

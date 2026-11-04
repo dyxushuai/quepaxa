@@ -124,8 +124,11 @@ impl Replica {
         self.batches
             .retain(|_, b| b.slot.is_some() || b.entries.iter().any(|&(o, i, id)| !dedup.contains(o, i, id)));
         // Hedging around a target that still talks: one slot at a time, or the hedges contend
-        // with its slots and stretch a slowdown they were meant to cover.
-        let cap = if self.proposes_directly() { self.window() } else { 1 };
+        // with its slots and stretch a slowdown they were meant to cover. Entries other
+        // followers handed here (as their deputy) are not hedges.
+        let deputy = self.relayed.iter().any(|i| i.entry.origin != self.me)
+            || self.batches.values().any(|b| b.entries.iter().any(|&(o, _, _)| o != self.me));
+        let cap = if self.proposes_directly() || deputy { self.window() } else { 1 };
         while (self.proposers.len() as u64) < cap {
             let seq = match self.batches.iter().find(|(_, b)| b.slot.is_none() && !b.entries.is_empty()) {
                 Some((seq, _)) => *seq,

@@ -88,7 +88,17 @@ impl Sim {
                     n.disk_busy_until = self.now.max(stall) + lat;
                     n.disk_busy_until
                 } else {
-                    *n.disk_next_group.get_or_insert(n.disk_busy_until.max(stall) + lat)
+                    match n.disk_next_group {
+                        // A group the stall does not hold back takes no new writes; they start
+                        // a later one, after both.
+                        Some(g) if g < stall => {
+                            let later = g.max(stall) + lat;
+                            n.disk_busy_until = n.disk_busy_until.max(g);
+                            n.disk_next_group = Some(later);
+                            later
+                        }
+                        _ => *n.disk_next_group.get_or_insert(n.disk_busy_until.max(stall) + lat),
+                    }
                 };
                 n.pending.push(PendingPersist { id: id.0, records, then, replace });
                 let generation = n.generation;
