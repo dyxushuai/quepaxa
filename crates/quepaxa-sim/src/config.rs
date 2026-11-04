@@ -46,6 +46,14 @@ pub struct SimConfig {
     pub absent: Option<usize>,
     /// Crash this replica at this virtual time and keep it down until heal.
     pub kill: Option<(usize, u64)>,
+    /// Stall these replicas' disks from `.1` for `.2` virtual ms (a shared disk's writeback
+    /// burst): writes started meanwhile finish only after it.
+    pub disk_stall: Option<(Vec<usize>, u64, u64)>,
+    /// Slow these replicas' disks from `.1` for `.2` virtual ms: writes started meanwhile take
+    /// up to `slow_persist_ms` instead of `max_persist_ms`.
+    pub disk_slow: Option<(Vec<usize>, u64, u64)>,
+    /// Upper bound on one persist's latency on a slowed disk.
+    pub slow_persist_ms: u64,
     /// Snapshot and compact every this many applied slots.
     pub compact_every: Option<u64>,
     /// Replica message size limit (small values force multi-page catch-up).
@@ -90,6 +98,9 @@ impl SimConfig {
             in_flight_slots: 4,
             absent: None,
             kill: None,
+            disk_stall: None,
+            disk_slow: None,
+            slow_persist_ms: 40,
             compact_every: Some(32),
             max_message_bytes: 1 << 20,
         }

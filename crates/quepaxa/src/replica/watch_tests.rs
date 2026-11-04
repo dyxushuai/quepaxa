@@ -339,6 +339,91 @@ fn a_slow_but_talking_leader_is_hedged_around_entry_by_entry_and_not_suspected()
 }
 
 #[test]
+fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    // δ = 80 ms; 4δ stays under hedge_max.
+    r.cfg.hedge_max = 400 * MS;
+    let id = r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    // A value of the leader's own is decided after the forward: it is busy, not stuck.
+    r.handle(
+        Timestamp(4 * MS),
+        from_peer(0, 1, Body::Decided { slot: Slot(0), proposal: proposal(1, 0, 0) }),
+    )
+    .unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.next_deadline(), Some(Timestamp(MS + 4 * 80 * MS)), "4δ, not δ");
+    r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(r.forwarded.contains_key(&id), "still waiting for the leader after δ");
+    r.handle_timeout(Timestamp(MS + 4 * 80 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(!r.forwarded.contains_key(&id), "hedged after 4δ, in case the forward was lost");
+}
+
+#[test]
+fn only_a_new_decision_the_target_announces_counts_as_its_progress() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    let decided = |slot| Body::Decided { slot: Slot(slot), proposal: proposal(1, 2, slot) };
+    // A decision this replica already holds, repeated by the leader.
+    r.handle(Timestamp(MS), from_peer(2, 1, decided(0))).unwrap();
+    r.poll_actions(&mut out);
+    r.handle(Timestamp(2 * MS), from_peer(0, 1, decided(0))).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.watch.progressed, Timestamp(0), "a repeat");
+    // Another replica's decision: not the leader deciding.
+    r.handle(Timestamp(3 * MS), from_peer(2, 1, decided(1))).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.watch.progressed, Timestamp(0));
+    r.handle(Timestamp(4 * MS), from_peer(0, 1, decided(2))).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.watch.progressed, Timestamp(4 * MS), "a slot the leader decided");
+}
+
+#[test]
+fn a_deputy_drives_the_whole_window_for_what_it_is_handed() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    r.cfg.max_batch_bytes = 128;
+    let entries: Vec<_> = (0..4u8)
+        .map(|i| batch::Item {
+            entry: crate::batch::Entry {
+                origin: NodeId(2),
+                incarnation: 1,
+                id: ProposalId(u64::from(i) + 1),
+                payload: Bytes::from(alloc::vec![i; 80]),
+            },
+            kind: batch::Kind::App,
+        })
+        .collect();
+    for e in &entries {
+        let forward = Body::Forward { batch: batch::encode(core::slice::from_ref(e)) };
+        r.handle(Timestamp(MS), from_peer(2, 1, forward)).unwrap();
+        r.poll_actions(&mut out);
+    }
+    assert!(r.proposers.len() > 1, "not one slot at a time: these are not hedges");
+}
+
+#[test]
+fn hedging_around_a_talking_leader_drives_one_slot_at_a_time() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    r.cfg.max_batch_bytes = 128;
+    for i in 0..4u8 {
+        r.propose(Timestamp(MS), Bytes::from(alloc::vec![i; 80])).unwrap();
+        r.poll_actions(&mut out);
+    }
+    r.handle(Timestamp(4 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: 0 })).unwrap();
+    r.poll_actions(&mut out);
+    r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.proposers.len(), 1, "one hedged batch is proposed");
+    assert!(!r.relayed.is_empty(), "the rest wait for its slot, though they fill more batches");
+}
+
+#[test]
 fn r_rises_at_once_to_a_slower_answer() {
     let mut r = with_latency(Some(5));
     let mut out = Vec::new();

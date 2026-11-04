@@ -64,17 +64,41 @@ impl Sim {
             Action::Send(out) => self.net_send(i, out),
             Action::Persist { id, records, then, replace } => {
                 // Group commit: writes issued while an fsync runs share the next one.
-                let lat = 1 + self.rng.below(self.cfg.max_persist_ms * MS);
+                let during = |fault: &Option<(Vec<usize>, u64, u64)>| match fault {
+                    Some((nodes, at, ms))
+                        if nodes.contains(&i) && (at * MS..(at + ms) * MS).contains(&self.now) =>
+                    {
+                        Some((at + ms) * MS)
+                    }
+                    _ => None,
+                };
+                let max_ms = if during(&self.cfg.disk_slow).is_some() {
+                    self.cfg.slow_persist_ms
+                } else {
+                    self.cfg.max_persist_ms
+                };
+                let lat = 1 + self.rng.below(max_ms * MS);
+                let stall = during(&self.cfg.disk_stall).unwrap_or(0);
                 let n = &mut self.nodes[i];
                 if n.disk_next_group.is_some_and(|g| g <= self.now) || self.now >= n.disk_busy_until {
                     n.disk_busy_until = n.disk_busy_until.max(n.disk_next_group.unwrap_or(0));
                     n.disk_next_group = None;
                 }
                 let done = if self.now >= n.disk_busy_until {
-                    n.disk_busy_until = self.now + lat;
+                    n.disk_busy_until = self.now.max(stall) + lat;
                     n.disk_busy_until
                 } else {
-                    *n.disk_next_group.get_or_insert(n.disk_busy_until + lat)
+                    match n.disk_next_group {
+                        // A group the stall does not hold back takes no new writes; they start
+                        // a later one, after both.
+                        Some(g) if g < stall => {
+                            let later = g.max(stall) + lat;
+                            n.disk_busy_until = n.disk_busy_until.max(g);
+                            n.disk_next_group = Some(later);
+                            later
+                        }
+                        _ => *n.disk_next_group.get_or_insert(n.disk_busy_until.max(stall) + lat),
+                    }
                 };
                 n.pending.push(PendingPersist { id: id.0, records, then, replace });
                 let generation = n.generation;

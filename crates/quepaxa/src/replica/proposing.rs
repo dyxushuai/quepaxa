@@ -123,7 +123,13 @@ impl Replica {
         let dedup = &self.dedup;
         self.batches
             .retain(|_, b| b.slot.is_some() || b.entries.iter().any(|&(o, i, id)| !dedup.contains(o, i, id)));
-        while (self.proposers.len() as u64) < self.window() {
+        // Hedging around a target that still talks: one slot at a time, or the hedges contend
+        // with its slots and stretch a slowdown they were meant to cover. Entries other
+        // followers handed here (as their deputy) are not hedges.
+        let deputy = self.relayed.iter().any(|i| i.entry.origin != self.me)
+            || self.batches.values().any(|b| b.entries.iter().any(|&(o, _, _)| o != self.me));
+        let cap = if self.proposes_directly() || deputy { self.window() } else { 1 };
+        while (self.proposers.len() as u64) < cap {
             let seq = match self.batches.iter().find(|(_, b)| b.slot.is_none() && !b.entries.is_empty()) {
                 Some((seq, _)) => *seq,
                 None => match self.cut_batch() {
@@ -305,10 +311,13 @@ impl Replica {
         if self.forwarded.values().any(|(_, at)| self.silent_at(*at).is_some_and(|t| t <= now)) {
             self.suspect_target();
         }
-        // The target talks but is slow: entries it left uncommitted for δ are proposed here.
-        let delta = self.hedge_delay();
-        let late: Vec<_> =
-            self.forwarded.iter().filter(|(_, (_, at))| at.after(delta) <= now).map(|(id, _)| *id).collect();
+        // The target talks but is slow: entries it left uncommitted too long are proposed here.
+        let late: Vec<_> = self
+            .forwarded
+            .iter()
+            .filter(|(_, (_, at))| self.late_at(*at) <= now)
+            .map(|(id, _)| *id)
+            .collect();
         for id in late {
             if let Some((e, _)) = self.forwarded.remove(&id) {
                 if let Some(o) = self.outstanding.get_mut(&id) {
