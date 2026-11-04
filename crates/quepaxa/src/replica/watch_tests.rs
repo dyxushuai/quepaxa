@@ -342,6 +342,8 @@ fn a_slow_but_talking_leader_is_hedged_around_entry_by_entry_and_not_suspected()
 fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
     let mut r = with_latency(Some(5));
     let mut out = Vec::new();
+    // δ = 80 ms; 4δ stays under hedge_max.
+    r.cfg.hedge_max = 400 * MS;
     let id = r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     // A value of the leader's own is decided after the forward: it is busy, not stuck.

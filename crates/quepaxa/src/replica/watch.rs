@@ -170,12 +170,13 @@ impl Replica {
     }
 
     /// When an entry forwarded at `at` is hedged although its target talks: after δ, or
-    /// after 4δ if a value of the target's own was decided since (it is working through a
-    /// backlog, and hedges would only contend with it; still hedged, in case the forward was
-    /// lost).
+    /// after 4δ (at most `hedge_max`) if a value of the target's own was decided since (it is
+    /// working through a backlog, and hedges would only contend with it; still hedged, in
+    /// case the forward was lost).
     pub(super) fn late_at(&self, at: Timestamp) -> Timestamp {
         let d = self.hedge_delay();
-        at.after(if self.watch.progressed > at { d.saturating_mul(4) } else { d })
+        let busy = d.saturating_mul(4).min(self.cfg.hedge_max).max(d);
+        at.after(if self.watch.progressed > at { busy } else { d })
     }
 
     /// When an entry forwarded at `at` is acted on: hedged when late, or sooner, with its
