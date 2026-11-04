@@ -49,7 +49,7 @@ pub(super) struct Watch {
     pub(super) forwarded_to: Option<(NodeId, Timestamp)>,
     /// Smoothed delay from a forward to each member's next message (R), in nanoseconds.
     pub(super) reply: BTreeMap<NodeId, u64>,
-    /// When a value of the target's own was last added to the decided prefix.
+    /// When the target last announced a slot it decided.
     pub(super) progressed: Timestamp,
     /// When this replica last acknowledged a forward from each member.
     pub(super) acked: BTreeMap<NodeId, Timestamp>,
@@ -170,9 +170,9 @@ impl Replica {
     }
 
     /// When an entry forwarded at `at` is hedged although its target talks: after δ, or
-    /// after 4δ (at most `hedge_max`) if a value of the target's own was decided since (it is
+    /// after 4δ (at most `hedge_max`) if the target has decided a slot itself since (it is
     /// working through a backlog, and hedges would only contend with it; still hedged, in
-    /// case the forward was lost).
+    /// case the forward was lost). A slot others took over from it does not count.
     pub(super) fn late_at(&self, at: Timestamp) -> Timestamp {
         let d = self.hedge_delay();
         let busy = d.saturating_mul(4).min(self.cfg.hedge_max).max(d);
