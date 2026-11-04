@@ -269,8 +269,16 @@ What the table says, and what it does not:
   delay (about 20 ms), the follower hedges every waiting entry at once (600 in 250 ms),
   and those proposals contend with the leader's for the same slots, stretching a hiccup of
   tens of ms to 150-300 ms. The code before the hedge-delay fix behaves alike (max 150-200 ms
-  in five reruns). Limiting how much a follower hedges at once would damp it, at the cost
-  of a slower rotation away from a dead leader; it is not done.
+  in five reruns). The simulator reproduces it (`quepaxa-sim/tests/disk_faults.rs`): a
+  shared disk that suddenly slows from 2 to 40 ms per write for half a second set off about
+  400 hedges and writes up to 210-410 ms, where a disk that slow all along gives at most
+  about 110 ms. Since `428a2e7`, a follower waits four hedge delays (at most `hedge_max`)
+  before hedging an entry if its target has decided a slot itself since the forward, and
+  hedges around a talking target one slot at a time: no hedges and at most 79-113 ms in
+  the simulator. In three alternated `run.sh slow-disk` runs against the code before
+  (noisy host), the median longest gap fell from 357 to 56 ms and the median p99 from 211
+  to 38 ms; crash, partition and far leader stayed within each other's ranges, as did the
+  five-region crash and jitter cases.
 - etcd's numbers vary between runs more than QuePaxa's: in an earlier run on the same
   host, default etcd's p99 after a crash was 110 ms instead of 16 ms and after a slow
   disk 1.5 s instead of 395 ms, depending on where the election and the backlog fell.
