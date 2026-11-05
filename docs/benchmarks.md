@@ -292,6 +292,18 @@ What the table says, and what it does not:
   did not reproduce it (one rotation each, as expected), and etcd showed similar dips in
   write-only runs on the same shared disk, so `fsync` jitter on the two remaining replicas
   is the likelier cause.
+- **Four times the load** (`RATE=20000 run.sh crash partition slow-disk`, one run at
+  `06bc3d7`, `target/bench-etcd/20261105-170501/`): QuePaxa fails nothing and its longest
+  gaps are 112, 14 and 49 ms; default etcd fails 8,473-54,516 requests with gaps of
+  360-1,542 ms, tuned etcd 2,735-4,766 requests with 127-148 ms. QuePaxa's p99 is 17-44 ms
+  against tuned etcd's 76-220 ms.
+- **Rejoining.** A replica cut off by the partition used to rejoin about 11 s after the
+  heal (three runs): `kv-tokio`'s writes on the dead connection waited for TCP's own
+  retransmission backoff. Since `06bc3d7` a peer connection that takes no bytes for 2 s
+  is redialed, and it rejoins in about 0.6 s. A leader killed and restarted after 15 s
+  decides slots again 0.4-0.5 s after it starts, with no client-visible gap (11 ms longest,
+  two runs). These come from a QuePaxa-only probe with the same load and timing that
+  samples `STATS` every 100 ms; `run.sh` has no restart scenario.
 - One host and one configuration: hypotheses to check on your own hardware, not
   production claims. All six nodes share the host's disk and CPU sockets, and the
   network is a Docker bridge.
