@@ -193,30 +193,48 @@ async fn write_frame(s: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> std::io
     s.write_all(frame).await
 }
 
+/// Whether `io` finished, successfully, within `limit`.
+async fn within(limit: Duration, io: impl Future<Output = std::io::Result<()>>) -> bool {
+    matches!(tokio::time::timeout(limit, io).await, Ok(Ok(())))
+}
+
 /// Keeps a connection to `peer`, reconnecting forever with exponential backoff (reset once
-/// a connection carries a frame); lost frames are retransmitted by the protocol.
+/// a connection carries a frame); lost frames are retransmitted by the protocol. A connect
+/// or write that takes longer than `STALL` gives the connection up: on a link that silently
+/// drops packets (a partition), TCP would otherwise keep retrying with its own backoff and
+/// resume seconds after the link heals.
 async fn outbound(me: u32, addr: SocketAddr, mut rx: tmpsc::Receiver<Vec<u8>>) {
     const MIN: Duration = Duration::from_millis(100);
+    const MAX: Duration = Duration::from_secs(1);
+    const STALL: Duration = Duration::from_secs(2);
     let mut backoff = MIN;
     loop {
-        if let Ok(s) = TcpStream::connect(addr).await {
+        if let Ok(Ok(s)) = tokio::time::timeout(STALL, TcpStream::connect(addr)).await {
             let _ = s.set_nodelay(true);
             // Frames queued while the previous batch was written go out in one syscall.
             let mut w = BufWriter::with_capacity(64 << 10, s);
-            let hello = write_frame(&mut w, &me.to_le_bytes()).await.is_ok() && w.flush().await.is_ok();
+            let hello = within(STALL, async {
+                write_frame(&mut w, &me.to_le_bytes()).await?;
+                w.flush().await
+            })
+            .await;
             while hello && let Some(frame) = rx.recv().await {
-                let mut ok = write_frame(&mut w, &frame).await.is_ok();
-                while ok && let Ok(frame) = rx.try_recv() {
-                    ok = write_frame(&mut w, &frame).await.is_ok();
-                }
-                if !ok || w.flush().await.is_err() {
+                let sent = within(STALL, async {
+                    write_frame(&mut w, &frame).await?;
+                    while let Ok(frame) = rx.try_recv() {
+                        write_frame(&mut w, &frame).await?;
+                    }
+                    w.flush().await
+                })
+                .await;
+                if !sent {
                     break;
                 }
                 backoff = MIN;
             }
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(5));
+        backoff = (backoff * 2).min(MAX);
     }
 }
 
@@ -463,5 +481,17 @@ mod tests {
         let held: Vec<Ev> = events.try_iter().collect();
         assert!(held.len() <= MAX_PIPELINE + 2, "{} requests taken in", held.len());
         assert!(held.len() >= MAX_PIPELINE, "{} requests taken in", held.len());
+    }
+
+    #[tokio::test]
+    async fn a_peer_connection_that_stops_draining_is_redialed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (tx, rx) = tmpsc::channel(4096);
+        tokio::spawn(outbound(0, listener.local_addr().unwrap(), rx));
+        // The first connection is accepted and never read, like a link that drops packets.
+        let (_stuck, _) = listener.accept().await.unwrap();
+        tokio::spawn(async move { while tx.send(vec![0; 64 << 10]).await.is_ok() {} });
+        let redial = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+        assert!(redial.is_ok(), "the sender kept waiting on a connection that drains nothing");
     }
 }
