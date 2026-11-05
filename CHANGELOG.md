@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `examples/kv-tokio`: a peer connection whose connect or write takes over 2 s is dropped
+  and redialed (backoff capped at 1 s). After a partition that silently dropped packets,
+  the cut-off replica waited on TCP's own retransmission backoff and rejoined about 11 s
+  after the link healed; it now rejoins in under a second.
 - `quepaxa`: a follower no longer hedges around a leader that is slow but still deciding
   slots: an entry it forwarded is proposed here after four hedge delays (at most
   `hedge_max`) instead of one once the leader decided a slot itself since the forward, and

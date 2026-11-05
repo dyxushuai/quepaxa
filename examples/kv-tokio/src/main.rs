@@ -188,35 +188,58 @@ async fn push(events: &SyncSender<Ev>, mut ev: Ev) -> bool {
     }
 }
 
-async fn write_frame(s: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> std::io::Result<()> {
-    s.write_u32_le(frame.len() as u32).await?;
-    s.write_all(frame).await
+/// Most time one chunk of a peer frame may take to be accepted by the socket.
+const STALL: Duration = Duration::from_secs(2);
+/// A frame is written in chunks of this size, each within `STALL`: a large snapshot on a
+/// slow but draining link is not cut off, a link that drains nothing is.
+const CHUNK: usize = 64 << 10;
+
+/// Whether `io` finished, successfully, within `STALL`.
+async fn within_stall(io: impl Future<Output = std::io::Result<()>>) -> bool {
+    matches!(tokio::time::timeout(STALL, io).await, Ok(Ok(())))
+}
+
+/// Writes one length-prefixed frame, giving up if the socket stops taking bytes for `STALL`.
+async fn send_frame(w: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> bool {
+    if !within_stall(w.write_u32_le(frame.len() as u32)).await {
+        return false;
+    }
+    for chunk in frame.chunks(CHUNK) {
+        if !within_stall(w.write_all(chunk)).await {
+            return false;
+        }
+    }
+    true
 }
 
 /// Keeps a connection to `peer`, reconnecting forever with exponential backoff (reset once
-/// a connection carries a frame); lost frames are retransmitted by the protocol.
+/// a connection carries a frame); lost frames are retransmitted by the protocol. A connect
+/// that takes longer than `STALL`, or a socket that takes no bytes for that long, gives the
+/// connection up: on a link that silently drops packets (a partition), TCP would otherwise
+/// keep retrying with its own backoff and resume seconds after the link heals.
 async fn outbound(me: u32, addr: SocketAddr, mut rx: tmpsc::Receiver<Vec<u8>>) {
     const MIN: Duration = Duration::from_millis(100);
+    const MAX: Duration = Duration::from_secs(1);
     let mut backoff = MIN;
     loop {
-        if let Ok(s) = TcpStream::connect(addr).await {
+        if let Ok(Ok(s)) = tokio::time::timeout(STALL, TcpStream::connect(addr)).await {
             let _ = s.set_nodelay(true);
             // Frames queued while the previous batch was written go out in one syscall.
-            let mut w = BufWriter::with_capacity(64 << 10, s);
-            let hello = write_frame(&mut w, &me.to_le_bytes()).await.is_ok() && w.flush().await.is_ok();
+            let mut w = BufWriter::with_capacity(CHUNK, s);
+            let hello = send_frame(&mut w, &me.to_le_bytes()).await && within_stall(w.flush()).await;
             while hello && let Some(frame) = rx.recv().await {
-                let mut ok = write_frame(&mut w, &frame).await.is_ok();
+                let mut ok = send_frame(&mut w, &frame).await;
                 while ok && let Ok(frame) = rx.try_recv() {
-                    ok = write_frame(&mut w, &frame).await.is_ok();
+                    ok = send_frame(&mut w, &frame).await;
                 }
-                if !ok || w.flush().await.is_err() {
+                if !ok || !within_stall(w.flush()).await {
                     break;
                 }
                 backoff = MIN;
             }
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(5));
+        backoff = (backoff * 2).min(MAX);
     }
 }
 
@@ -463,5 +486,39 @@ mod tests {
         let held: Vec<Ev> = events.try_iter().collect();
         assert!(held.len() <= MAX_PIPELINE + 2, "{} requests taken in", held.len());
         assert!(held.len() >= MAX_PIPELINE, "{} requests taken in", held.len());
+    }
+
+    #[tokio::test]
+    async fn a_peer_connection_that_stops_draining_is_redialed() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (tx, rx) = tmpsc::channel(4096);
+        tokio::spawn(outbound(0, listener.local_addr().unwrap(), rx));
+        // The first connection is accepted and never read, like a link that drops packets.
+        let (_stuck, _) = listener.accept().await.unwrap();
+        tokio::spawn(async move { while tx.send(vec![0; 64 << 10]).await.is_ok() {} });
+        let redial = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await;
+        assert!(redial.is_ok(), "the sender kept waiting on a connection that drains nothing");
+    }
+
+    #[tokio::test]
+    async fn a_large_frame_to_a_slow_but_draining_peer_is_not_cut_off() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (tx, rx) = tmpsc::channel(4);
+        tokio::spawn(outbound(0, listener.local_addr().unwrap(), rx));
+        let (s, _) = listener.accept().await.unwrap();
+        const LEN: usize = 16 << 20; // a large snapshot
+        tx.send(vec![7; LEN]).await.unwrap();
+        // About 3 MiB/s: the frame takes far longer than `STALL`, but bytes keep moving.
+        let mut s = BufReader::new(s);
+        let mut got = 0;
+        let mut buf = vec![0; CHUNK];
+        let started = std::time::Instant::now();
+        while got < 4 + 4 + LEN {
+            let n = s.read(&mut buf).await.unwrap();
+            assert!(n > 0, "the connection was given up after {got} bytes");
+            got += n;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(started.elapsed() > STALL, "the link was not slow enough to test anything");
     }
 }
