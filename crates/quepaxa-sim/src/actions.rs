@@ -59,26 +59,28 @@ impl Sim {
         }
     }
 
+    /// When a disk fault on `i` in force now ends.
+    pub(crate) fn during(&self, fault: &Option<(Vec<usize>, u64, u64)>, i: usize) -> Option<u64> {
+        match fault {
+            Some((nodes, at, ms)) if nodes.contains(&i) && (at * MS..(at + ms) * MS).contains(&self.now) => {
+                Some((at + ms) * MS)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn on_action(&mut self, i: usize, a: Action) {
         match a {
             Action::Send(out) => self.net_send(i, out),
             Action::Persist { id, records, then, replace } => {
                 // Group commit: writes issued while an fsync runs share the next one.
-                let during = |fault: &Option<(Vec<usize>, u64, u64)>| match fault {
-                    Some((nodes, at, ms))
-                        if nodes.contains(&i) && (at * MS..(at + ms) * MS).contains(&self.now) =>
-                    {
-                        Some((at + ms) * MS)
-                    }
-                    _ => None,
-                };
-                let max_ms = if during(&self.cfg.disk_slow).is_some() {
+                let max_ms = if self.during(&self.cfg.disk_slow, i).is_some() {
                     self.cfg.slow_persist_ms
                 } else {
                     self.cfg.max_persist_ms
                 };
                 let lat = 1 + self.rng.below(max_ms * MS);
-                let stall = during(&self.cfg.disk_stall).unwrap_or(0);
+                let stall = self.during(&self.cfg.disk_stall, i).unwrap_or(0);
                 let n = &mut self.nodes[i];
                 if n.disk_next_group.is_some_and(|g| g <= self.now) || self.now >= n.disk_busy_until {
                     n.disk_busy_until = n.disk_busy_until.max(n.disk_next_group.unwrap_or(0));
@@ -109,6 +111,9 @@ impl Sim {
             Action::Committed { id, slot } => {
                 let n = &mut self.nodes[i];
                 if let Some(at) = n.proposed_at.remove(&id) {
+                    if self.progress.holds(i) {
+                        self.report.held_writes += 1;
+                    }
                     self.report.commit_latencies_us.push((self.now - at) / 1_000);
                     self.report.commits.push((i, at / 1_000, self.now / 1_000));
                 }
