@@ -64,6 +64,23 @@ jobs:
           QPX_SIM_SHARD: ${{ matrix.shard }}/8
         run: cargo nextest run --release -p quepaxa-sim --test replica_sim --no-fail-fast
 
+  scenarios:
+    # A seed of these runs seconds of WAN or disk-fault traffic; each test loops over its
+    # seeds on one core, so the tests run side by side.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: 100 seeds per leader-loss and disk-fault scenario
+        env:
+          QPX_SIM_SEEDS: "100"
+        run: cargo nextest run --release -p quepaxa-sim --test leader_loss --test disk_faults --no-fail-fast
+
   deep:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -228,7 +245,7 @@ jobs:
           path: mutants.out/
 
   report:
-    needs: [fuzz, simulation, deep, tla, tlaps, verus, kani, bench, coverage, mutants]
+    needs: [fuzz, simulation, scenarios, deep, tla, tlaps, verus, kani, bench, coverage, mutants]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     permissions:
