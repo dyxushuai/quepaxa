@@ -47,9 +47,9 @@ across five emulated regions ([docs/benchmarks.md](docs/benchmarks.md#against-et
 - `examples/kv-tokio`: client results are matched only to entries of the current
   `Replica::incarnation()`, so a delayed pre-restart request sharing an id, payload and slot
   with a new one can no longer answer it with the old result.
-- `examples/kv-tokio`: a peer connection that takes no bytes for 2 s (or a connect that
-  takes that long) is redialed, with backoff capped at 1 s; frames go out in 64 KiB chunks,
-  so a large snapshot on a slow but draining link is not cut off. A replica cut off by a
+- `examples/kv-tokio`: a peer connection is redialed, with backoff capped at 1 s, when a
+  connect takes over 2 s or the socket takes over 2 s to accept one 64 KiB chunk of a frame,
+  so a large snapshot is cut off only on a link slower than about 32 KiB/s. A replica cut off by a
   partition rejoined about 11 s after the heal (TCP's own retransmission backoff); it now
   rejoins in about 0.6 s.
 - `examples/kv-tokio`: `max_outstanding_proposals` is 65,536, so a brief CPU stall queues
