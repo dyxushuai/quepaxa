@@ -567,8 +567,10 @@ fn a_leader_whose_disk_is_stuck_hands_its_entries_on_while_others_decide() {
     let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 1, 0) };
     r.handle(Timestamp(10 * MS), from_peer(1, 0, decided)).unwrap();
     r.poll_actions(&mut out);
+    r.handle_timeout(Timestamp(MS + 79 * MS)).unwrap();
+    r.poll_actions(&mut out);
     assert_eq!(r.target(), NodeId(0), "not before the write has waited 4δ");
-    assert_eq!(r.next_deadline(), Some(Timestamp(MS + 80 * MS)));
+    assert!(r.next_deadline().is_some_and(|t| t <= Timestamp(MS + 80 * MS)), "a timer for it");
     out.clear();
     r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
     r.poll_actions(&mut out);

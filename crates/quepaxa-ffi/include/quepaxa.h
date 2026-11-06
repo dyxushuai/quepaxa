@@ -155,6 +155,9 @@
 // Gauge: recorder registers held in memory.
 #define QPX_METRIC_LIVE_REGISTERS 10
 
+// Times this replica stepped aside because a write waited too long on its disk.
+#define QPX_METRIC_STEPPED_ASIDE 11
+
 // Largest batch of entries per slot, bytes (`u32`).
 #define QPX_CONFIG_MAX_BATCH_BYTES 1
 

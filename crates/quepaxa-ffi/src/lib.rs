@@ -117,7 +117,8 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// 0.7: opaque `qpx_config` (`qpx_config_new`, `qpx_config_set`, `qpx_config_set_leader_order`,
 /// `qpx_config_free`) and `qpx_metric` replace the `qpx_config` and `qpx_metrics` structs,
 /// `qpx_config_init` and `qpx_get_metrics` (incompatible).
-/// 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range.
+/// 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range;
+/// `QPX_METRIC_STEPPED_ASIDE`.
 pub const QPX_ABI_VERSION_MINOR: u32 = 8;
 
 /// Success.
@@ -679,6 +680,8 @@ pub const QPX_METRIC_HEDGED: u32 = 8;
 pub const QPX_METRIC_RETAINED_SLOTS: u32 = 9;
 /// Gauge: recorder registers held in memory.
 pub const QPX_METRIC_LIVE_REGISTERS: u32 = 10;
+/// Times this replica stepped aside because a write waited too long on its disk.
+pub const QPX_METRIC_STEPPED_ASIDE: u32 = 11;
 
 /// Reads counter or gauge `metric` (`QPX_METRIC_*`, see the Rust `Metrics`) into `out`; an
 /// unknown metric is `QPX_ERR_INVALID_ARGUMENT`.
@@ -703,6 +706,7 @@ pub unsafe extern "C" fn qpx_metric(h: *mut qpx_replica, metric: u32, out: *mut 
             QPX_METRIC_HEDGED => m.hedged,
             QPX_METRIC_RETAINED_SLOTS => m.retained_slots,
             QPX_METRIC_LIVE_REGISTERS => m.live_registers,
+            QPX_METRIC_STEPPED_ASIDE => m.stepped_aside,
             _ => {
                 set_last_error(&format!("unknown metric {metric}"));
                 return QPX_ERR_INVALID_ARGUMENT;

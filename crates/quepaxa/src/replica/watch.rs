@@ -113,6 +113,7 @@ impl Replica {
         if !aside {
             return;
         }
+        self.metrics.stepped_aside += 1;
         let mut handed = Vec::new();
         self.batches.retain(|_, b| {
             // Our own encoding: it decodes.

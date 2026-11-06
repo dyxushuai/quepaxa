@@ -11,7 +11,8 @@ All notable changes to this project are documented here. The project follows
   leader order and stops acknowledging forwards, until its disk catches up. In the
   simulator, with the leader's disk stopped for 300 ms, writes from the leader's own clients
   take at most 215-254 ms instead of 297-324 ms. Not when no other replica decides either
-  (one shared disk), where it would only add contention once the disks resume.
+  (one shared disk), where it would only add contention once the disks resume. Counted in
+  `Metrics::stepped_aside`.
 - `examples/kv-tokio`: a peer connection whose connect or write takes over 2 s is dropped
   and redialed (backoff capped at 1 s). After a partition that silently dropped packets,
   the cut-off replica waited on TCP's own retransmission backoff and rejoined about 11 s
@@ -34,7 +35,7 @@ All notable changes to this project are documented here. The project follows
 - `examples/kv-tokio`: associates client results only with entries from the current
   `Replica::incarnation()`. A delayed pre-restart request sharing an id, payload and slot
   with a new request can no longer answer the new client with its old transaction result.
-- `quepaxa-ffi`: ABI 0.8 adds `QPX_ERR_REQUEST_ID_EXHAUSTED`. Request ids remain `uint64_t`;
+- `quepaxa-ffi`: ABI 0.8 adds `QPX_ERR_REQUEST_ID_EXHAUSTED` and `QPX_METRIC_STEPPED_ASIDE`. Request ids remain `uint64_t`;
   read ids now use its high bit. Function signatures and output layouts are unchanged.
 
 - `quepaxa`: losing the leader across regions stalls the other regions about one commit
