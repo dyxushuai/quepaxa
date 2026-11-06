@@ -19,3 +19,5 @@ retire-without-the-barrier	-	cargo nextest run -p quepaxa --test membership_api 
 suspect-forwards-to-the-leader	-	cargo nextest run --release -p quepaxa-sim --test leader_loss	writes stalled|p99 [0-9]+ ms after the kill
 silence-ignores-the-forward-time	-	cargo nextest run --release -p quepaxa-sim --test leader_loss	writes hedged
 hedge-a-busy-leader	-	cargo nextest run --release -p quepaxa-sim --test disk_faults sudden	hedged around a slow leader
+stuck-leader-keeps-its-entries	-	cargo nextest run --release -p quepaxa-sim --test disk_faults leader	waited out the stall
+step-aside-on-a-shared-disk	QPX_SIM_SEEDS=4	cargo nextest run --release -p quepaxa-sim --test disk_faults shared_disk_stall	hedging stretched it

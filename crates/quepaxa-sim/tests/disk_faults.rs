@@ -64,11 +64,18 @@ fn a_stalled_follower_disk_is_not_waited_for() {
 }
 
 #[test]
-fn a_stalled_leader_disk_delays_followers_writes_less_than_the_stall() {
+fn a_stalled_leader_disk_delays_writes_less_than_the_stall() {
     for seed in 0..seeds() {
-        let max = worst(&run(vec![0], seed), &[1, 2]);
-        println!("leader disk stalled {STALL_MS} ms, seed {seed}: slowest follower write {max} ms");
+        let r = run(vec![0], seed);
+        let max = worst(&r, &[1, 2]);
+        println!(
+            "leader disk stalled {STALL_MS} ms, seed {seed}: slowest write {max} ms at followers, {} ms at the leader",
+            worst(&r, &[0])
+        );
         assert!(max < STALL_MS, "seed {seed}: slowest follower write {max} ms");
+        // The leader steps aside and hands its own clients' writes to the next member.
+        let own = worst(&r, &[0]);
+        assert!(own < STALL_MS - 20, "seed {seed}: slowest leader write {own} ms waited out the stall");
     }
 }
 
@@ -83,7 +90,7 @@ fn writes_resume_right_after_a_shared_disk_stall() {
         assert_eq!(through, 0, "seed {seed}: {through} writes acknowledged through a stopped disk");
         let max = worst(&r, &[0, 1, 2]);
         println!("shared disk stalled {STALL_MS} ms, seed {seed}: slowest write {max} ms");
-        assert!(max < STALL_MS + 30, "seed {seed}: slowest write {max} ms: hedging stretched it");
+        assert!(max < STALL_MS + 20, "seed {seed}: slowest write {max} ms: hedging stretched it");
     }
 }
 

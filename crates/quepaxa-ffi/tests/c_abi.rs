@@ -300,7 +300,7 @@ fn metrics_are_readable_over_the_abi() {
     assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_MESSAGES_REJECTED, &mut v) }, QPX_OK);
     assert_eq!(v, 1);
     assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_LIVE_REGISTERS, &mut v) }, QPX_OK);
-    for metric in 1..=QPX_METRIC_LIVE_REGISTERS {
+    for metric in 1..=QPX_METRIC_STEPPED_ASIDE {
         assert_eq!(unsafe { qpx_metric(h, metric, &mut v) }, QPX_OK, "metric {metric}");
     }
     assert_eq!(

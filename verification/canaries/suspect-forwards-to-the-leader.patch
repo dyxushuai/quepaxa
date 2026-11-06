@@ -1,7 +1,7 @@
 diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
 --- a/crates/quepaxa/src/replica/watch.rs
 +++ b/crates/quepaxa/src/replica/watch.rs
-@@ -50,7 +50,7 @@ impl Replica {
+@@ -81,7 +81,7 @@ impl Replica {
          order
              .iter()
              .copied()

@@ -47,6 +47,11 @@ impl<E> Gate<E> {
         }
     }
 
+    /// How many `Persist`s have been issued.
+    pub fn issued(&self) -> u64 {
+        self.next_persist
+    }
+
     /// Whether the incarnation is durable, so sends may leave at all.
     fn ready(&self) -> bool {
         self.acked.is_some()

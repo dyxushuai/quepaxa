@@ -102,7 +102,8 @@ impl Replica {
         };
         let cap =
             self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
-        let queue = if self.leads_now() { &mut self.pending } else { &mut self.relayed };
+        // Stepped aside, this replica hands them on (`watch.rs`).
+        let queue = if self.leads_now() || self.watch.aside { &mut self.pending } else { &mut self.relayed };
         if queue.len() + entries.len() > cap {
             return; // the origin hedges
         }
@@ -116,6 +117,7 @@ impl Replica {
         if self.fenced {
             return;
         }
+        self.check_aside();
         if !self.proposes_directly() {
             self.forward_pending();
         }
@@ -288,11 +290,13 @@ impl Replica {
             .chain(self.reads.resend_at())
             .chain(self.startup_probe)
             .chain(self.watch.ack_due.values().copied())
+            .chain(self.aside_at().filter(|_| !self.watch.aside))
             .min()
     }
 
     pub(super) fn fire_timers(&mut self) {
         self.resend_reads();
+        self.check_aside();
         let now = self.now;
         let ack_due: Vec<_> =
             self.watch.ack_due.iter().filter(|(_, at)| **at <= now).map(|(node, _)| *node).collect();
@@ -311,7 +315,10 @@ impl Replica {
         if self.forwarded.values().any(|(_, at)| self.silent_at(*at).is_some_and(|t| t <= now)) {
             self.suspect_target();
         }
-        // The target talks but is slow: entries it left uncommitted too long are proposed here.
+        // The target talks but is slow: entries it left uncommitted too long are proposed here;
+        // while stepped aside (this replica's own slots are stuck) handed to the target again,
+        // in case the forward was lost or refused.
+        let aside = self.watch.aside;
         let late: Vec<_> = self
             .forwarded
             .iter()
@@ -320,6 +327,10 @@ impl Replica {
             .collect();
         for id in late {
             if let Some((e, _)) = self.forwarded.remove(&id) {
+                if aside {
+                    self.pending.push_back(e);
+                    continue;
+                }
                 if let Some(o) = self.outstanding.get_mut(&id) {
                     o.2 = true;
                 }

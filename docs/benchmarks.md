@@ -292,6 +292,14 @@ What the table says, and what it does not:
   did not reproduce it (one rotation each, as expected), and etcd showed similar dips in
   write-only runs on the same shared disk, so `fsync` jitter on the two remaining replicas
   is the likelier cause.
+- **A stuck leader disk** (`run.sh stuck-disk`: the leader's writes capped at 1 IOPS for
+  15 s, clients on every member, one run, `target/bench-etcd/20261106-161556/`): QuePaxa
+  fails nothing, p99 23 ms, max 123 ms, longest gap 104 ms. etcd's leader stalls on its
+  log: default etcd fails 55,559 requests and leaves 3,630 unanswered (longest gap
+  1,180 ms), tuned etcd 46,378 and 230 (761 ms). Before the leader stepped aside (`main`
+  at `bfdec81`, a QuePaxa-only probe with the same fault, three runs each, alternated),
+  writes from its own clients waited for its disk: p99 43-47 ms and max 567-579 ms,
+  against 12-18 ms and 126-207 ms after.
 - **Four times the load** (`RATE=20000 run.sh crash partition slow-disk`, one run at
   `06bc3d7`, `target/bench-etcd/20261105-170501/`): QuePaxa fails nothing and its longest
   gaps are 112, 14 and 49 ms; default etcd fails 8,473-54,516 requests with gaps of

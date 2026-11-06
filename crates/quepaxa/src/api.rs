@@ -323,6 +323,8 @@ pub struct Metrics {
     pub forwarded: u64,
     /// Own entries proposed directly after the leader did not commit them in time.
     pub hedged: u64,
+    /// Times this replica stepped aside because a write waited too long on its disk.
+    pub stepped_aside: u64,
     /// Gauge: decided slots held in memory (bounded by compaction).
     pub retained_slots: u64,
     /// Gauge: recorder registers held in memory.

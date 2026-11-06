@@ -62,7 +62,9 @@ What the paper leaves open, the crate fixes as follows:
   it silent): the follower hands its entries to the next member of the leader order,
   which proposes them, so followers do not contend for slots before the schedule rotates,
   and the leader's unfinished slots are taken over as soon. Hearing from it ends the
-  suspicion.
+  suspicion. A leader whose own disk is stuck (a write waiting four hedge delays, while
+  others still decide slots) steps aside the same way: it hands its entries to the next
+  member and stops acknowledging forwards until its disk catches up.
 - **Durability.** Recorder state is written before any reply that reports it leaves.
 - **Snapshots, catch-up, membership.** See the other chapters.
 
