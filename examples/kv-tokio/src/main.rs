@@ -37,6 +37,8 @@ mod node;
 mod ops;
 mod pb;
 mod storage;
+#[cfg(test)]
+mod turmoil_tests;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -212,18 +214,23 @@ async fn send_frame(w: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> bool {
     true
 }
 
+/// `outbound`'s redial backoff.
+const MIN_BACKOFF: Duration = Duration::from_millis(100);
+const MAX_BACKOFF: Duration = Duration::from_secs(1);
+
 /// Keeps a connection to `peer`, reconnecting forever with exponential backoff (reset once
 /// a connection carries a frame); lost frames are retransmitted by the protocol. A connect
 /// that takes longer than `STALL`, or a socket that takes no bytes for that long, gives the
 /// connection up: on a link that silently drops packets (a partition), TCP would otherwise
 /// keep retrying with its own backoff and resume seconds after the link heals.
-async fn outbound(me: u32, addr: SocketAddr, mut rx: tmpsc::Receiver<Vec<u8>>) {
-    const MIN: Duration = Duration::from_millis(100);
-    const MAX: Duration = Duration::from_secs(1);
-    let mut backoff = MIN;
+async fn outbound<S, C>(me: u32, connect: impl Fn() -> C, mut rx: tmpsc::Receiver<Vec<u8>>)
+where
+    S: AsyncWrite + Unpin,
+    C: Future<Output = std::io::Result<S>>,
+{
+    let mut backoff = MIN_BACKOFF;
     loop {
-        if let Ok(Ok(s)) = tokio::time::timeout(STALL, TcpStream::connect(addr)).await {
-            let _ = s.set_nodelay(true);
+        if let Ok(Ok(s)) = tokio::time::timeout(STALL, connect()).await {
             // Frames queued while the previous batch was written go out in one syscall.
             let mut w = BufWriter::with_capacity(CHUNK, s);
             let hello = send_frame(&mut w, &me.to_le_bytes()).await && within_stall(w.flush()).await;
@@ -235,16 +242,22 @@ async fn outbound(me: u32, addr: SocketAddr, mut rx: tmpsc::Receiver<Vec<u8>>) {
                 if !ok || !within_stall(w.flush()).await {
                     break;
                 }
-                backoff = MIN;
+                backoff = MIN_BACKOFF;
             }
         }
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(MAX);
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
-async fn inbound(s: TcpStream, events: SyncSender<Ev>) {
+/// Connects to a peer for `outbound`.
+async fn dial(addr: SocketAddr) -> std::io::Result<TcpStream> {
+    let s = TcpStream::connect(addr).await?;
     let _ = s.set_nodelay(true);
+    Ok(s)
+}
+
+async fn inbound(s: impl AsyncRead + Unpin, events: SyncSender<Ev>) {
     let mut s = BufReader::with_capacity(64 << 10, s);
     let Ok(Ok(hello)) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut s)).await else {
         return;
@@ -282,9 +295,11 @@ const MAX_PIPELINE: usize = 1024;
 
 /// Pipelined client connection: requests go to the node as they arrive, replies are
 /// written in request order.
-async fn client(s: TcpStream, events: SyncSender<Ev>) {
-    let _ = s.set_nodelay(true);
-    let (r, w) = s.into_split();
+async fn client(
+    r: impl AsyncRead + Unpin,
+    w: impl AsyncWrite + Unpin + Send + 'static,
+    events: SyncSender<Ev>,
+) {
     let (tx, mut replies) = tmpsc::channel::<oneshot::Receiver<Reply>>(MAX_PIPELINE);
     let writer = tokio::spawn(async move {
         // Replies already available are written together; the buffer is flushed before
@@ -378,7 +393,8 @@ async fn main() {
         }
         let (tx, rx) = tmpsc::channel(4096);
         peers.insert(*i, tx);
-        tokio::spawn(outbound(args.id, *addr, rx));
+        let addr = *addr;
+        tokio::spawn(outbound(args.id, move || dial(addr), rx));
     }
     let listen = listen.expect("--members or --peers must include --id");
     let (events, rx) = mpsc::sync_channel(65_536);
@@ -405,11 +421,14 @@ async fn main() {
     let peer_events = events.clone();
     tokio::spawn(async move {
         while let Ok((s, _)) = peer_listener.accept().await {
+            let _ = s.set_nodelay(true);
             tokio::spawn(inbound(s, peer_events.clone()));
         }
     });
     while let Ok((s, _)) = client_listener.accept().await {
-        tokio::spawn(client(s, events.clone()));
+        let _ = s.set_nodelay(true);
+        let (r, w) = s.into_split();
+        tokio::spawn(client(r, w, events.clone()));
     }
 }
 
@@ -455,7 +474,10 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (events, rx) = mpsc::sync_channel(4 * MAX_PIPELINE);
-        tokio::spawn(async move { client(listener.accept().await.unwrap().0, events).await });
+        tokio::spawn(async move {
+            let (r, w) = listener.accept().await.unwrap().0.into_split();
+            client(r, w, events).await
+        });
         (TcpStream::connect(addr).await.unwrap(), rx)
     }
 
@@ -492,7 +514,8 @@ mod tests {
     async fn a_peer_connection_that_stops_draining_is_redialed() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (tx, rx) = tmpsc::channel(4096);
-        tokio::spawn(outbound(0, listener.local_addr().unwrap(), rx));
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(outbound(0, move || dial(addr), rx));
         // The first connection is accepted and never read, like a link that drops packets.
         let (_stuck, _) = listener.accept().await.unwrap();
         tokio::spawn(async move { while tx.send(vec![0; 64 << 10]).await.is_ok() {} });
@@ -504,7 +527,8 @@ mod tests {
     async fn a_large_frame_to_a_slow_but_draining_peer_is_not_cut_off() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (tx, rx) = tmpsc::channel(4);
-        tokio::spawn(outbound(0, listener.local_addr().unwrap(), rx));
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(outbound(0, move || dial(addr), rx));
         let (s, _) = listener.accept().await.unwrap();
         const LEN: usize = 16 << 20; // a large snapshot
         tx.send(vec![7; LEN]).await.unwrap();

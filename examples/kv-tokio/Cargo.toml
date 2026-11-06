@@ -20,6 +20,10 @@ prost = "0.14.4"
 tonic = { version = "0.14.6", default-features = false, features = ["codegen", "router", "server", "channel", "transport"] }
 tonic-prost = "0.14.6"
 
+[dev-dependencies]
+# Simulated network and clock for the peer link and client pipeline tests (src/turmoil_tests.rs).
+turmoil = "=0.7.2"
+
 [build-dependencies]
 # Compiles proto/ without a system protoc.
 protox = "0.10.0"
