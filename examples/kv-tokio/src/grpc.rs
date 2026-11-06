@@ -3,8 +3,6 @@
 //! sends; anything outside that subset is refused with an explicit status, never answered
 //! approximately.
 
-use std::sync::mpsc::SyncSender;
-
 use tokio::sync::oneshot;
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status};
 
@@ -19,6 +17,7 @@ use crate::pb::etcdserverpb::{
     range_request, request_op, response_op,
 };
 use crate::pb::mvccpb::KeyValue;
+use crate::sync::mpsc::SyncSender;
 
 pub use crate::pb::etcdserverpb::kv_server::KvServer;
 

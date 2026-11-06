@@ -37,13 +37,13 @@ mod node;
 mod ops;
 mod pb;
 mod storage;
-#[cfg(test)]
+mod sync;
+#[cfg(all(test, not(feature = "shuttle")))]
 mod turmoil_tests;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -52,6 +52,8 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWrite
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{mpsc as tmpsc, oneshot};
+
+use crate::sync::mpsc::{self, SyncSender, TrySendError};
 
 /// The event loop and the snapshot thread allocate and free heavily at once; with the system
 /// allocator, cross-thread frees made compaction take 2-8 ms instead of under 2 ms.
@@ -403,7 +405,7 @@ async fn main() {
         eprintln!("kv-tokio: {e}");
         std::process::exit(1);
     }
-    std::thread::spawn(move || node.run(rx));
+    sync::thread::spawn(move || node.run(rx));
 
     let peer_listener = TcpListener::bind(listen).await.expect("bind peer address");
     let client_listener = TcpListener::bind(args.client).await.expect("bind client address");
@@ -432,7 +434,7 @@ async fn main() {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use super::*;
 

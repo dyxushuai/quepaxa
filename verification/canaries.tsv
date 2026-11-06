@@ -28,3 +28,4 @@ late-entries-never-hedged	-	cargo nextest run --release -p quepaxa-sim --test re
 peer-frame-whole-deadline	-	cargo test -p kv-tokio --bin kv-tokio turmoil_tests::a_large_frame_on_a_slow_draining_link	the connection was given up after [0-9]+ bytes
 peer-link-no-stall-redial	-	cargo test -p kv-tokio --bin kv-tokio turmoil_tests::a_held_link_is_redialed	a held link was not redialed within STALL
 last-error-shared-across-threads	-	cargo nextest run -p quepaxa-ffi --test c_abi	another thread's failure leaked into this one
+writer-forgets-to-wake-the-event-loop	-	cargo test -p kv-tokio --features shuttle --bin kv-tokio shuttle_tests::the_handoff	deadlock
