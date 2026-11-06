@@ -160,9 +160,18 @@ fn the_handoff_reports_every_persist_in_order_under_every_schedule() {
 }
 
 #[test]
+fn the_writer_wakes_the_event_loop_under_every_schedule() {
+    // No flush waits: only the writer's wake-up, sent while the queued event is still
+    // there (the queue is full) or after it was taken, ends the event loop's waits. One
+    // persist: two take longer than the nightly budget to explore.
+    dfs(|| assert_eq!(handoff(1, u64::MAX, MemLog::default()), (vec![(0, true)], 1)));
+}
+
+#[test]
 fn a_failed_append_stops_the_writer_and_releases_a_waiting_flush() {
     dfs(|| {
-        let (reports, appends) = handoff(persists(), 1, MemLog { fail_at: Some(1), ..MemLog::default() });
+        let (reports, appends) =
+            handoff(persists().max(2), 1, MemLog { fail_at: Some(1), ..MemLog::default() });
         assert_eq!(reports, [(0, false)], "the failure is reported and nothing after it");
         assert_eq!(appends, 1, "the writer stopped at the failure");
     });
