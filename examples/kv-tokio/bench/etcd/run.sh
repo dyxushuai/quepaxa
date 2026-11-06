@@ -5,8 +5,9 @@
 # Usage: run.sh [--smoke] [scenario...]
 #   scenarios: steady mixed crash partition slow-disk stuck-disk far-leader (default: all)
 #   --smoke    short runs, to check the harness works
-# Environment: RATE (fault-scenario load, default 5000/s), NODE_CPUS ("0-2 3-5 6-8"),
-#   GEN_CPUS (9-12), SLOW_IOPS (write IOPS cap on the slow leader, default 50),
+# Environment: NODES (cluster size, 3 or 5, default 3), RATE (fault-scenario load, default
+#   5000/s), NODE_CPUS ("0-2 3-5 6-8"; with 5 nodes "0-1 2-3 4-5 6-7 8-9"), GEN_CPUS (9-12;
+#   with 5 nodes 10-13), SLOW_IOPS (write IOPS cap on the slow leader, default 50),
 #   FAR_MS (one-way delay added to the far leader, default 50), MIXED_RATE (read-heavy load,
 #   default 40000/s).
 # Needs Docker (with cgroup v2 for slow-disk) and jq. Results go to target/bench-etcd/<time>/.
@@ -31,8 +32,15 @@ else
   secs=40 fault=10 heal=25 total=100000 steady_secs=20
 fi
 rate=${RATE:-5000}
-read -r -a node_cpus <<< "${NODE_CPUS:-0-2 3-5 6-8}"
-gen_cpus=${GEN_CPUS:-9-12}
+n=${NODES:-3}
+case $n in
+  3) default_cpus="0-2 3-5 6-8" default_gen=9-12 ;;
+  5) default_cpus="0-1 2-3 4-5 6-7 8-9" default_gen=10-13 ;;
+  *) echo "NODES must be 3 or 5" >&2; exit 2 ;;
+esac
+read -r -a node_cpus <<< "${NODE_CPUS:-$default_cpus}"
+gen_cpus=${GEN_CPUS:-$default_gen}
+ids=$(seq 0 $((n - 1)))
 slow_iops=${SLOW_IOPS:-50}
 far_ms=${FAR_MS:-50}
 mixed_rate=${MIXED_RATE:-40000}
@@ -61,30 +69,48 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
 
 {
   describe_host
-  echo "rate: $rate/s, run ${secs}s, fault at ${fault}s, heal at ${heal}s, smoke=$smoke"
+  echo "nodes: $n, rate: $rate/s, run ${secs}s, fault at ${fault}s, heal at ${heal}s, smoke=$smoke"
   echo "cpus: nodes ${node_cpus[*]}, generator $gen_cpus"
 } > "$results/env.txt"
 cat "$results/env.txt"
 
-# start_quepaxa: three kv-tokio replicas; replica 0 leads (smallest id).
+# The members' addresses on `port`: `<sep><id>=<ip>:<port>` joined by commas.
+member_list() {
+  local i out=
+  for i in $ids; do out+="${out:+,}$1$i=${2:-}$prefix.1$i:$3"; done
+  echo "$out"
+}
+
+# start_quepaxa: `n` kv-tokio replicas; replica 0 leads (smallest id).
 start_quepaxa() {
-  local members="0=$prefix.10:7000,1=$prefix.11:7000,2=$prefix.12:7000"
-  nodes=(qpx-n0 qpx-n1 qpx-n2)
-  for i in 0 1 2; do
+  local members i
+  members=$(member_list "" "" 7000)
+  nodes=()
+  for i in $ids; do nodes+=("qpx-n$i"); done
+  for i in $ids; do
     docker run -d --name "qpx-n$i" --network "$net" --ip "$prefix.1$i" --cpuset-cpus "${node_cpus[$i]}" \
       -v "$data/n$i:/data" "$image" \
       kv-tokio --id "$i" --members "$members" --client 0.0.0.0:7100 --etcd 0.0.0.0:2379 --data /data >/dev/null
   done
   leader=qpx-n0
-  followers=("$prefix.11" "$prefix.12")
-  endpoints="$prefix.10:2379,$prefix.11:2379,$prefix.12:2379"
+  followers=()
+  for i in $ids; do [ "$i" = 0 ] || followers+=("$prefix.1$i"); done
+  endpoints=$(endpoint_list)
+}
+
+endpoint_list() {
+  local i out=
+  for i in $ids; do out+="${out:+,}$prefix.1$i:2379"; done
+  echo "$out"
 }
 
 # start_etcd <heartbeat ms> <election ms>; the leader is whoever etcd elects.
 start_etcd() {
-  local cluster="n0=http://$prefix.10:2380,n1=http://$prefix.11:2380,n2=http://$prefix.12:2380"
-  nodes=(qpx-n0 qpx-n1 qpx-n2)
-  for i in 0 1 2; do
+  local cluster i
+  cluster=$(member_list n http:// 2380)
+  nodes=()
+  for i in $ids; do nodes+=("qpx-n$i"); done
+  for i in $ids; do
     docker run -d --name "qpx-n$i" --network "$net" --ip "$prefix.1$i" --cpuset-cpus "${node_cpus[$i]}" \
       -v "$data/n$i:/data" "$etcd_image" \
       etcd --name "n$i" --data-dir /data \
@@ -93,7 +119,7 @@ start_etcd() {
       --initial-cluster "$cluster" --initial-cluster-state new \
       --heartbeat-interval "$1" --election-timeout "$2" >/dev/null
   done
-  endpoints="$prefix.10:2379,$prefix.11:2379,$prefix.12:2379"
+  endpoints=$(endpoint_list)
 }
 
 # Waits until the cluster takes writes, then finds etcd's leader if needed.
@@ -111,7 +137,7 @@ ready() {
       sed 's|http://||; s|:2379||')
     leader="qpx-n${leader_ip: -1}"
     followers=()
-    for i in 0 1 2; do [ "$prefix.1$i" = "$leader_ip" ] || followers+=("$prefix.1$i"); done
+    for i in $ids; do [ "$prefix.1$i" = "$leader_ip" ] || followers+=("$prefix.1$i"); done
   fi
   echo "  leader: $leader, followers: ${followers[*]}"
 }
@@ -122,11 +148,10 @@ stop() {
 }
 
 inject() {
-  local f1=${followers[0]} f2=${followers[1]}
   case $1 in
     crash) docker kill -s KILL "$leader" >/dev/null ;;
     partition)
-      sidecar "$leader" "for f in $f1 $f2; do iptables -A INPUT -s \$f -j DROP; iptables -A OUTPUT -d \$f -j DROP; done" ;;
+      sidecar "$leader" "for f in ${followers[*]}; do iptables -A INPUT -s \$f -j DROP; iptables -A OUTPUT -d \$f -j DROP; done" ;;
     slow-disk | stuck-disk)
       local cg iops=$slow_iops
       [ "$1" = stuck-disk ] && iops=1
@@ -151,7 +176,8 @@ heal() {
 # The fault scenarios: open-loop load on the followers (on every member when the leader's
 # disk is stuck: its own clients are what that costs), fault, heal, recovery.
 faulted() {
-  local system=$1 scenario=$2 out="$results/$1-$2" targets="${followers[0]}:2379,${followers[1]}:2379"
+  local system=$1 scenario=$2 out="$results/$1-$2" targets
+  targets=$(printf '%s:2379,' "${followers[@]}" | sed 's/,$//')
   [ "$scenario" = stuck-disk ] && targets=$endpoints
   # One time zero for the generator and the injector (containers share the host clock),
   # far enough ahead for the generator's container to start.

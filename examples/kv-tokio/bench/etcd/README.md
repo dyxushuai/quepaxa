@@ -21,9 +21,9 @@ latency), one file per run, request samples (`*.csv`), and `summary.md`.
 
 | Scenario | Load | What happens to the leader |
 |---|---|---|
-| `steady` | etcd's `benchmark`: put (unlimited, and at `RATE`), range (linearizable, serializable), txn-put; 256 clients over 16 connections, all three members | nothing |
-| `mixed` | open loop at `MIXED_RATE` (40000/s), 90% linearizable ranges and 10% puts, on all three members | nothing |
-| `crash` | open loop at `RATE` (5000/s) on the two followers | `SIGKILL` at 10 s |
+| `steady` | etcd's `benchmark`: put (unlimited, and at `RATE`), range (linearizable, serializable), txn-put; 256 clients over 16 connections, all members | nothing |
+| `mixed` | open loop at `MIXED_RATE` (40000/s), 90% linearizable ranges and 10% puts, on all members | nothing |
+| `crash` | open loop at `RATE` (5000/s) on the followers | `SIGKILL` at 10 s |
 | `partition` | same | its traffic to and from the followers is dropped from 10 s to 25 s |
 | `slow-disk` | same | writes capped at `SLOW_IOPS` (50) IOPS from 10 s to 25 s (cgroup `io.max`) |
 | `stuck-disk` | same, on every member (the leader's own clients are the point) | writes capped at 1 IOPS from 10 s to 25 s |
@@ -31,12 +31,13 @@ latency), one file per run, request samples (`*.csv`), and `summary.md`.
 
 Each fault runs against QuePaxa, etcd with its default timeouts (heartbeat 100 ms, election
 1000 ms) and etcd tuned for a fast local network (10 ms, 100 ms). QuePaxa's leader is
-replica 0; etcd's is whoever it elects, found from `etcdctl endpoint status`.
+replica 0; etcd's is whoever it elects, found from `etcdctl endpoint status`. Clusters
+have three members, or five with `NODES=5` (two cores each, generator on `10-13`).
 
 ## Fairness
 
-- One system runs at a time. Each node has its own container and three cores
-  (`NODE_CPUS`), the generator four others (`GEN_CPUS`).
+- One system runs at a time. Each node has its own container and three cores (two with
+  five nodes; `NODE_CPUS`), the generator four others (`GEN_CPUS`).
 - Data lives on the host disk under `target/`, never tmpfs, and both systems `fsync`.
 - In the fault scenarios clients talk only to followers, so what is measured is how the
   cluster copes with its leader, not a client losing its server. Network faults run from a
