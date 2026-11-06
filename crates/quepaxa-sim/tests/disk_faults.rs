@@ -90,7 +90,7 @@ fn writes_resume_right_after_a_shared_disk_stall() {
         assert_eq!(through, 0, "seed {seed}: {through} writes acknowledged through a stopped disk");
         let max = worst(&r, &[0, 1, 2]);
         println!("shared disk stalled {STALL_MS} ms, seed {seed}: slowest write {max} ms");
-        assert!(max < STALL_MS + 30, "seed {seed}: slowest write {max} ms: hedging stretched it");
+        assert!(max < STALL_MS + 20, "seed {seed}: slowest write {max} ms: hedging stretched it");
     }
 }
 

@@ -5,6 +5,13 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: a replica whose disk is stuck steps aside: once one of its writes has waited
+  four hedge delays (at most `hedge_max`, at least four usual write times) while another
+  replica decided a slot meanwhile, it hands its pending entries to the next member of the
+  leader order and stops acknowledging forwards, until its disk catches up. In the
+  simulator, with the leader's disk stopped for 300 ms, writes from the leader's own clients
+  take at most 215-254 ms instead of 297-324 ms. Not when no other replica decides either
+  (one shared disk), where it would only add contention once the disks resume.
 - `examples/kv-tokio`: a peer connection whose connect or write takes over 2 s is dropped
   and redialed (backoff capped at 1 s). After a partition that silently dropped packets,
   the cut-off replica waited on TCP's own retransmission backoff and rejoined about 11 s
