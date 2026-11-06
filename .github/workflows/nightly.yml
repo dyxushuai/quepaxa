@@ -96,6 +96,11 @@ jobs:
           QPX_MODEL_EXTRA_DEVIATIONS: "1"
           QPX_MODEL_STATES: "200000000"
         run: cargo nextest run --release -p quepaxa-sim --test model_check --no-fail-fast
+      - name: kv-tokio's handoff with two persists, every interleaving (about 3 minutes)
+        if: success() || failure()
+        env:
+          QPX_SHUTTLE_PERSISTS: "2"
+        run: cargo nextest run -p kv-tokio --features shuttle --bin kv-tokio --no-fail-fast
       - name: Deep property tests
         if: success() || failure()
         env:
