@@ -3,52 +3,64 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
-## Unreleased
+## 0.6.0 — 2026-11-06
 
-- `quepaxa`: a replica whose disk is stuck steps aside: once one of its writes has waited
-  four hedge delays (at most `hedge_max`, at least four usual write times) while another
-  replica decided a slot meanwhile, it hands its pending entries to the next member of the
-  leader order and stops acknowledging forwards, until its disk catches up. In the
-  simulator, with the leader's disk stopped for 300 ms, writes from the leader's own clients
-  take at most 215-254 ms instead of 297-324 ms. Not when no other replica decides either
-  (one shared disk), where it would only add contention once the disks resume. Counted in
-  `Metrics::stepped_aside`.
-- `examples/kv-tokio`: a peer connection whose connect or write takes over 2 s is dropped
-  and redialed (backoff capped at 1 s). After a partition that silently dropped packets,
-  the cut-off replica waited on TCP's own retransmission backoff and rejoined about 11 s
-  after the link healed; it now rejoins in under a second.
+Recovery from a degraded leader, measured against etcd v3.7.2 on three and five members and
+across five emulated regions ([docs/benchmarks.md](docs/benchmarks.md#against-etcd)).
+
+- `quepaxa` (breaking, wire): losing the leader across regions stalls the other regions
+  about one commit latency instead of several hedge delays (`Config::silent_leader_takeover`,
+  on by default). A follower whose leader says nothing at all for about a commit latency
+  after a forward suspects it, hands everything to the next member of the leader order,
+  which proposes it, and takes over the leader's unfinished slots as soon. In the
+  five-region benchmark the stall falls from 3.2 s to 0.7-0.9 s and p99 after the loss
+  from 7-8 s to about 1 s. A new message kind, `ForwardAck` (sent at once, before any
+  write, at most once per eighth of `retransmit_interval` per follower), keeps a leader
+  stalled on its disk from looking silent; peers of older versions reject it. A forward
+  that arrives during the cooldown is acknowledged when it expires, even while
+  persistence is stalled. Silence is judged per member, from a forward to that member,
+  against how fast it answers.
 - `quepaxa`: a follower no longer hedges around a leader that is slow but still deciding
   slots: an entry it forwarded is proposed here after four hedge delays (at most
   `hedge_max`) instead of one once the leader decided a slot itself since the forward, and
-  hedges around a talking leader run one slot at a time. In the simulator, a shared disk that suddenly slows from 2 to 40 ms
-  per write for half a second set off about 400 hedges and writes up to 210-410 ms; now
-  none, and at most 79-113 ms, as slow as a disk that was that slow all along.
-- `quepaxa`: coalesces rate-limited forward acknowledgements and sends them when the
-  cooldown expires, even while persistence is stalled. Silence detection follows the
-  actual forwarding destination and does not reuse an earlier target's deadline.
+  hedges around a talking leader run one slot at a time. In the simulator, a shared disk
+  that suddenly slows from 2 to 40 ms per write set off about 400 hedges and writes up to
+  210-410 ms; now none, and at most 79-113 ms. In Docker's slow-disk case the median
+  longest gap fell from 357 to 56 ms.
+- `quepaxa`: a replica whose disk is stuck steps aside, if others hand it their entries
+  (the leader or a deputy): once one of its writes has waited four hedge delays (at most
+  `hedge_max`, at least four usual write times) while another replica decided a slot, it
+  hands its pending entries to the next member of the leader order and stops
+  acknowledging forwards, until its disk catches up. Not when no other replica decides
+  either (one shared disk). With the leader's disk capped at 1 IOPS for 15 s, writes from
+  its own clients reach p99 12-18 ms instead of 43-47 ms; etcd fails tens of thousands of
+  requests in the same case. Counted in `Metrics::stepped_aside`.
 - `quepaxa`: reads use a separate proposal-id range, keeping logged request ids contiguous
   so deduplication state no longer grows with every write after a read. `ProposalId` stays
   opaque and unique per incarnation; interleaved reads and writes are not ordered by id.
-  Exhausting either range returns `RequestIdExhausted` (restart from durable records).
-  Wire and durable encodings are unchanged. Existing dedup windows are preserved until
-  normal incarnation eviction; old gaps cannot safely be discarded during an upgrade.
-- `examples/kv-tokio`: associates client results only with entries from the current
-  `Replica::incarnation()`. A delayed pre-restart request sharing an id, payload and slot
-  with a new request can no longer answer the new client with its old transaction result.
-- `quepaxa-ffi`: ABI 0.8 adds `QPX_ERR_REQUEST_ID_EXHAUSTED` and `QPX_METRIC_STEPPED_ASIDE`. Request ids remain `uint64_t`;
-  read ids now use its high bit. Function signatures and output layouts are unchanged.
-
-- `quepaxa`: losing the leader across regions stalls the other regions about one commit
-  latency instead of several hedge delays (`Config::silent_leader_takeover`, on by
-  default). A follower whose leader says nothing at all for about a commit latency after a
-  forward suspects it, hands everything to the next member of the leader order, which
-  proposes it, and takes over the leader's unfinished slots as soon. Before, followers
-  waited a hedge delay per entry, then each proposed on its own and contended for slots,
-  until the schedule rotated. In the five-region simulation the stall falls from 2.6-4.6 s
-  to 0.7-1.1 s and p99 after the loss from 8-10 s to 1.0-1.5 s. A new message kind
-  (`ForwardAck`, sent at once, before any write, at most once per eighth of
-  `retransmit_interval` per follower) keeps a leader stalled on its disk from looking
-  silent; peers of older versions reject it.
+  Exhausting either range returns the new `Error::RequestIdExhausted` (restart from
+  durable records). Wire and durable encodings are unchanged; existing dedup windows are
+  kept until normal incarnation eviction.
+- `quepaxa-ffi` (breaking): ABI 0.8 adds `QPX_ERR_REQUEST_ID_EXHAUSTED` and
+  `QPX_METRIC_STEPPED_ASIDE`. Request ids remain `uint64_t`; read ids now use its high bit.
+  Function signatures and output layouts are unchanged.
+- `examples/kv-tokio`: client results are matched only to entries of the current
+  `Replica::incarnation()`, so a delayed pre-restart request sharing an id, payload and slot
+  with a new one can no longer answer it with the old result.
+- `examples/kv-tokio`: a peer connection that takes no bytes for 2 s (or a connect that
+  takes that long) is redialed, with backoff capped at 1 s; frames go out in 64 KiB chunks,
+  so a large snapshot on a slow but draining link is not cut off. A replica cut off by a
+  partition rejoined about 11 s after the heal (TCP's own retransmission backoff); it now
+  rejoins in about 0.6 s.
+- `examples/kv-tokio`: `max_outstanding_proposals` is 65,536, so a brief CPU stall queues
+  requests instead of failing them with `Busy`.
+- `examples/kv-tokio` benchmarks: `bench/etcd/wan.sh` compares QuePaxa and etcd across
+  five emulated regions; `run.sh` takes `NODES=5` and a `stuck-disk` scenario with clients
+  on every member, and local artifacts no longer invalidate the comparison image.
+- Verification: the simulator stalls or slows chosen replicas' disks
+  (`tests/disk_faults.rs`) and loses a leader across regions (`tests/leader_loss.rs`); five
+  new seeded-bug canaries guard silence detection, the busy-leader hedge wait and stepping
+  aside.
 
 ## 0.5.0 — 2026-10-31
 
