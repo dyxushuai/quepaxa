@@ -609,3 +609,21 @@ fn a_leader_does_not_step_aside_when_nobody_else_decides_either() {
     assert_eq!(r.target(), NodeId(0));
     assert_eq!(forwards_to(&out, 1), 0);
 }
+
+#[test]
+fn a_follower_whose_disk_is_stuck_does_not_step_aside() {
+    // Its slots hold nobody up, and stepping aside would stop it hedging around a slow leader.
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    r.watch.persist = Some(MS);
+    r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 0, 0) };
+    r.handle(Timestamp(10 * MS), from_peer(0, 1, decided)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(!r.watch.unpersisted.is_empty(), "a write is stuck");
+    assert_eq!(r.aside_at(), None);
+    r.handle_timeout(Timestamp(MS + 200 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.metrics.stepped_aside, 0);
+}

@@ -70,23 +70,46 @@ impl Replica {
     /// Who this replica hands its entries to: the first member of the leader order it does
     /// not suspect (itself when it comes first).
     pub(super) fn target(&self) -> NodeId {
+        let first = self.first_unsuspected();
+        if first == self.me && self.stepped_aside() { self.next_after_me() } else { first }
+    }
+
+    /// The first member of the leader order this replica does not suspect (itself when it
+    /// comes first).
+    fn first_unsuspected(&self) -> NodeId {
         let order = self.schedule.members(Slot(self.committed));
-        let aside = self.stepped_aside();
         order
             .iter()
             .copied()
-            .find(|n| if *n == self.me { !aside } else { !self.watch.suspects.contains_key(n) })
+            .find(|n| *n == self.me || !self.watch.suspects.contains_key(n))
             .unwrap_or(self.me)
     }
 
-    /// When this replica steps aside: once a write has waited on its disk for 4δ (at most
-    /// `hedge_max`), and for four times as long as a write usually takes, if another replica
-    /// has decided a slot since it was issued: the others can go on without this disk (when
-    /// every disk is stuck, stepping aside would only add contention once they resume). Its slots cannot progress while its disk is stuck, so it hands its own
-    /// entries to the next member of the leader order and stops acknowledging forwards,
-    /// which sends the other followers there too. Back as soon as the disk catches up.
+    /// The first unsuspected member after this one in the leader order (itself if none).
+    fn next_after_me(&self) -> NodeId {
+        let order = self.schedule.members(Slot(self.committed));
+        order
+            .iter()
+            .copied()
+            .skip_while(|n| *n != self.me)
+            .skip(1)
+            .find(|n| !self.watch.suspects.contains_key(n))
+            .unwrap_or(self.me)
+    }
+
+    /// When this replica, if others hand it their entries, steps aside: once a write has
+    /// waited on its disk for 4δ (at most `hedge_max`, and at least four usual write times),
+    /// if another replica has decided a slot since it was issued. Its slots cannot progress
+    /// while its disk is stuck, so it hands its own entries to the next member of the leader
+    /// order and stops acknowledging forwards, which sends the followers there too; back as
+    /// soon as the disk catches up. Not when nobody else decides either (every disk stuck,
+    /// one shared disk): that would only add contention once the disks resume.
     pub(super) fn aside_at(&self) -> Option<Timestamp> {
-        if !self.cfg.silent_leader_takeover || self.schedule.members(Slot(self.committed)).len() < 2 {
+        // Only the replica others hand their entries to: a follower's slots hold nobody up.
+        if !self.cfg.silent_leader_takeover
+            || self.first_unsuspected() != self.me
+            || self.next_after_me() == self.me
+        {
             return None;
         }
         let (d, usual) = (self.hedge_delay(), self.watch.persist?);
