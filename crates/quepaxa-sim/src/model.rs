@@ -34,6 +34,43 @@ pub struct ModelConfig {
     pub max_depth: usize,
     /// Distinct states explored before stopping.
     pub max_states: usize,
+    /// One client write per entry, proposed at that replica once every write in
+    /// `proposals` is acknowledged.
+    pub later: Vec<usize>,
+    /// A replica cut off once every write in `proposals` is acknowledged, as if it crashed
+    /// then (one partition, costing no deviation; healed like any other). A follower judges
+    /// silence only against a member it has handed entries to before.
+    pub silenced: Option<usize>,
+    /// Network delay of every message, in nanoseconds: a delivery moves the receiver's
+    /// clock to at least the send time plus this. Zero keeps time still between timers;
+    /// silence and hedge delays are measured from these delays.
+    pub link_delay: u64,
+    /// A replica whose persists the default schedule completes only once nothing else is
+    /// pending, no timer included: a disk slower than every timeout.
+    pub slow_disk: Option<usize>,
+    /// A replica whose messages the default schedule delivers only once nothing else is
+    /// pending, no timer included: a leader slower than every timeout.
+    pub slow_net: Option<usize>,
+}
+
+impl ModelConfig {
+    /// A three-replica cluster with the given writes, no faults beyond the budgets.
+    pub fn new(proposals: Vec<usize>, deviations: u32, crashes: u32) -> Self {
+        Self {
+            nodes: 3,
+            proposals,
+            reads: Vec::new(),
+            deviations,
+            crashes,
+            max_depth: 200,
+            max_states: 1_000_000,
+            later: Vec::new(),
+            silenced: None,
+            link_delay: 0,
+            slow_disk: None,
+            slow_net: None,
+        }
+    }
 }
 
 /// What an exploration covered.
@@ -47,11 +84,22 @@ pub struct ModelReport {
     pub exhausted: bool,
     /// States at the depth bound; each was shown to settle under the default schedule.
     pub depth_limited: usize,
+    /// States in which every client write had committed and every read finished; a
+    /// replica cut off may still be behind.
+    pub served: usize,
+    /// States in which some replica had hedged an entry (proposed it itself after its
+    /// target was late or suspected).
+    pub hedged: usize,
+    /// States in which some replica had stepped aside.
+    pub stepped_aside: usize,
+    /// States in which an entry had committed in a batch proposed by a deputy: neither the
+    /// leader (n0) nor the entry's origin.
+    pub deputy: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Event {
-    Deliver { from: usize, to: usize, bytes: Bytes },
+    Deliver { from: usize, to: usize, bytes: Bytes, at: u64 },
     Persisted { node: usize, id: PersistId, records: Vec<Bytes>, then: Vec<(usize, Bytes)>, replace: bool },
 }
 
@@ -85,6 +133,15 @@ struct State {
     /// Replicas still to request a read once a write is acknowledged.
     read_at: Vec<usize>,
     depth: usize,
+    slow_disk: Option<usize>,
+    slow_net: Option<usize>,
+    later: Vec<usize>,
+    silenced: Option<usize>,
+    link_delay: u64,
+    /// Writes in `proposals` not yet acknowledged; `later` and `silenced` wait for them.
+    warmup: BTreeSet<Bytes>,
+    /// An entry committed in a deputy's batch (not part of the fingerprint: coverage only).
+    deputy: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -122,6 +179,11 @@ impl State {
         }
         (
             &self.events,
+            self.slow_disk,
+            self.slow_net,
+            &self.later,
+            self.silenced,
+            &self.warmup,
             self.deviations,
             self.crashes,
             self.isolated,
@@ -156,10 +218,26 @@ impl State {
         }
     }
 
+    fn isolate(&mut self, node: usize) {
+        self.isolated = Some(node);
+        self.events.retain(|e| !matches!(e, Event::Deliver { from, to, .. } if *from == node || *to == node));
+    }
+
+    /// Proposes a client write at `i`.
+    fn propose(&mut self, i: usize, payload: Bytes) -> Result<(), String> {
+        let n = &mut self.nodes[i];
+        let id = n.replica.propose(Timestamp(n.now), payload.clone()).map_err(|e| e.to_string())?;
+        n.proposed.insert(id, payload.clone());
+        self.ledger.proposed(payload.clone());
+        self.required.push(payload);
+        self.drain(i)
+    }
+
     /// Queues a message unless either end is cut off.
     fn post(&mut self, from: usize, to: usize, bytes: Bytes) {
         if self.isolated != Some(from) && self.isolated != Some(to) {
-            self.events.push_back(Event::Deliver { from, to, bytes });
+            let at = if self.link_delay > 0 { self.nodes[from].now + self.link_delay } else { 0 };
+            self.events.push_back(Event::Deliver { from, to, bytes, at });
         }
     }
 
@@ -171,15 +249,32 @@ impl State {
                 .min()
                 .map(|(_, i)| i)
         };
+        let slow = |e: &Event| match e {
+            Event::Persisted { node, .. } => self.slow_disk == Some(*node),
+            Event::Deliver { from, .. } => self.slow_net == Some(*from),
+        };
+        // The first event in arrival order that is not slow, else the first slow one once no
+        // timer is left. Either is runnable: no earlier persist of its node precedes it (a
+        // replica's persists are all slow or none are).
+        let first = self.events.iter().position(|e| !slow(e));
         let mut steps = Vec::new();
-        match (self.events.is_empty(), earliest_timer()) {
-            // The front event is always runnable: no earlier persist of its node precedes it.
-            (false, _) => steps.push((Step::Run(0), false)),
-            (true, Some(i)) => steps.push((Step::Timeout(i), false)),
+        let default = match (first, earliest_timer()) {
+            (Some(k), _) => Some(Step::Run(k)),
+            (None, Some(i)) => Some(Step::Timeout(i)),
+            (None, None) if !self.events.is_empty() => Some(Step::Run(0)),
             // A partition that outlives all other activity heals.
-            (true, None) if self.isolated.is_some() => steps.push((Step::Heal, false)),
-            (true, None) => {}
-        }
+            (None, None) if self.isolated.is_some() => Some(Step::Heal),
+            (None, None) => None,
+        };
+        let default_run = match default {
+            Some(Step::Run(k)) => Some(k),
+            _ => None,
+        };
+        let default_timer = match default {
+            Some(Step::Timeout(i)) => Some(i),
+            _ => None,
+        };
+        steps.extend(default.map(|s| (s, false)));
         self.crash_steps(&mut steps);
         if self.deviations == 0 {
             return steps;
@@ -191,7 +286,7 @@ impl State {
                 Event::Persisted { node, .. } => persist_seen.insert(*node),
                 Event::Deliver { .. } => true,
             };
-            if k > 0 && in_order {
+            if Some(k) != default_run && in_order {
                 steps.push((Step::Run(k), true));
             }
             if matches!(e, Event::Deliver { .. }) {
@@ -199,7 +294,6 @@ impl State {
                 steps.push((Step::Duplicate(k), true));
             }
         }
-        let default_timer = if self.events.is_empty() { earliest_timer() } else { None };
         for i in 0..self.nodes.len() {
             if Some(i) != default_timer && self.nodes[i].replica.next_deadline().is_some() {
                 steps.push((Step::Timeout(i), true));
@@ -215,8 +309,9 @@ impl State {
         self.depth += 1;
         match step {
             Step::Run(k) => match self.events.remove(k).expect("offered event exists") {
-                Event::Deliver { to, bytes, .. } => {
+                Event::Deliver { to, bytes, at, .. } => {
                     let n = &mut self.nodes[to];
+                    n.now = n.now.max(at);
                     n.replica.handle(Timestamp(n.now), Input::Message(bytes)).map_err(|e| e.to_string())?;
                     self.drain(to)
                 }
@@ -266,10 +361,7 @@ impl State {
                 Ok(())
             }
             Step::Isolate(node) => {
-                self.isolated = Some(node);
-                self.events.retain(
-                    |e| !matches!(e, Event::Deliver { from, to, .. } if *from == node || *to == node),
-                );
+                self.isolate(node);
                 Ok(())
             }
             Step::Crash { node, keep } => self.crash(node, keep),
@@ -321,12 +413,7 @@ impl State {
             self.required.retain(|r| *r != p);
             let retry =
                 Bytes::from(format!("{}/retry{}", String::from_utf8_lossy(&p), self.nodes[node].starts));
-            let n = &mut self.nodes[node];
-            let id = n.replica.propose(Timestamp(n.now), retry.clone()).map_err(|e| e.to_string())?;
-            n.proposed.insert(id, retry.clone());
-            self.ledger.proposed(retry.clone());
-            self.required.push(retry);
-            self.drain(node)?;
+            self.propose(node, retry)?;
         }
         Ok(())
     }
@@ -348,11 +435,18 @@ impl State {
                         return Err(format!("n{i} committed slot {} out of order", slot.0));
                     }
                     n.next_commit += 1;
+                    if !self.deputy && !entries.is_empty() {
+                        let decided = n.replica.inspect().decided;
+                        let by = decided.iter().find(|(s, _)| *s == slot.0).map(|(_, p)| p.origin);
+                        self.deputy =
+                            by.is_some_and(|by| by != 0 && entries.iter().any(|e| e.origin.0 != by));
+                    }
                     self.ledger.commit(slot.0, &entries)?;
                 }
                 Action::Committed { id, slot } => {
                     self.nodes[i].acked.insert(id);
                     let payload = self.nodes[i].proposed.get(&id).cloned().unwrap_or_default();
+                    self.warmup.remove(&payload);
                     self.ledger.acknowledged(NodeId(i as u32), id, &payload, slot.0, None)?;
                     acked_slot = Some(slot.0);
                 }
@@ -370,6 +464,14 @@ impl State {
                 _ => {}
             }
         }
+        if acked_slot.is_some() && self.warmup.is_empty() {
+            if let Some(node) = self.silenced.take() {
+                self.isolate(node);
+            }
+            for (k, j) in std::mem::take(&mut self.later).into_iter().enumerate() {
+                self.propose(j, Bytes::from(format!("later{k}@n{j}")))?;
+            }
+        }
         if let Some(covers) = acked_slot {
             for j in std::mem::take(&mut self.read_at) {
                 let n = &mut self.nodes[j];
@@ -385,6 +487,11 @@ impl State {
     fn observe(&mut self) -> Result<(), String> {
         let live: Vec<_> = self.nodes.iter().enumerate().map(|(i, n)| (i, n.replica.inspect())).collect();
         self.history.observe(self.nodes.len(), &live)
+    }
+
+    fn served(&self) -> bool {
+        self.required.iter().all(|p| self.ledger.is_committed(p))
+            && self.nodes.iter().all(|n| n.reads.is_empty())
     }
 
     fn complete(&self) -> bool {
@@ -419,17 +526,21 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         required: Vec::new(),
         read_at: cfg.reads.clone(),
         depth: 0,
+        slow_disk: cfg.slow_disk,
+        slow_net: cfg.slow_net,
+        later: cfg.later.clone(),
+        silenced: cfg.silenced,
+        link_delay: cfg.link_delay,
+        warmup: BTreeSet::new(),
+        deputy: false,
     };
     for i in 0..cfg.nodes {
         init.drain(i)?;
     }
     for (k, &i) in cfg.proposals.iter().enumerate() {
         let payload = Bytes::from(format!("w{k}@n{i}"));
-        let id = init.nodes[i].replica.propose(Timestamp(0), payload.clone()).map_err(|e| e.to_string())?;
-        init.nodes[i].proposed.insert(id, payload.clone());
-        init.ledger.proposed(payload.clone());
-        init.required.push(payload);
-        init.drain(i)?;
+        init.warmup.insert(payload.clone());
+        init.propose(i, payload)?;
     }
     Ok(init)
 }
@@ -445,6 +556,10 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
             continue;
         }
         report.states += 1;
+        let metrics = || state.nodes.iter().map(|n| n.replica.metrics());
+        report.hedged += usize::from(metrics().any(|m| m.hedged > 0));
+        report.stepped_aside += usize::from(metrics().any(|m| m.stepped_aside > 0));
+        report.deputy += usize::from(state.deputy);
         if report.states >= cfg.max_states {
             report.exhausted = false;
             break;
@@ -452,6 +567,7 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
         if state.complete() {
             report.complete += 1;
         }
+        report.served += usize::from(state.served());
         if state.depth >= cfg.max_depth {
             // Liveness under the fair default schedule: a long path must still settle.
             if let Err(e) = settle(state.clone(), SETTLE_STEPS) {
@@ -463,7 +579,19 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
             report.depth_limited += 1;
             continue;
         }
-        for (step, deviation) in state.steps() {
+        let steps = state.steps();
+        // With nothing left to run, every client write must have committed somewhere and
+        // every read finished. A replica that missed a decision may stay behind: it learns
+        // it from the next message, and an idle cluster sends none.
+        let idle = steps.first().is_none_or(|(s, d)| *d || matches!(s, Step::Crash { .. }));
+        if idle && !state.served() {
+            return Err(format!(
+                "liveness: nothing left to run with client operations unfinished (log {} slots)\nschedule ({} steps): {path:?}",
+                state.ledger.slots(),
+                path.len()
+            ));
+        }
+        for (step, deviation) in steps {
             let mut next = state.clone();
             if deviation {
                 next.deviations -= 1;
@@ -485,16 +613,19 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
 /// content-oblivious schedule), so long tails are expected but must end.
 const SETTLE_STEPS: usize = 5_000;
 
-/// Heals any partition, then follows the default schedule until nothing is pending (no
-/// events, no timers): liveness once the network is whole again.
+/// Heals any partition and slow disk or link, then follows the default schedule until
+/// nothing is pending (no events, no timers): liveness once the network is whole again.
 fn settle(mut st: State, max: usize) -> Result<(), String> {
     st.isolated = None;
+    st.silenced = None;
+    st.slow_disk = None;
+    st.slow_net = None;
     for _ in 0..max {
         if st.events.is_empty() && st.nodes.iter().all(|n| n.replica.next_deadline().is_none()) {
             return Ok(());
         }
-        let Some((step, _)) =
-            st.steps().into_iter().find(|(s, _)| matches!(s, Step::Run(0) | Step::Timeout(_) | Step::Heal))
+        // The default step comes first; a crash is never one.
+        let Some((step, _)) = st.steps().into_iter().next().filter(|(s, _)| !matches!(s, Step::Crash { .. }))
         else {
             return Ok(());
         };

@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
+index 94a405a..a67a2f1 100644
+--- a/crates/quepaxa/src/replica/watch.rs
++++ b/crates/quepaxa/src/replica/watch.rs
+@@ -179,7 +179,7 @@ impl Replica {
+                 o.2 = true;
+             }
+             self.metrics.hedged += 1;
+-            self.pending.push_front(e);
++            let _ = e;
+         }
+     }
+ 
