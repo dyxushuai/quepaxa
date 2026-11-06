@@ -29,7 +29,8 @@
 //! Only who proposes, and when, changes; any replica may propose in any slot, so none of
 //! this affects safety.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
+use alloc::vec::Vec;
 
 use super::Replica;
 use crate::codec::Body;
@@ -49,6 +50,14 @@ pub(super) struct Watch {
     pub(super) forwarded_to: Option<(NodeId, Timestamp)>,
     /// Smoothed delay from a forward to each member's next message (R), in nanoseconds.
     pub(super) reply: BTreeMap<NodeId, u64>,
+    /// Persists issued and not yet durable: id and when.
+    pub(super) unpersisted: VecDeque<(u64, Timestamp)>,
+    /// Smoothed time from issuing a persist to its being durable, in nanoseconds.
+    pub(super) persist: Option<u64>,
+    /// When another replica last told this one of a slot it decided.
+    pub(super) decided_elsewhere: Timestamp,
+    /// This replica stepped aside (`aside_at`) and handed its batches to the next member.
+    pub(super) aside: bool,
     /// When the target last announced a slot it decided.
     pub(super) progressed: Timestamp,
     /// When this replica last acknowledged a forward from each member.
@@ -62,11 +71,59 @@ impl Replica {
     /// not suspect (itself when it comes first).
     pub(super) fn target(&self) -> NodeId {
         let order = self.schedule.members(Slot(self.committed));
+        let aside = self.stepped_aside();
         order
             .iter()
             .copied()
-            .find(|n| *n == self.me || !self.watch.suspects.contains_key(n))
+            .find(|n| if *n == self.me { !aside } else { !self.watch.suspects.contains_key(n) })
             .unwrap_or(self.me)
+    }
+
+    /// When this replica steps aside: once a write has waited on its disk for 4δ (at most
+    /// `hedge_max`), and for four times as long as a write usually takes, if another replica
+    /// has decided a slot since it was issued: the others can go on without this disk (when
+    /// every disk is stuck, stepping aside would only add contention once they resume). Its slots cannot progress while its disk is stuck, so it hands its own
+    /// entries to the next member of the leader order and stops acknowledging forwards,
+    /// which sends the other followers there too. Back as soon as the disk catches up.
+    pub(super) fn aside_at(&self) -> Option<Timestamp> {
+        if !self.cfg.silent_leader_takeover || self.schedule.members(Slot(self.committed)).len() < 2 {
+            return None;
+        }
+        let (d, usual) = (self.hedge_delay(), self.watch.persist?);
+        let (_, oldest) = self.watch.unpersisted.front()?;
+        if self.watch.decided_elsewhere <= *oldest {
+            return None;
+        }
+        Some(oldest.after(d.saturating_mul(4).min(self.cfg.hedge_max).max(d).max(usual.saturating_mul(4))))
+    }
+
+    pub(super) fn stepped_aside(&self) -> bool {
+        self.aside_at().is_some_and(|t| t <= self.now)
+    }
+
+    /// On stepping aside, hands the entries of every local batch not yet decided to the
+    /// next member (a batch already in a slot stays there too: whichever copy is decided
+    /// first commits, the other is filtered as a duplicate).
+    pub(super) fn check_aside(&mut self) {
+        let aside = self.stepped_aside();
+        if aside == self.watch.aside {
+            return;
+        }
+        self.watch.aside = aside;
+        if !aside {
+            return;
+        }
+        let mut handed = Vec::new();
+        self.batches.retain(|_, b| {
+            // Our own encoding: it decodes.
+            handed.extend(crate::batch::decode(&b.value).unwrap_or_default());
+            b.slot.is_some()
+        });
+        let dedup = &self.dedup;
+        self.pending.extend(handed.into_iter().filter(|e| {
+            let (o, inc, id) = e.key();
+            !dedup.contains(o, inc, id)
+        }));
     }
 
     /// Whether this replica proposes its own entries itself.
@@ -116,6 +173,10 @@ impl Replica {
     /// forward tripled the p99 across regions with 1% loss on the leader's links. Suppressed
     /// acknowledgements coalesce until the cooldown ends; σ covers that wait.
     pub(super) fn ack_forward(&mut self, from: NodeId) {
+        if self.stepped_aside() {
+            self.watch.ack_due.remove(&from);
+            return;
+        }
         let every = self.ack_every();
         if let Some(due) = self.watch.acked.get(&from).map(|t| t.after(every))
             && self.now < due
@@ -181,9 +242,10 @@ impl Replica {
 
     /// When an entry forwarded at `at` is acted on: hedged when late, or sooner, with its
     /// target suspected, if the target stays silent.
-    pub(super) fn hedge_at(&self, at: Timestamp) -> Timestamp {
-        let late = self.late_at(at);
-        self.silent_at(at).map_or(late, |s| s.min(late))
+    pub(super) fn hedge_at(&self, at: Timestamp) -> Option<Timestamp> {
+        // Stepped aside, this replica's own slots are stuck: it hedges nothing here.
+        let late = (!self.watch.aside).then(|| self.late_at(at));
+        self.silent_at(at).into_iter().chain(late).min()
     }
 
     /// When to take over `slot`, seen at `seen`, from whoever started it.

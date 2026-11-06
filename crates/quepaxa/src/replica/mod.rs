@@ -549,10 +549,21 @@ impl Replica {
     fn flush(&mut self) {
         self.metrics.retained_slots = self.log.len() as u64;
         self.metrics.live_registers = self.registers.len() as u64;
+        let before = self.gate.issued();
         self.gate.flush(&mut self.actions);
+        if self.gate.issued() > before {
+            self.watch.unpersisted.push_back((before, self.now));
+        }
     }
 
     fn on_persisted(&mut self, id: PersistId) -> Result<(), Error> {
+        while let Some(&(p, at)) = self.watch.unpersisted.front()
+            && p <= id.0
+        {
+            self.watch.unpersisted.pop_front();
+            let sample = self.now.0.saturating_sub(at.0);
+            self.watch.persist = Some(self.watch.persist.map_or(sample, |avg| avg - avg / 8 + sample / 8));
+        }
         for e in self.gate.persisted(id, &mut self.actions)? {
             self.apply(e);
         }

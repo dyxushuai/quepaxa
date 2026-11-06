@@ -545,3 +545,65 @@ fn a_leader_still_talking_keeps_its_slow_slot() {
         "σ after the leader last spoke, not after the slot"
     );
 }
+
+/// Leader 0 with a write stuck on its disk since 1 ms (usual writes take 1 ms; δ = 20 ms),
+/// and an entry of its own waiting in a batch.
+fn leader_with_a_stuck_disk() -> (Replica, ProposalId) {
+    let mut r = replica_as(0);
+    let mut out = Vec::new();
+    r.commit_latency = Some(5 * MS);
+    r.watch.persist = Some(MS);
+    let id = r.propose(Timestamp(MS), Bytes::from_static(b"own")).unwrap();
+    r.poll_actions(&mut out);
+    assert!(out.iter().any(|a| matches!(a, Action::Persist { .. })), "a write is in flight");
+    (r, id)
+}
+
+#[test]
+fn a_leader_whose_disk_is_stuck_hands_its_entries_on_while_others_decide() {
+    let (mut r, id) = leader_with_a_stuck_disk();
+    let mut out = Vec::new();
+    // The two others decide a slot without it: their disks work.
+    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 1, 0) };
+    r.handle(Timestamp(10 * MS), from_peer(1, 0, decided)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.target(), NodeId(0), "not before the write has waited 4δ");
+    assert_eq!(r.next_deadline(), Some(Timestamp(MS + 80 * MS)));
+    out.clear();
+    r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.target(), NodeId(1), "stepped aside for the next in the leader order");
+    assert_eq!(forwards_to(&out, 1), 1, "its waiting entry goes there");
+    assert!(r.forwarded.contains_key(&id));
+    // A forward now gets no acknowledgement: the followers move on too.
+    out.clear();
+    let entries = [batch::Item {
+        entry: crate::batch::Entry {
+            origin: NodeId(2),
+            incarnation: 1,
+            id: ProposalId(3),
+            payload: Bytes::from_static(b"x"),
+        },
+        kind: batch::Kind::App,
+    }];
+    r.handle(r.now, from_peer(2, 0, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.poll_actions(&mut out);
+    let acked = out.iter().any(|a| matches!(a, Action::Send(o) if matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck, .. }))));
+    assert!(!acked, "no acknowledgement while stepped aside");
+    // Its disk catches up: it leads again.
+    let (last, _) = *r.watch.unpersisted.back().expect("writes in flight");
+    r.handle(r.now, Input::Persisted(PersistId(last))).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.target(), NodeId(0));
+}
+
+#[test]
+fn a_leader_does_not_step_aside_when_nobody_else_decides_either() {
+    let (mut r, _) = leader_with_a_stuck_disk();
+    let mut out = Vec::new();
+    // Every disk may be stuck (one shared disk): stepping aside would only add contention.
+    r.handle_timeout(Timestamp(MS + 200 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.target(), NodeId(0));
+    assert_eq!(forwards_to(&out, 1), 0);
+}

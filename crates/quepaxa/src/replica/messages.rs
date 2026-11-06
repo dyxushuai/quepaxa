@@ -130,11 +130,12 @@ impl Replica {
                         // The target announced a slot it decided itself: it is busy, not stuck
                         // (`late_at`). Not a repeat, nor its answer to a request of ours (it may
                         // only have cached someone else's decision).
-                        if from == self.target()
-                            && !self.log.contains_key(&slot)
-                            && !self.proposers.contains_key(&slot)
-                        {
-                            self.watch.progressed = self.now;
+                        if !self.log.contains_key(&slot) {
+                            // A majority made a value durable without this replica (`aside_at`).
+                            self.watch.decided_elsewhere = self.now;
+                            if from == self.target() && !self.proposers.contains_key(&slot) {
+                                self.watch.progressed = self.now;
+                            }
                         }
                         self.learn(slot, proposal, false)
                     }

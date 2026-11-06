@@ -116,6 +116,7 @@ impl Replica {
         if self.fenced {
             return;
         }
+        self.check_aside();
         if !self.proposes_directly() {
             self.forward_pending();
         }
@@ -274,7 +275,7 @@ impl Replica {
     pub(super) fn earliest_timer(&self) -> Option<Timestamp> {
         let resend = self.proposers.values().map(|a| a.resend_at);
         let stall = self.stalled().map(|(_, at)| at);
-        let hedge = self.forwarded.values().map(|(_, at)| self.hedge_at(*at)).min();
+        let hedge = self.forwarded.values().filter_map(|(_, at)| self.hedge_at(*at)).min();
         // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
         let behind = self.peer_committed > self.committed + 1
             && self.catch_up.or(self.ahead_peer.map(|p| (p, self.now))).is_some();
@@ -288,11 +289,13 @@ impl Replica {
             .chain(self.reads.resend_at())
             .chain(self.startup_probe)
             .chain(self.watch.ack_due.values().copied())
+            .chain(self.aside_at().filter(|_| !self.watch.aside))
             .min()
     }
 
     pub(super) fn fire_timers(&mut self) {
         self.resend_reads();
+        self.check_aside();
         let now = self.now;
         let ack_due: Vec<_> =
             self.watch.ack_due.iter().filter(|(_, at)| **at <= now).map(|(node, _)| *node).collect();
@@ -312,10 +315,12 @@ impl Replica {
             self.suspect_target();
         }
         // The target talks but is slow: entries it left uncommitted too long are proposed here.
+        // Not while stepped aside: this replica's slots are stuck.
+        let aside = self.watch.aside;
         let late: Vec<_> = self
             .forwarded
             .iter()
-            .filter(|(_, (_, at))| self.late_at(*at) <= now)
+            .filter(|(_, (_, at))| !aside && self.late_at(*at) <= now)
             .map(|(id, _)| *id)
             .collect();
         for id in late {
