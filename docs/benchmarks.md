@@ -316,6 +316,47 @@ What the table says, and what it does not:
   production claims. All six nodes share the host's disk and CPU sockets, and the
   network is a Docker bridge.
 
+### Five members
+
+`NODES=5 run.sh` (two cores per node, generator on 10-13), one full run at `573d78c`
+(`target/bench-etcd/20261106-171807/`), the read-heavy and slow-disk cases repeated.
+
+| Workload | etcd req/s | etcd p50 / p99 | QuePaxa req/s | QuePaxa p50 / p99 |
+|---|---|---|---|---|
+| put, unlimited | 19,036 | 13.2 / 24.5 ms | 30,751 | 7.6 / 14.4 ms |
+| put, 5,000/s | 4,997 | 11.1 / 21.0 ms | 4,998 | 6.2 / 11.7 ms |
+| txn-put | 18,178 | 13.7 / 26.7 ms | 30,876 | 7.5 / 13.7 ms |
+| range, linearizable | 89,203 | 1.7 / 17.7 ms | 142,017 | 1.1 / 5.4 ms |
+| range, serializable | 139,880 | 1.0 / 7.7 ms | 150,367 | 1.0 / 5.2 ms |
+
+| Fault | System | p99 | max | Errors | Longest gap |
+|---|---|---|---|---|---|
+| crash | etcd | 21 ms | 1,076 ms | 5,237 | 1,063 ms |
+| | etcd, tuned | 21 ms | 146 ms | 629 | 127 ms |
+| | QuePaxa | 14 ms | 178 ms | 0 | 13 ms |
+| partition | etcd | 21 ms | 1,229 ms | 6,163 | 1,210 ms |
+| | etcd, tuned | 22 ms | 174 ms | 723 | 157 ms |
+| | QuePaxa | 51 ms | 274 ms | 0 | 49 ms |
+| slow disk | etcd | 785-821 ms | 993-1,066 ms | 0 | 262-560 ms |
+| | etcd, tuned | 21-339 ms | 131-433 ms | 589-592 | 117-127 ms |
+| | QuePaxa | 18-116 ms | 131-437 ms | 0 | 102-156 ms |
+| stuck disk | etcd | 24 ms | 1,806 ms | 32,637 (1,815 unanswered) | 1,787 ms |
+| | etcd, tuned | 21 ms | 147 ms | 28,072 (136 unanswered) | 131 ms |
+| | QuePaxa | 15 ms | 151 ms | 0 | 103 ms |
+| far leader | etcd | 198 ms | 397 ms | 0 | 50 ms |
+| | etcd, tuned | 1,453 ms | 1,909 ms | 2,016 | 777 ms |
+| | QuePaxa | 34 ms | 383 ms | 0 | 25 ms |
+
+- Five members cost both systems some throughput (two cores each instead of three, and a
+  majority of three); QuePaxa keeps about 60% more writes and linearizable reads than etcd.
+- **Read-heavy** (40,000 requests/s, 90% linearizable ranges): QuePaxa's p99 was 15-16 ms
+  in three of four runs against etcd's 28-30 ms, and 128 ms in the fourth (max 528 ms);
+  a first run, while this host was also compiling, gave 2,478 ms. Natively, without
+  Docker's bridge, the same five-node load runs at p99 2.5 ms. QuePaxa's containers used
+  35-50% of their two cores, so it is not CPU-bound; the occasional tail is not traced.
+- The slow-disk row is two runs; the one longest gap QuePaxa lost (156 against tuned
+  etcd's 127 ms) became 102 against 117 ms in the second.
+
 ### Across regions
 
 Five replicas of each system, one per emulated region (us-east, us-west, eu-west, ap-ne,
