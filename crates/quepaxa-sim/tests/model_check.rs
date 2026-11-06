@@ -163,3 +163,32 @@ fn a_slow_leader_is_hedged_around() {
     assert!(report.complete > 0 && report.exhausted, "{report:?}");
     assert!(report.hedged > 0, "{report:?}");
 }
+
+/// A spare replaces the leader while a write commits, with a crash-restart anywhere (losing
+/// any suffix of the write in progress): every replica applies the same change in the same
+/// slot. Nightly's extra deviation adds a partition, a lost message or a reordering.
+#[test]
+fn a_member_replaced_during_a_write_with_a_crash_is_agreed() {
+    replace_a_member(deviations(0), 1);
+}
+
+/// The same change with any one deviation: a partition of any replica, a lost or duplicated
+/// message, a reordering or an early timer.
+#[test]
+fn a_member_replaced_during_a_write_with_a_partition_is_agreed() {
+    replace_a_member(deviations(1), 0);
+}
+
+fn replace_a_member(deviations: u32, crashes: u32) {
+    let cfg = ModelConfig {
+        spares: 1,
+        reconfigure: Some((1, vec![1, 2, 3])),
+        max_depth: depth(200),
+        max_states: budget(2_000_000),
+        ..ModelConfig::new(vec![2], deviations, crashes)
+    };
+    let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
+    println!("{report:?}");
+    assert!(report.served > 0 && report.exhausted, "{report:?}");
+    assert!(report.reconfigured > 0, "{report:?}");
+}

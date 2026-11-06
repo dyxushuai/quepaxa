@@ -51,6 +51,11 @@ pub struct ModelConfig {
     /// A replica whose messages the default schedule delivers only once nothing else is
     /// pending, no timer included: a leader slower than every timeout.
     pub slow_net: Option<usize>,
+    /// Replicas beyond `nodes`, started outside the membership (to be added by a change).
+    pub spares: usize,
+    /// A membership change proposed at the start: at that replica, the new members (of
+    /// replicas `0..nodes + spares`), preferred leaders by id.
+    pub reconfigure: Option<(usize, Vec<usize>)>,
 }
 
 impl ModelConfig {
@@ -69,6 +74,8 @@ impl ModelConfig {
             link_delay: 0,
             slow_disk: None,
             slow_net: None,
+            spares: 0,
+            reconfigure: None,
         }
     }
 }
@@ -95,6 +102,8 @@ pub struct ModelReport {
     /// States in which an entry had committed in a batch proposed by a deputy: neither the
     /// leader (n0) nor the entry's origin.
     pub deputy: usize,
+    /// States in which some replica had applied a membership change.
+    pub reconfigured: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -142,6 +151,12 @@ struct State {
     warmup: BTreeSet<Bytes>,
     /// An entry committed in a deputy's batch (not part of the fingerprint: coverage only).
     deputy: bool,
+    /// Members of epoch 0 (replicas `0..members`; the others are spares).
+    members: usize,
+    /// Every applied epoch: first slot and members. All replicas must agree on them.
+    epochs: BTreeMap<u64, (u64, Vec<u32>)>,
+    /// The membership change awaiting `Committed`, and where (it is in no `Commit`).
+    change: Option<(usize, ProposalId)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -162,6 +177,7 @@ enum Step {
 }
 
 fn config(n: usize, i: usize, starts: u64) -> Config {
+    // A spare (`i >= n`) runs with the original membership and waits to be added.
     let mut seed = [0u8; 32];
     seed[0] = i as u8;
     seed[1..9].copy_from_slice(&starts.to_le_bytes());
@@ -183,7 +199,7 @@ impl State {
             self.slow_net,
             &self.later,
             self.silenced,
-            &self.warmup,
+            (&self.warmup, &self.epochs, self.change),
             self.deviations,
             self.crashes,
             self.isolated,
@@ -388,7 +404,7 @@ impl State {
             }
             _ => true,
         });
-        let total = self.nodes.len();
+        let total = self.members;
         let n = &mut self.nodes[node];
         if let Some(records) = replaced {
             n.durable = records;
@@ -396,6 +412,10 @@ impl State {
         n.durable.extend(kept);
         n.starts += 1;
         n.next_commit = 0;
+        // Its ids restart; whether the change commits no longer matters to a client.
+        if self.change.is_some_and(|(at, _)| at == node) {
+            self.change = None;
+        }
         // Its clients' reads are lost with it.
         n.reads.clear();
         // The client retries exactly the writes it never saw acknowledged.
@@ -435,7 +455,8 @@ impl State {
                         return Err(format!("n{i} committed slot {} out of order", slot.0));
                     }
                     n.next_commit += 1;
-                    if !self.deputy && !entries.is_empty() {
+                    // Checked at the first replica to commit the slot (inspecting is costly).
+                    if !self.deputy && !entries.is_empty() && slot.0 as usize >= self.ledger.slots() {
                         let decided = n.replica.inspect().decided;
                         let by = decided.iter().find(|(s, _)| *s == slot.0).map(|(_, p)| p.origin);
                         self.deputy =
@@ -443,12 +464,28 @@ impl State {
                     }
                     self.ledger.commit(slot.0, &entries)?;
                 }
+                Action::Committed { id, .. } if self.change == Some((i, id)) => self.change = None,
                 Action::Committed { id, slot } => {
                     self.nodes[i].acked.insert(id);
                     let payload = self.nodes[i].proposed.get(&id).cloned().unwrap_or_default();
                     self.warmup.remove(&payload);
                     self.ledger.acknowledged(NodeId(i as u32), id, &payload, slot.0, None)?;
                     acked_slot = Some(slot.0);
+                }
+                Action::Reconfigured { epoch, from, members } => {
+                    let members: Vec<u32> = members.iter().map(|m| m.0).collect();
+                    match self.epochs.get(&epoch) {
+                        Some(seen) if *seen != (from.0, members.clone()) => {
+                            return Err(format!(
+                                "n{i} applied epoch {epoch} from {} as {members:?}; another replica: {seen:?}",
+                                from.0
+                            ));
+                        }
+                        Some(_) => {}
+                        None => {
+                            self.epochs.insert(epoch, (from.0, members));
+                        }
+                    }
                 }
                 Action::ReadReady { id, slot } => {
                     let n = &mut self.nodes[i];
@@ -502,7 +539,7 @@ impl State {
 
 fn initial(cfg: &ModelConfig) -> Result<State, String> {
     let mut nodes = Vec::new();
-    for i in 0..cfg.nodes {
+    for i in 0..cfg.nodes + cfg.spares {
         let replica = Replica::new(config(cfg.nodes, i, 0), [], Timestamp(0)).map_err(|e| e.to_string())?;
         nodes.push(MNode {
             replica,
@@ -533,9 +570,22 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         link_delay: cfg.link_delay,
         warmup: BTreeSet::new(),
         deputy: false,
+        members: cfg.nodes,
+        epochs: BTreeMap::new(),
+        change: None,
     };
-    for i in 0..cfg.nodes {
+    for i in 0..init.nodes.len() {
         init.drain(i)?;
+    }
+    if let Some((at, members)) = &cfg.reconfigure {
+        let n = &mut init.nodes[*at];
+        let members = members.iter().map(|&m| NodeId(m as u32)).collect();
+        let id = n
+            .replica
+            .propose_reconfiguration(Timestamp(0), members, Vec::new())
+            .map_err(|e| e.to_string())?;
+        init.change = Some((*at, id));
+        init.drain(*at)?;
     }
     for (k, &i) in cfg.proposals.iter().enumerate() {
         let payload = Bytes::from(format!("w{k}@n{i}"));
@@ -560,6 +610,7 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
         report.hedged += usize::from(metrics().any(|m| m.hedged > 0));
         report.stepped_aside += usize::from(metrics().any(|m| m.stepped_aside > 0));
         report.deputy += usize::from(state.deputy);
+        report.reconfigured += usize::from(!state.epochs.is_empty());
         if report.states >= cfg.max_states {
             report.exhausted = false;
             break;
