@@ -248,8 +248,18 @@ impl State {
                 let n = &mut self.nodes[i];
                 let Some(Timestamp(at)) = n.replica.next_deadline() else { return Ok(()) };
                 n.now = n.now.max(at);
+                let before = n.replica.fingerprint();
                 n.replica.handle_timeout(Timestamp(n.now)).map_err(|e| e.to_string())?;
-                self.drain(i)
+                self.drain(i)?;
+                // A timer that changes nothing and stays due fires again at once, forever.
+                let n = &self.nodes[i];
+                match n.replica.next_deadline() {
+                    Some(Timestamp(d)) if d <= n.now && n.replica.fingerprint() == before => Err(format!(
+                        "timer storm: n{i} keeps firing its deadline {d} at {} without progress",
+                        n.now
+                    )),
+                    _ => Ok(()),
+                }
             }
             Step::Heal => {
                 self.isolated = None;

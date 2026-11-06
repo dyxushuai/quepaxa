@@ -60,6 +60,9 @@ struct Node {
     disk_busy_until: u64,
     disk_next_group: Option<u64>,
     timer_at: Option<u64>,
+    /// After a timer left a deadline at or before the time it fired: that time and the
+    /// replica's fingerprint, to tell a timer storm from progress.
+    past_deadline: Option<(u64, u64)>,
     /// Next slot this node's commit stream must deliver.
     next_commit: u64,
     /// Durable application snapshot (survives crashes).
@@ -123,6 +126,7 @@ impl Sim {
                 disk_busy_until: 0,
                 disk_next_group: None,
                 timer_at: None,
+                past_deadline: None,
                 next_commit: 0,
                 snapshot: None,
                 installed: None,
@@ -309,6 +313,7 @@ impl Sim {
         node.proposed_at.clear();
         node.changes.clear();
         node.timer_at = None;
+        node.past_deadline = None;
         let _ = writeln!(self.trace, "{} start n{i} g{}", self.now, node.generation);
         self.drain(i);
         // The application's snapshot may be newer than the replica's last durable compaction.
@@ -416,9 +421,29 @@ impl Sim {
                 let r = n.replica.as_mut().expect("live generation");
                 r.handle_timeout(Timestamp(self.now)).map_err(|e| e.to_string())?;
                 self.drain(node);
+                self.check_timer_storm(node)?;
             }
         }
         self.check_internal()
+    }
+
+    /// A timer that fires and leaves its deadline in the past with nothing changed fires
+    /// again at once, forever: fail on the second such firing rather than spin.
+    fn check_timer_storm(&mut self, node: usize) -> Result<(), String> {
+        let now = self.now;
+        let Some(r) = self.nodes[node].replica.as_ref() else { return Ok(()) };
+        let past = r.next_deadline().filter(|d| d.0 <= now).map(|d| (d.0, r.fingerprint()));
+        let n = &mut self.nodes[node];
+        let Some((deadline, fp)) = past else {
+            n.past_deadline = None;
+            return Ok(());
+        };
+        if n.past_deadline.replace((now, fp)) == Some((now, fp)) {
+            return Err(self.fail(&format!(
+                "timer storm: n{node} keeps firing its deadline {deadline} at {now} without progress"
+            )));
+        }
+        Ok(())
     }
 
     /// G1, G3–G5 across every live replica's protocol state.
