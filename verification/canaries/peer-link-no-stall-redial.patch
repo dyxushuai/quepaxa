@@ -1,0 +1,13 @@
+diff --git a/examples/kv-tokio/src/main.rs b/examples/kv-tokio/src/main.rs
+index fab1474..df0655f 100644
+--- a/examples/kv-tokio/src/main.rs
++++ b/examples/kv-tokio/src/main.rs
+@@ -198,7 +198,7 @@ const CHUNK: usize = 64 << 10;
+ 
+ /// Whether `io` finished, successfully, within `STALL`.
+ async fn within_stall(io: impl Future<Output = std::io::Result<()>>) -> bool {
+-    matches!(tokio::time::timeout(STALL, io).await, Ok(Ok(())))
++    io.await.is_ok()
+ }
+ 
+ /// Writes one length-prefixed frame, giving up if the socket stops taking bytes for `STALL`.
