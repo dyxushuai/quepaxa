@@ -45,6 +45,7 @@ for f in "$dir"/*.txt; do
   name=$(basename "$f" .txt)
   system=${name%-*}
   case $name in *-slow-disk) system=${name%-slow-disk}; scenario=slow-disk ;;
+    *-stuck-disk) system=${name%-stuck-disk}; scenario=stuck-disk ;;
     *-far-leader) system=${name%-far-leader}; scenario=far-leader ;;
     *) scenario=${name##*-} ;; esac
   awk -v sys="$system" -v scenario="$scenario" '

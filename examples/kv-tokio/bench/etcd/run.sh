@@ -3,7 +3,7 @@
 # through etcd's v3 KV API, in containers on this host. See README.md.
 #
 # Usage: run.sh [--smoke] [scenario...]
-#   scenarios: steady mixed crash partition slow-disk far-leader (default: all)
+#   scenarios: steady mixed crash partition slow-disk stuck-disk far-leader (default: all)
 #   --smoke    short runs, to check the harness works
 # Environment: RATE (fault-scenario load, default 5000/s), NODE_CPUS ("0-2 3-5 6-8"),
 #   GEN_CPUS (9-12), SLOW_IOPS (write IOPS cap on the slow leader, default 50),
@@ -19,11 +19,11 @@ scenarios=()
 for a in "$@"; do
   case $a in
     --smoke) smoke=1 ;;
-    steady | mixed | crash | partition | slow-disk | far-leader) scenarios+=("$a") ;;
+    steady | mixed | crash | partition | slow-disk | stuck-disk | far-leader) scenarios+=("$a") ;;
     *) echo "unknown argument $a" >&2; exit 2 ;;
   esac
 done
-[ ${#scenarios[@]} -gt 0 ] || scenarios=(steady mixed crash partition slow-disk far-leader)
+[ ${#scenarios[@]} -gt 0 ] || scenarios=(steady mixed crash partition slow-disk stuck-disk far-leader)
 
 if [ $smoke = 1 ]; then
   secs=8 fault=3 heal=6 total=2000 steady_secs=2
@@ -127,10 +127,11 @@ inject() {
     crash) docker kill -s KILL "$leader" >/dev/null ;;
     partition)
       sidecar "$leader" "for f in $f1 $f2; do iptables -A INPUT -s \$f -j DROP; iptables -A OUTPUT -d \$f -j DROP; done" ;;
-    slow-disk)
-      local cg
+    slow-disk | stuck-disk)
+      local cg iops=$slow_iops
+      [ "$1" = stuck-disk ] && iops=1
       cg=$(cgroup_of "$leader")
-      sidecar "$leader" "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=$slow_iops' > $cg/io.max" ;;
+      sidecar "$leader" "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=$iops' > $cg/io.max" ;;
     far-leader) sidecar "$leader" "tc qdisc add dev eth0 root netem delay ${far_ms}ms" ;;
   esac
 }
@@ -139,7 +140,7 @@ heal() {
   case $1 in
     crash) ;;
     partition) sidecar "$leader" "iptables -F" ;;
-    slow-disk)
+    slow-disk | stuck-disk)
       local cg
       cg=$(cgroup_of "$leader")
       sidecar "$leader" "echo '$(findmnt -no MAJ:MIN -T "$data") wiops=max' > $cg/io.max" ;;
@@ -147,14 +148,16 @@ heal() {
   esac
 }
 
-# The fault scenarios: open-loop load on the followers, fault, heal, recovery.
+# The fault scenarios: open-loop load on the followers (on every member when the leader's
+# disk is stuck: its own clients are what that costs), fault, heal, recovery.
 faulted() {
-  local system=$1 scenario=$2 out="$results/$1-$2"
+  local system=$1 scenario=$2 out="$results/$1-$2" targets="${followers[0]}:2379,${followers[1]}:2379"
+  [ "$scenario" = stuck-disk ] && targets=$endpoints
   # One time zero for the generator and the injector (containers share the host clock),
   # far enough ahead for the generator's container to start.
   local t0=$(($(date +%s%3N) + 5000))
   docker run --rm --name qpx-gen --network "$net" --cpuset-cpus "$gen_cpus" -v "$results:/out" "$image" \
-    kv-bench --protocol etcd --targets "${followers[0]}:2379,${followers[1]}:2379" --rate "$rate" \
+    kv-bench --protocol etcd --targets "$targets" --rate "$rate" \
     --gets 0 --secs "$secs" --conns 16 --start-at "$t0" --fault-at "$fault" --timeline 250 \
     --samples "/out/$1-$2.csv" > "$out.txt" &
   local gen=$!
