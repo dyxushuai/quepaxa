@@ -32,7 +32,8 @@
 // 0.7: opaque `qpx_config` (`qpx_config_new`, `qpx_config_set`, `qpx_config_set_leader_order`,
 // `qpx_config_free`) and `qpx_metric` replace the `qpx_config` and `qpx_metrics` structs,
 // `qpx_config_init` and `qpx_get_metrics` (incompatible).
-// 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range.
+// 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range;
+// `QPX_METRIC_STEPPED_ASIDE`.
 #define QPX_ABI_VERSION_MINOR 8
 
 // Success.

@@ -266,10 +266,9 @@ impl Replica {
 
     /// When an entry forwarded at `at` is acted on: hedged when late, or sooner, with its
     /// target suspected, if the target stays silent.
-    pub(super) fn hedge_at(&self, at: Timestamp) -> Option<Timestamp> {
-        // Stepped aside, this replica's own slots are stuck: it hedges nothing here.
-        let late = (!self.watch.aside).then(|| self.late_at(at));
-        self.silent_at(at).into_iter().chain(late).min()
+    pub(super) fn hedge_at(&self, at: Timestamp) -> Timestamp {
+        let late = self.late_at(at);
+        self.silent_at(at).map_or(late, |s| s.min(late))
     }
 
     /// When to take over `slot`, seen at `seen`, from whoever started it.

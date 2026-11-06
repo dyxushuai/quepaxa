@@ -592,6 +592,13 @@ fn a_leader_whose_disk_is_stuck_hands_its_entries_on_while_others_decide() {
     r.poll_actions(&mut out);
     let acked = out.iter().any(|a| matches!(a, Action::Send(o) if matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck, .. }))));
     assert!(!acked, "no acknowledgement while stepped aside");
+    // The forward to the deputy was lost: still uncommitted after δ, it is handed over again
+    // (not proposed here, where the slots are stuck).
+    out.clear();
+    r.handle_timeout(r.now.after(20 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 1), 1, "forwarded to the deputy again");
+    assert!(r.relayed.is_empty(), "not hedged here");
     // Its disk catches up: it leads again.
     let (last, _) = *r.watch.unpersisted.back().expect("writes in flight");
     r.handle(r.now, Input::Persisted(PersistId(last))).unwrap();
