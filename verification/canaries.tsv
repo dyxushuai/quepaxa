@@ -23,5 +23,5 @@ stuck-leader-keeps-its-entries	-	cargo nextest run --release -p quepaxa-sim --te
 step-aside-on-a-shared-disk	QPX_SIM_SEEDS=4	cargo nextest run --release -p quepaxa-sim --test disk_faults shared_disk_stall	hedging stretched it
 hedge-deadline-left-in-the-past	-	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	timer storm: n[0-9]+ keeps firing
 ack-left-due-while-aside	-	cargo nextest run --release -p quepaxa-sim --test disk_faults stalled_leader_disk	timer storm: n[0-9]+ keeps firing
-suspect-drops-handed-entries	-	cargo nextest run --release -p quepaxa-sim --test model_check deputy	liveness: nothing left to run|liveness: still busy
+suspect-drops-handed-entries	-	cargo nextest run --release -p quepaxa-sim --test model_check deputy	liveness: (nothing left to run|still busy|settled)
 late-entries-never-hedged	-	cargo nextest run --release -p quepaxa-sim --test replica_sim writes_commit_within_the_bound	no progress: n[0-9]+.s write ProposalId

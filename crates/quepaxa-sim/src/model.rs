@@ -386,7 +386,7 @@ impl State {
 
     fn crash(&mut self, node: usize, keep: usize) -> Result<(), String> {
         self.crashes -= 1;
-        self.history.forget(self.nodes.len(), node);
+        self.history.forget(self.members, node);
         let mut first = true;
         let mut kept = Vec::new();
         let mut replaced = None;
@@ -431,6 +431,7 @@ impl State {
         // The client retries writes whose outcome it never learned, as new payloads.
         for p in lost {
             self.required.retain(|r| *r != p);
+            self.warmup.remove(&p);
             let retry =
                 Bytes::from(format!("{}/retry{}", String::from_utf8_lossy(&p), self.nodes[node].starts));
             self.propose(node, retry)?;
@@ -523,17 +524,18 @@ impl State {
     /// Checks the protocol invariants on every replica, accumulating their evidence.
     fn observe(&mut self) -> Result<(), String> {
         let live: Vec<_> = self.nodes.iter().enumerate().map(|(i, n)| (i, n.replica.inspect())).collect();
-        self.history.observe(self.nodes.len(), &live)
+        self.history.observe(self.members, &live)
     }
 
+    /// Every client write committed somewhere, every read finished, the change committed.
     fn served(&self) -> bool {
         self.required.iter().all(|p| self.ledger.is_committed(p))
             && self.nodes.iter().all(|n| n.reads.is_empty())
+            && self.change.is_none()
     }
 
     fn complete(&self) -> bool {
-        self.required.iter().all(|p| self.ledger.is_committed(p))
-            && self.nodes.iter().all(|n| n.next_commit as usize == self.ledger.slots() && n.reads.is_empty())
+        self.served() && self.nodes.iter().all(|n| n.next_commit as usize == self.ledger.slots())
     }
 }
 
@@ -673,7 +675,14 @@ fn settle(mut st: State, max: usize) -> Result<(), String> {
     st.slow_net = None;
     for _ in 0..max {
         if st.events.is_empty() && st.nodes.iter().all(|n| n.replica.next_deadline().is_none()) {
-            return Ok(());
+            return if st.served() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "liveness: settled with client operations unfinished (log {} slots)",
+                    st.ledger.slots()
+                ))
+            };
         }
         // The default step comes first; a crash is never one.
         let Some((step, _)) = st.steps().into_iter().next().filter(|(s, _)| !matches!(s, Step::Crash { .. }))
