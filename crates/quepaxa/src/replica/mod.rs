@@ -557,6 +557,7 @@ impl Replica {
     }
 
     fn on_persisted(&mut self, id: PersistId) -> Result<(), Error> {
+        let effects = self.gate.persisted(id, &mut self.actions)?;
         while let Some(&(p, at)) = self.watch.unpersisted.front()
             && p <= id.0
         {
@@ -564,7 +565,7 @@ impl Replica {
             let sample = self.now.0.saturating_sub(at.0);
             self.watch.persist = Some(self.watch.persist.map_or(sample, |avg| avg - avg / 8 + sample / 8));
         }
-        for e in self.gate.persisted(id, &mut self.actions)? {
+        for e in effects {
             self.apply(e);
         }
         Ok(())

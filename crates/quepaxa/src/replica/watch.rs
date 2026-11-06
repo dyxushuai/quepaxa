@@ -143,11 +143,22 @@ impl Replica {
             handed.extend(crate::batch::decode(&b.value).unwrap_or_default());
             b.slot.is_some()
         });
-        let dedup = &self.dedup;
-        self.pending.extend(handed.into_iter().filter(|e| {
+        for e in handed {
             let (o, inc, id) = e.key();
-            !dedup.contains(o, inc, id)
-        }));
+            if self.dedup.contains(o, inc, id) {
+                continue;
+            }
+            // Its wait on the stuck disk must not count as an ordinary commit latency.
+            if o == self.me
+                && let Some(out) = self.outstanding.get_mut(&id)
+            {
+                out.2 = true;
+            }
+            self.pending.push_back(e);
+        }
+        // What others handed this replica goes on too (`on_forward` routes later forwards).
+        let relayed = core::mem::take(&mut self.relayed);
+        self.pending.extend(relayed);
     }
 
     /// Whether this replica proposes its own entries itself.

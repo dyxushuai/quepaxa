@@ -102,7 +102,8 @@ impl Replica {
         };
         let cap =
             self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
-        let queue = if self.leads_now() { &mut self.pending } else { &mut self.relayed };
+        // Stepped aside, this replica hands them on (`watch.rs`).
+        let queue = if self.leads_now() || self.watch.aside { &mut self.pending } else { &mut self.relayed };
         if queue.len() + entries.len() > cap {
             return; // the origin hedges
         }
