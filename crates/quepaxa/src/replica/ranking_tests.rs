@@ -425,10 +425,14 @@ fn a_move_that_takes_effect_advances_the_epoch_and_counts() {
         .map(|b| (b.key, b.value.clone()))
         .unwrap();
     let first = r.committed;
-    let mut proposals = alloc::vec![Proposal { priority: 1, key, value }];
-    proposals.extend((1..=crate::schedule::LAG).map(|s| tests::proposal(1, 1, s)));
-    r.handle(r.now, tests::from_peer(1, 0, Body::Entries { first: Slot(first), proposals })).unwrap();
+    let decided = alloc::vec![Proposal { priority: 1, key, value }];
+    r.handle(r.now, tests::from_peer(1, 0, Body::Entries { first: Slot(first), proposals: decided })).unwrap();
     let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    // Decided, not yet in force: the gauges still show the epoch in force.
+    assert_eq!((r.metrics().placement_moves, r.metrics().epoch, r.metrics().leader_position), (1, 0, 0));
+    let proposals = (1..=crate::schedule::LAG).map(|s| tests::proposal(1, 1, s)).collect();
+    r.handle(r.now, tests::from_peer(1, 0, Body::Entries { first: Slot(first + 1), proposals })).unwrap();
     r.poll_actions(&mut out);
     // In force from the decision slot + LAG: member 1 leads epoch 1, this replica (the most
     // costly) is last.

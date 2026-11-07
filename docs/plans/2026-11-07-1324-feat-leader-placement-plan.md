@@ -323,7 +323,7 @@ flowchart TB
 - **Approach:**
   1. Add scalar counters and gauges (suspicions, placement moves, epoch in force, the position of this replica in the order in force) to `Metrics`; `hedged`, `stepped_aside`, `fast_path_decisions` and `slots_decided` already exist and carry R10's remaining scalars (the fast-path share is their ratio).
   2. Add a read-only per-member view (round trip, committed index from message envelopes, freshness) and the order in force, in the Rust API only.
-  3. Add `QPX_METRIC_*` constants for the scalars, bump `QPX_ABI_VERSION_MINOR`, and regenerate the header.
+  3. Add `QPX_METRIC_*` constants for the scalars, bump `QPX_ABI_VERSION_MINOR`, and regenerate the header. Also add the scalar `QPX_CONFIG_PLACEMENT`, `QPX_CONFIG_PLACEMENT_SUSTAIN_NS` and `QPX_CONFIG_PLACEMENT_HOLD_NS` options: without them a C host cannot turn placement on (decided during U6; still scalars only).
   4. Print the order in force in kv-tokio's `STATS`, and let `wan.sh` read the leader from it instead of sampling fast-path decisions.
 - **Test scenarios:**
   - A suspicion increments the suspicion counter once per suspected target.
