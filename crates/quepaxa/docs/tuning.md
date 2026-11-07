@@ -85,3 +85,12 @@ catch-up retries, slots decided, fast-path decisions, forwarded and hedged entri
 how much decided state is held in memory. Rising `hedged` with a healthy leader means
 `hedge_max` is too low; rising `retransmits` means `retransmit_interval` is below the
 round trip; `retained_slots` that keeps growing means the application is not snapshotting.
+
+Where the leader is and why: the `epoch` and `leader_position` gauges give the epoch in
+force and this replica's place in the leader order (0: it leads); `suspicions`,
+`stepped_aside` and `placement_moves` count why the leader moved. The share of slots
+decided on the fast path is `fast_path_decisions` over `slots_decided`.
+[`Replica::members`](crate::Replica::members) lists the members in force in leader order,
+with each one's measured round trip (with `placement`), the commit index its latest
+message carried, and when it was last heard from. In C the scalars are `QPX_METRIC_*`
+values of `qpx_metric`; the per-member view is Rust only.

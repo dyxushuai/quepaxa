@@ -366,7 +366,9 @@ impl Node {
                 let _ = reply.send(Reply::Done(ops::read(&self.kv, &range)));
             }
             Cmd::Stats => {
-                let _ = reply.send(Reply::Text(format!("STATS {:?}", self.replica.metrics())));
+                let order: Vec<String> = self.replica.members().iter().map(|m| m.id.0.to_string()).collect();
+                let stats = format!("STATS {:?} LEADERS {}", self.replica.metrics(), order.join(","));
+                let _ = reply.send(Reply::Text(stats));
             }
             Cmd::Reconfigure(members, leaders) => {
                 // A member nobody can reach would be decided all the same, and could cost the

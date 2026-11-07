@@ -183,6 +183,7 @@ impl Replica {
         let change = crate::schedule::encode_change(self.schedule.generation(), &new_order);
         // Busy: tried again next round.
         if let Ok(id) = self.submit(change, Kind::Reconfigure) {
+            self.metrics.placement_moves += 1;
             self.placement.moving = Some(id);
             self.placement.target = None;
         }

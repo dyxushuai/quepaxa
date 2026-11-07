@@ -412,3 +412,53 @@ fn one_write_a_round_reaches_the_floor() {
     rounds(&mut r, PROBE_INTERVAL, 60, &rows(&three(50)), &[(1, 1)]);
     assert_eq!(r.placement.rates[&NodeId(1)], 8);
 }
+
+#[test]
+fn a_move_that_takes_effect_advances_the_epoch_and_counts() {
+    let writes = [(0, 10), (1, 10)];
+    let mut r = leader(0, &[0, 1, 2]);
+    rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
+    assert_eq!((r.metrics().placement_moves, r.metrics().epoch, r.metrics().leader_position), (1, 0, 0));
+    let (key, value) = r
+        .batches
+        .values()
+        .find(|b| !batch::changes(&b.value).is_empty())
+        .map(|b| (b.key, b.value.clone()))
+        .unwrap();
+    let first = r.committed;
+    let decided = alloc::vec![Proposal { priority: 1, key, value }];
+    r.handle(r.now, tests::from_peer(1, 0, Body::Entries { first: Slot(first), proposals: decided }))
+        .unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    // Decided, not yet in force: the gauges still show the epoch in force.
+    assert_eq!((r.metrics().placement_moves, r.metrics().epoch, r.metrics().leader_position), (1, 0, 0));
+    let proposals = (1..=crate::schedule::LAG).map(|s| tests::proposal(1, 1, s)).collect();
+    r.handle(r.now, tests::from_peer(1, 0, Body::Entries { first: Slot(first + 1), proposals })).unwrap();
+    r.poll_actions(&mut out);
+    // In force from the decision slot + LAG: member 1 leads epoch 1, this replica (the most
+    // costly) is last.
+    assert_eq!((r.metrics().placement_moves, r.metrics().epoch, r.metrics().leader_position), (1, 1, 2));
+    assert_eq!(r.members().iter().map(|m| m.id.0).collect::<Vec<_>>(), [1, 2, 0]);
+}
+
+#[test]
+fn the_member_view_reports_what_each_peer_said_last() {
+    let mut r = leader(0, &[0, 1, 2]);
+    round(&mut r, PROBE_INTERVAL, &rows(&three(50)), &[(0, 1)]);
+    let env =
+        Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 9 };
+    let msg = Message { env, body: Body::CatchUp { from: Slot(0) } }.encode();
+    r.handle(Timestamp(2 * PROBE_INTERVAL), Input::Message(msg)).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    let view = r.members();
+    assert_eq!(
+        view[0],
+        MemberView { id: NodeId(0), round_trip: None, committed: Some(r.committed), last_heard: None }
+    );
+    assert_eq!(view[1].committed, Some(9));
+    assert_eq!(view[1].last_heard, Some(Timestamp(2 * PROBE_INTERVAL)));
+    assert_eq!(view[1].round_trip, Some(100 * MS));
+    assert_eq!(view[2].committed, None);
+}

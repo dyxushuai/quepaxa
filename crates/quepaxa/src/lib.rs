@@ -117,7 +117,7 @@ mod schedule;
 mod slot_sim;
 mod types;
 
-pub use api::{Action, Config, DropReason, Error, Input, Metrics, Outbound};
+pub use api::{Action, Config, DropReason, Error, Input, MemberView, Metrics, Outbound};
 pub use batch::Entry;
 pub use replica::Replica;
 pub use types::{NodeId, PersistId, ProposalId, Slot, Timestamp};

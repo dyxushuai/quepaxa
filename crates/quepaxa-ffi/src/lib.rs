@@ -120,7 +120,9 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range;
 /// `QPX_METRIC_STEPPED_ASIDE`.
 /// 0.9: `QPX_DROP_SUPERSEDED`, `QPX_DROP_UNRESOLVED`.
-pub const QPX_ABI_VERSION_MINOR: u32 = 9;
+/// 0.10: leader placement: `QPX_CONFIG_PLACEMENT*`, `QPX_METRIC_SUSPICIONS`,
+/// `QPX_METRIC_PLACEMENT_MOVES`, `QPX_METRIC_EPOCH`, `QPX_METRIC_LEADER_POSITION`.
+pub const QPX_ABI_VERSION_MINOR: u32 = 10;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -692,6 +694,14 @@ pub const QPX_METRIC_RETAINED_SLOTS: u32 = 9;
 pub const QPX_METRIC_LIVE_REGISTERS: u32 = 10;
 /// Times this replica stepped aside because a write waited too long on its disk.
 pub const QPX_METRIC_STEPPED_ASIDE: u32 = 11;
+/// Times this replica suspected the member it hands entries to of being silent (ABI 0.10).
+pub const QPX_METRIC_SUSPICIONS: u32 = 12;
+/// Leader-order changes leader placement proposed from this replica (ABI 0.10).
+pub const QPX_METRIC_PLACEMENT_MOVES: u32 = 13;
+/// Gauge: membership epoch in force (ABI 0.10).
+pub const QPX_METRIC_EPOCH: u32 = 14;
+/// Gauge: this replica's position in the leader order in force, 0 when it leads (ABI 0.10).
+pub const QPX_METRIC_LEADER_POSITION: u32 = 15;
 
 /// Reads counter or gauge `metric` (`QPX_METRIC_*`, see the Rust `Metrics`) into `out`; an
 /// unknown metric is `QPX_ERR_INVALID_ARGUMENT`.
@@ -717,6 +727,10 @@ pub unsafe extern "C" fn qpx_metric(h: *mut qpx_replica, metric: u32, out: *mut 
             QPX_METRIC_RETAINED_SLOTS => m.retained_slots,
             QPX_METRIC_LIVE_REGISTERS => m.live_registers,
             QPX_METRIC_STEPPED_ASIDE => m.stepped_aside,
+            QPX_METRIC_SUSPICIONS => m.suspicions,
+            QPX_METRIC_PLACEMENT_MOVES => m.placement_moves,
+            QPX_METRIC_EPOCH => m.epoch,
+            QPX_METRIC_LEADER_POSITION => m.leader_position,
             _ => {
                 set_last_error(&format!("unknown metric {metric}"));
                 return QPX_ERR_INVALID_ARGUMENT;
