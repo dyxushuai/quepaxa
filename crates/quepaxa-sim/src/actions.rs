@@ -150,6 +150,9 @@ impl Sim {
                     return;
                 }
                 self.report.reconfigurations += 1;
+                if self.cfg.reorder.is_some() {
+                    self.report.reorder_decided_us.get_or_insert(self.now / 1_000);
+                }
                 self.epochs.insert(epoch, (from.0, next.clone()));
                 // Removed replicas serve until they report `Retired`; returning ones start
                 // now so they catch up during the window.
@@ -192,6 +195,9 @@ impl Sim {
                 self.kv.abandon_reads(gone);
             }
             let _ = writeln!(self.trace, "{} epoch {} in force: {next:?}", self.now, self.epoch);
+            if self.cfg.reorder.is_some() {
+                self.report.reorder_in_force_us.get_or_insert(self.now / 1_000);
+            }
             self.members = next;
         }
     }
