@@ -458,6 +458,9 @@ pub unsafe extern "C" fn qpx_propose(
 /// `out_id` and reported like a proposal's; the change takes effect 64 slots after it is
 /// decided (`QPX_ACTION_RECONFIGURED`). `QPX_ERR_RECONFIGURATION_PENDING` while another
 /// change has not taken effect. A joining replica runs with the original configuration.
+/// To change only the leader order, pass the members in force and the new order. A change
+/// computed before another change or a rotation was decided is ignored and reported as
+/// `QPX_ACTION_DROPPED` with `QPX_DROP_SUPERSEDED`.
 ///
 /// # Safety
 /// `h` must be a live handle; `members` must point to `members_len` ids and `leader_order`

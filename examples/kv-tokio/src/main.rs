@@ -15,7 +15,8 @@
 //! Clients speak lines: `PUT <key> <value>` → `OK`, `GET <key>` (linearizable, through a
 //! read barrier) → `VALUE <v>` | `NONE`, `STALE <key>` (local, possibly stale), `STATS` →
 //! `STATS <counters>`, `RECONFIGURE <ids> [LEADERS <ids>]` (comma-separated) → `OK` once
-//! the change is decided. Requests on one connection may be pipelined; replies come back in
+//! the change is decided, and `LEADERS <ids>` (every member in force, preferred leader first)
+//! → `OK` once the new leader order is decided. Requests on one connection may be pipelined; replies come back in
 //! order.
 //!
 //! With `--etcd`, the same replica also serves etcd v3's KV gRPC API (`Range`, `Put`,
@@ -284,6 +285,7 @@ fn parse_cmd(line: &str) -> Option<Cmd> {
         ["STATS"] => Some(Cmd::Stats),
         ["RECONFIGURE", members] => Some(Cmd::Reconfigure(ids(members)?, Vec::new())),
         ["RECONFIGURE", members, "LEADERS", order] => Some(Cmd::Reconfigure(ids(members)?, ids(order)?)),
+        ["LEADERS", order] => Some(Cmd::LeaderOrder(ids(order)?)),
         _ => None,
     }
 }
@@ -353,7 +355,7 @@ async fn client(
             }
             None => {
                 let _ = reply.send(Reply::Text(
-                    "ERR expected PUT <k> <v> | GET <k> | STALE <k> | STATS | RECONFIGURE <ids> [LEADERS <ids>]"
+                    "ERR expected PUT <k> <v> | GET <k> | STALE <k> | STATS | RECONFIGURE <ids> [LEADERS <ids>] | LEADERS <ids>"
                         .to_owned(),
                 ));
             }
@@ -450,6 +452,17 @@ mod tests {
         let twice = args(&format!("{base} --peers 1=127.0.0.1:4")).err().unwrap();
         assert!(twice.contains("replica 1 is listed twice"), "{twice}");
         assert!(args("--id 0 --client 127.0.0.1:1 --data d --members 0=127.0.0.1:2,0=127.0.0.1:3").is_err());
+    }
+
+    #[test]
+    fn leader_orders_parse_alone_and_with_members() {
+        let order = [NodeId(2), NodeId(0), NodeId(1)];
+        assert!(matches!(parse_cmd("LEADERS 2,0,1"), Some(Cmd::LeaderOrder(o)) if o == order));
+        assert!(matches!(
+            parse_cmd("RECONFIGURE 0,1,2 LEADERS 2,0,1"),
+            Some(Cmd::Reconfigure(m, o)) if m == [NodeId(0), NodeId(1), NodeId(2)] && o == order
+        ));
+        assert!(parse_cmd("LEADERS 2,x").is_none());
     }
 
     #[test]

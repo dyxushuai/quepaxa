@@ -35,6 +35,11 @@ in log order. If nothing is written meanwhile, slots `s + 1` to `s + 63` are fil
 empty batches like stalled slots (the leader first, the others if it is down), so a change
 takes effect without traffic.
 
+- **Changing only the leader.** [`propose_leader_order`](crate::Replica::propose_leader_order)
+  takes the members in force in a new order, preferred leader first, and makes the same
+  kind of change with the members kept: the new leader leads from 64 slots after the
+  decision. In C, call `qpx_propose_reconfiguration` with the current members and the new
+  order.
 - **One change at a time.** Proposing while a change has not taken effect returns
   [`ReconfigurationPending`](crate::Error::ReconfigurationPending). A change carries the
   generation of the leader orders it was computed from (changes applied plus leader

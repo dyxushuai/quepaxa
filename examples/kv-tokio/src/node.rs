@@ -384,6 +384,12 @@ impl Node {
                     }
                 }
             }
+            Cmd::LeaderOrder(order) => match self.replica.propose_leader_order(now, order) {
+                Ok(id) => self.pending_writes.write(id, Vec::new(), reply),
+                Err(e) => {
+                    let _ = reply.send(refused(e));
+                }
+            },
         }
     }
 

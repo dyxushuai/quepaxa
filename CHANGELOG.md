@@ -5,6 +5,9 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: `Replica::propose_leader_order` changes only the leader order of the members
+  in force; kv-tokio exposes it as `LEADERS <ids>`. In C,
+  `qpx_propose_reconfiguration` with the current members and a new order does the same.
 - `quepaxa` (breaking, wire and storage): a membership change carries the generation of
   the leader orders it was computed from (changes applied plus rotations counted), and
   every replica ignores one whose generation is out of date. Before, a change decided
