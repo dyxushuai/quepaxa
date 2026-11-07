@@ -157,13 +157,11 @@ impl Replica {
             costs[i].is_some_and(|c| c.saturating_mul(5) <= current.saturating_mul(4))
                 && !self.placement.excluded.get(&order[i]).is_some_and(|e| e.until > now)
         };
+        let best = (1..order.len()).filter(|&i| may_lead(i)).min_by_key(|&i| (costs[i], i));
         let tracked = self.placement.target.filter(|t| {
             t.leader == leader && order.iter().position(|&n| n == t.member).is_some_and(may_lead)
         });
-        let target = tracked.or_else(|| {
-            let best = (1..order.len()).filter(|&i| may_lead(i)).min_by_key(|&i| (costs[i], i))?;
-            Some(Target { member: order[best], leader, since: now })
-        });
+        let target = tracked.or_else(|| Some(Target { member: order[best?], leader, since: now }));
         self.placement.target = target;
         let Some(target) = target else { return };
         let held =
@@ -171,11 +169,14 @@ impl Replica {
         if now.0.saturating_sub(target.since.0) < self.cfg.placement_sustain || held {
             return;
         }
-        // The target first, then the others by cost, unranked ones last in their order.
-        let mut rest: Vec<usize> = (0..order.len()).filter(|&i| order[i] != target.member).collect();
+        // The gain has held: the member ranked best now goes first (the target kept the
+        // period running, but a better member may have become rankable since), then the
+        // others by cost, unranked ones last in their order.
+        let first = best.map_or(target.member, |i| order[i]);
+        let mut rest: Vec<usize> = (0..order.len()).filter(|&i| order[i] != first).collect();
         rest.sort_by_key(|&i| (costs[i].is_none(), costs[i], i));
         let new_order: Vec<NodeId> =
-            core::iter::once(target.member).chain(rest.into_iter().map(|i| order[i])).collect();
+            core::iter::once(first).chain(rest.into_iter().map(|i| order[i])).collect();
         let change = crate::schedule::encode_change(self.schedule.generation(), &new_order);
         // Busy: tried again next round.
         if let Ok(id) = self.submit(change, Kind::Reconfigure) {

@@ -48,7 +48,8 @@ fn round(r: &mut Replica, t: u64, rtt: &[&[u64]], writes: &[(u32, u64)]) {
             for (n, v) in table {
                 r.placement.rtt.insert(n, (v, now));
             }
-        } else {
+        } else if !table.is_empty() {
+            // A member that reports nothing has sent no table.
             r.placement.tables.insert(NodeId(a as u32), (table, now));
         }
     }
@@ -388,4 +389,19 @@ fn a_fenced_or_snapshot_resolved_move_is_never_reported() {
         "{out:?}"
     );
     assert_eq!(r.placement.moving, None);
+}
+
+#[test]
+fn the_best_member_is_placed_even_if_another_started_the_period() {
+    // us-east sends no table at first, so it cannot be ranked and us-west starts the period;
+    // once us-east is rankable it ranks best, and it is the one placed.
+    let mut r = leader(3, &[3, 0, 1, 2, 4]);
+    let all = [(0, 10), (1, 10), (2, 10), (3, 10), (4, 10)];
+    let mut silent = WAN;
+    silent[0] = [0, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN];
+    let silent: Vec<&[u64]> = silent.iter().map(|r| &r[..]).collect();
+    let t = rounds(&mut r, PROBE_INTERVAL, 5, &silent, &all);
+    assert_eq!(r.placement.target.map(|t| t.member), Some(NodeId(1)));
+    rounds(&mut r, t, SUSTAIN / PROBE_INTERVAL, &wan(), &all);
+    assert_eq!(moved(&r).map(|o| o[0]), Some(0));
 }
