@@ -28,6 +28,14 @@ pub const QPX_CONFIG_RETRANSMIT_INTERVAL_NS: u32 = 5;
 pub const QPX_CONFIG_HEDGE_MIN_NS: u32 = 6;
 /// Upper bound of the hedge delay, nanoseconds.
 pub const QPX_CONFIG_HEDGE_MAX_NS: u32 = 7;
+/// Leader placement on this member: 1 on, 0 off (the default). Enable it on every member
+/// (ABI 0.10).
+pub const QPX_CONFIG_PLACEMENT: u32 = 8;
+/// How long a member must keep a 20% gain before placement moves the leader to it,
+/// nanoseconds (ABI 0.10).
+pub const QPX_CONFIG_PLACEMENT_SUSTAIN_NS: u32 = 9;
+/// How long placement leaves any change of the leader order alone, nanoseconds (ABI 0.10).
+pub const QPX_CONFIG_PLACEMENT_HOLD_NS: u32 = 10;
 
 /// Creates a configuration with default settings: `cluster_id` (16 bytes; messages from
 /// other clusters are dropped), this replica's `id`, the `members_len` configured members at
@@ -96,6 +104,19 @@ pub unsafe extern "C" fn qpx_config_set(cfg: *mut qpx_config, option: u32, value
         }
         QPX_CONFIG_HEDGE_MAX_NS => {
             c.hedge_max = value;
+            true
+        }
+        QPX_CONFIG_PLACEMENT if value <= 1 => {
+            c.placement = value == 1;
+            true
+        }
+        QPX_CONFIG_PLACEMENT => false,
+        QPX_CONFIG_PLACEMENT_SUSTAIN_NS => {
+            c.placement_sustain = value;
+            true
+        }
+        QPX_CONFIG_PLACEMENT_HOLD_NS => {
+            c.placement_hold = value;
             true
         }
         _ => {

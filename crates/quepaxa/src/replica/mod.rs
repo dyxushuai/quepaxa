@@ -23,7 +23,7 @@ use core::mem;
 
 use self::gate::Gate;
 
-use crate::api::{Action, Config, DropReason, Error, Input, Metrics, Outbound};
+use crate::api::{Action, Config, DropReason, Error, Input, MemberView, Metrics, Outbound};
 use crate::batch::{self, Entry, Item, Kind};
 use crate::codec::{Body, Envelope, Message, WireCtx};
 use crate::core_state::CoreState;
@@ -352,6 +352,25 @@ impl Replica {
         &self.metrics
     }
 
+    /// The members of the epoch in force at the committed prefix, in leader order (the
+    /// leader first), with what this replica knows of each.
+    pub fn members(&self) -> Vec<MemberView> {
+        self.schedule
+            .members(Slot(self.committed))
+            .iter()
+            .map(|&id| MemberView {
+                id,
+                round_trip: self.fresh_rtt(id),
+                committed: if id == self.me {
+                    Some(self.committed)
+                } else {
+                    self.watch.committed.get(&id).copied()
+                },
+                last_heard: self.watch.heard.get(&id).copied(),
+            })
+            .collect()
+    }
+
     /// Queues `payload` to be appended to the log.
     ///
     /// The returned id later appears in exactly one of [`Action::Committed`] (the entry is
@@ -603,6 +622,10 @@ impl Replica {
     fn flush(&mut self) {
         self.metrics.retained_slots = self.log.len() as u64;
         self.metrics.live_registers = self.registers.len() as u64;
+        let applied = Slot(self.emitted);
+        let (epoch, from) = self.applied_schedule.epoch();
+        self.metrics.epoch = if from <= applied.0 { epoch } else { epoch - 1 };
+        self.metrics.leader_position = self.applied_schedule.position(self.me, applied);
         let before = self.gate.issued();
         self.gate.flush(&mut self.actions);
         if self.gate.issued() > before {

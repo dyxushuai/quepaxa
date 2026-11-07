@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa`: `Metrics` gains `suspicions`, `placement_moves` and the `epoch` and
+  `leader_position` gauges; `Replica::members` lists the members in force in leader order
+  with each one's round trip, last reported commit index and last contact. C (ABI 0.10):
+  matching `QPX_METRIC_*` constants and `QPX_CONFIG_PLACEMENT`,
+  `QPX_CONFIG_PLACEMENT_SUSTAIN_NS`, `QPX_CONFIG_PLACEMENT_HOLD_NS`. kv-tokio:
+  `--placement on`, and `STATS` ends with `LEADERS <ids>`.
 - `quepaxa` (wire): leader placement. With `Config::placement` (off by default) on every
   member, members measure round trips to each other while writes flow (two new message
   kinds, `RttProbe` and `RttReply`; peers of older versions reject them) and count

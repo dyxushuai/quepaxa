@@ -5,7 +5,7 @@ use bytes::Bytes;
 use core::fmt;
 
 use crate::batch::Entry;
-use crate::types::{NodeId, PersistId, ProposalId, Slot};
+use crate::types::{NodeId, PersistId, ProposalId, Slot, Timestamp};
 
 const MILLI: u64 = 1_000_000;
 
@@ -353,6 +353,31 @@ pub struct Metrics {
     pub retained_slots: u64,
     /// Gauge: recorder registers held in memory.
     pub live_registers: u64,
+    /// Times this replica suspected the member it hands entries to of being silent.
+    pub suspicions: u64,
+    /// Leader-order changes leader placement proposed from this replica.
+    pub placement_moves: u64,
+    /// Gauge: the membership epoch in force at the applied prefix (0: the configured members).
+    pub epoch: u64,
+    /// Gauge: this replica's position in the leader order in force at the applied prefix (0:
+    /// it leads); the number of members if it is not one.
+    pub leader_position: u64,
+}
+
+/// One member of the epoch in force as this replica sees it, from
+/// [`crate::Replica::members`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemberView {
+    /// The member.
+    pub id: NodeId,
+    /// Smoothed round trip from this replica, in nanoseconds, if measured recently (only
+    /// with [`Config::placement`]).
+    pub round_trip: Option<u64>,
+    /// The commit index the member's latest message carried (this replica's own for itself).
+    pub committed: Option<u64>,
+    /// When a message from the member last arrived.
+    pub last_heard: Option<Timestamp>,
 }
 
 /// Why a call was refused. A refused call changes nothing in the replica.

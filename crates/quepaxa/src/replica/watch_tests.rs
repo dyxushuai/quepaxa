@@ -688,3 +688,9 @@ fn a_stepped_aside_deputy_hands_on_what_it_is_handed() {
     assert!(!r.batches.values().any(|b| b.entries.iter().any(|e| e.2 == ProposalId(4))));
     assert_eq!(forwards_to(&out, 2), 1, "handed on to the next member");
 }
+
+#[test]
+fn each_suspicion_is_counted_once() {
+    let (r, _) = suspecting();
+    assert_eq!(r.metrics().suspicions, 1);
+}
