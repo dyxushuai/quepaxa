@@ -386,3 +386,78 @@ fn membership_changes_through_the_c_abi() {
         unsafe { qpx_replica_free(h) };
     }
 }
+
+/// A handle moved to another thread; the contract allows it while calls do not overlap.
+struct Moved(*mut qpx_replica);
+
+// SAFETY: each `Moved` is used by one thread at a time.
+unsafe impl Send for Moved {}
+
+/// Proposes each payload on a single-member replica and returns what it committed.
+unsafe fn commit_alone(h: *mut qpx_replica, payloads: &[&[u8]]) -> Vec<Vec<u8>> {
+    let (mut net, mut commits) = (Vec::new(), Vec::new());
+    unsafe { drain(&[h], 0, &mut net, &mut commits) };
+    for p in payloads {
+        let mut id = 0;
+        assert_eq!(unsafe { qpx_propose(h, 0, p.as_ptr(), p.len(), &mut id) }, QPX_OK);
+        unsafe { drain(&[h], 0, &mut net, &mut commits) };
+    }
+    assert!(net.is_empty());
+    commits
+}
+
+#[test]
+fn a_handle_moves_to_another_thread() {
+    let (rc, h) = replica_from(config(0, &[0]), &[]);
+    assert_eq!(rc, QPX_OK);
+    let h = Moved(h);
+    let committed = std::thread::spawn(move || {
+        let h = h;
+        let committed = unsafe { commit_alone(h.0, &[b"moved"]) };
+        let mut ci = 0;
+        assert_eq!(unsafe { qpx_commit_index(h.0, &mut ci) }, QPX_OK);
+        unsafe { qpx_replica_free(h.0) };
+        (committed, ci)
+    })
+    .join()
+    .unwrap();
+    assert_eq!(committed, (vec![b"moved".to_vec()], 1));
+}
+
+#[test]
+fn handles_on_different_threads_do_not_interfere() {
+    let run = |payloads: &'static [&'static [u8]]| {
+        let (rc, h) = replica_from(config(0, &[0]), &[]);
+        assert_eq!(rc, QPX_OK);
+        let h = Moved(h);
+        std::thread::spawn(move || {
+            let h = h;
+            let committed = unsafe { commit_alone(h.0, payloads) };
+            let mut decided = 0;
+            assert_eq!(unsafe { qpx_metric(h.0, QPX_METRIC_SLOTS_DECIDED, &mut decided) }, QPX_OK);
+            unsafe { qpx_replica_free(h.0) };
+            (committed, decided)
+        })
+    };
+    let a = run(&[b"a1", b"a2"]);
+    let b = run(&[b"b1", b"b2", b"b3"]);
+    let (a, b) = (a.join().unwrap(), b.join().unwrap());
+    assert_eq!(a, (vec![b"a1".to_vec(), b"a2".to_vec()], 2));
+    assert_eq!(b, (vec![b"b1".to_vec(), b"b2".to_vec(), b"b3".to_vec()], 3));
+}
+
+#[test]
+fn last_error_is_per_thread() {
+    let failed = std::sync::Barrier::new(2);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            assert_eq!(unsafe { qpx_poll(ptr::null_mut(), ptr::null_mut()) }, QPX_ERR_INVALID_ARGUMENT);
+            failed.wait();
+            assert!(last_error().contains("invalid argument"), "{}", last_error());
+        });
+        s.spawn(|| {
+            failed.wait();
+            assert_eq!(last_error(), "", "another thread's failure leaked into this one");
+        });
+    });
+}

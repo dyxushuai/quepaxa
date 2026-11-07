@@ -25,3 +25,8 @@ hedge-deadline-left-in-the-past	-	cargo nextest run --release -p quepaxa-sim --t
 ack-left-due-while-aside	-	cargo nextest run --release -p quepaxa-sim --test disk_faults stalled_leader_disk	timer storm: n[0-9]+ keeps firing
 suspect-drops-handed-entries	-	cargo nextest run --release -p quepaxa-sim --test model_check deputy	liveness: (nothing left to run|still busy|settled)
 late-entries-never-hedged	-	cargo nextest run --release -p quepaxa-sim --test replica_sim writes_commit_within_the_bound	no progress: n[0-9]+.s write ProposalId
+peer-frame-whole-deadline	-	cargo test -p kv-tokio --bin kv-tokio turmoil_tests::a_large_frame_on_a_slow_draining_link	the connection was given up after [0-9]+ bytes
+peer-link-no-stall-redial	-	cargo test -p kv-tokio --bin kv-tokio turmoil_tests::a_held_link_is_redialed	a held link was not redialed within STALL
+last-error-shared-across-threads	-	cargo nextest run -p quepaxa-ffi --test c_abi	another thread's failure leaked into this one
+writer-forgets-to-wake-the-event-loop	-	cargo test -p kv-tokio --features shuttle --bin kv-tokio shuttle_tests::the_handoff	deadlock
+writer-never-wakes-the-event-loop	-	cargo test -p kv-tokio --features shuttle --bin kv-tokio shuttle_tests::the_writer_wakes	deadlock

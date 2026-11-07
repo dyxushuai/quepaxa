@@ -51,6 +51,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy on kv-tokio's shuttle build (std::sync swapped for shuttle's)
+        run: cargo clippy -p kv-tokio --all-targets --features shuttle -- -D warnings
       - name: Docs build without warnings (docs.rs)
         run: cargo doc --workspace --no-deps
         env:
@@ -74,6 +76,8 @@ jobs:
         run: for e in cluster restart membership; do cargo run -q -p quepaxa --example "$e"; done
       - name: Model checking (release build; every scenario must be exhausted)
         run: cargo nextest run --release -p quepaxa-sim --test model_check --no-fail-fast
+      - name: kv-tokio's writer handoff and snapshot saves under shuttle's schedulers
+        run: cargo nextest run -p kv-tokio --features shuttle --bin kv-tokio --no-fail-fast
 
   msrv:
     needs: changes

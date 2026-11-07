@@ -1,0 +1,12 @@
+diff --git a/examples/kv-tokio/src/node.rs b/examples/kv-tokio/src/node.rs
+index 1c6f827..7e3dd57 100644
+--- a/examples/kv-tokio/src/node.rs
++++ b/examples/kv-tokio/src/node.rs
+@@ -96,7 +96,6 @@ impl Written {
+         let mut state = self.lock();
+         state.0 = bytes;
+         state.1.extend(report);
+-        self.advanced.notify_all();
+     }
+ 
+     fn wait_for(&self, bytes: u64) {

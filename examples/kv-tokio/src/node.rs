@@ -3,8 +3,6 @@
 //! fsync (group commit); their gated messages leave only after it.
 
 use std::collections::HashMap;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -15,7 +13,9 @@ use tokio::sync::oneshot;
 use crate::client::{Cmd, Failure, Pending, Reply};
 use crate::kv::Kv;
 use crate::ops::{self, RangeReq, Request};
-use crate::storage::{Disk, SnapshotWriter, decode_snapshot, encode_snapshot};
+use crate::storage::{Disk, Log, SnapshotWriter, decode_snapshot, encode_snapshot};
+use crate::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use crate::sync::{Arc, Condvar, Mutex, MutexGuard, thread};
 
 /// Largest frame on a peer link; snapshots larger than this are not taken (see `maybe_snapshot`).
 pub const MAX_FRAME: usize = 64 << 20;
@@ -87,7 +87,7 @@ struct Written {
 }
 
 impl Written {
-    fn lock(&self) -> std::sync::MutexGuard<'_, (u64, Vec<Report>)> {
+    fn lock(&self) -> MutexGuard<'_, (u64, Vec<Report>)> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
@@ -113,11 +113,9 @@ impl Written {
 
 /// Record bytes that may be handed to the writer thread and not yet be durable. Past this,
 /// the event loop waits for the disk: a slow disk then backs up the event queue, and through
-/// it peers and clients, instead of piling records up in memory.
+/// it peers and clients, instead of piling records up in memory. A group of events is
+/// flushed early past an eighth of it, so one hand-off cannot overshoot it by much.
 const MAX_UNWRITTEN: u64 = 64 << 20;
-/// Pending record bytes past which a group of events is flushed early, so one hand-off
-/// cannot overshoot `MAX_UNWRITTEN` by much.
-const FLUSH_EARLY: u64 = MAX_UNWRITTEN / 8;
 
 struct PendingPersist {
     id: PersistId,
@@ -132,9 +130,11 @@ pub struct Node {
     disk: Option<Disk>,
     snapshots: SnapshotWriter,
     /// Persists for the writer thread, in order.
-    jobs: Option<std::sync::mpsc::Sender<Vec<PendingPersist>>>,
+    jobs: Option<mpsc::Sender<Vec<PendingPersist>>>,
     /// Record bytes handed to the writer thread, and how many of them it has written.
     handed: u64,
+    /// `MAX_UNWRITTEN`, lowered by tests.
+    max_unwritten: u64,
     written: Arc<Written>,
     kv: Kv,
     /// Next slot to apply.
@@ -169,12 +169,26 @@ impl Node {
         every: u64,
         events: SyncSender<Ev>,
     ) -> Self {
+        let snapshots = disk.snapshots();
+        Self::with(replica, Some(disk), snapshots, peers, every, events)
+    }
+
+    /// A node whose writer thread is started on `disk` when it runs, or by hand.
+    fn with(
+        replica: Replica,
+        disk: Option<Disk>,
+        snapshots: SnapshotWriter,
+        peers: HashMap<u32, Sender<Vec<u8>>>,
+        every: u64,
+        events: SyncSender<Ev>,
+    ) -> Self {
         Self {
             replica,
-            snapshots: disk.snapshots(),
-            disk: Some(disk),
+            snapshots,
+            disk,
             jobs: None,
             handed: 0,
+            max_unwritten: MAX_UNWRITTEN,
             written: Arc::default(),
             kv: Kv::default(),
             applied: 0,
@@ -221,14 +235,7 @@ impl Node {
 
     pub fn run(mut self, rx: Receiver<Ev>) {
         if let Some(disk) = self.disk.take() {
-            let (jobs, queue) = std::sync::mpsc::channel();
-            let (events, written) = (self.events.clone(), self.written.clone());
-            std::thread::spawn(move || {
-                write_persists(disk, &queue, &events, &written);
-                // Nothing more will be written: the event loop must not wait for it.
-                written.advance(u64::MAX, None);
-            });
-            self.jobs = Some(jobs);
+            self.start_writer(disk);
         }
         self.drain();
         self.flush();
@@ -249,7 +256,7 @@ impl Node {
                     self.on_event(ev);
                     for ev in rx.try_iter().take(GROUP) {
                         self.on_event(ev);
-                        if self.pending > FLUSH_EARLY {
+                        if self.pending > self.max_unwritten / 8 {
                             self.flush();
                         }
                     }
@@ -261,6 +268,17 @@ impl Node {
             self.flush();
             self.maybe_snapshot();
         }
+    }
+
+    fn start_writer(&mut self, log: impl Log + Send + 'static) {
+        let (jobs, queue) = mpsc::channel();
+        let (events, written) = (self.events.clone(), self.written.clone());
+        thread::spawn(move || {
+            write_persists(log, &queue, &events, &written);
+            // Nothing more will be written: the event loop must not wait for it.
+            written.advance(u64::MAX, None);
+        });
+        self.jobs = Some(jobs);
     }
 
     fn on_event(&mut self, ev: Ev) {
@@ -475,7 +493,7 @@ impl Node {
         if let Some(jobs) = &self.jobs {
             self.handed += bytes;
             let _ = jobs.send(batch);
-            self.written.wait_for(self.handed.saturating_sub(MAX_UNWRITTEN));
+            self.written.wait_for(self.handed.saturating_sub(self.max_unwritten));
         }
     }
 
@@ -495,7 +513,7 @@ impl Node {
         self.last_snapshot = self.applied;
         self.snapshotting = true;
         let (writer, events) = (self.snapshots.clone(), self.events.clone());
-        std::thread::spawn(move || {
+        thread::spawn(move || {
             let bytes = Bytes::from(encode_snapshot(through, &core, &kv));
             // Unshare the shards now: until then every write copies the shard it touches.
             drop(kv);
@@ -516,8 +534,8 @@ fn batch_bytes(batch: &[PendingPersist]) -> u64 {
 /// The writer thread: makes persists durable in order, each group with one fsync, and
 /// reports them; after a failure it writes nothing more (later records assume it).
 fn write_persists(
-    mut disk: Disk,
-    queue: &std::sync::mpsc::Receiver<Vec<PendingPersist>>,
+    mut disk: impl Log,
+    queue: &Receiver<Vec<PendingPersist>>,
     events: &SyncSender<Ev>,
     written: &Written,
 ) {
@@ -553,10 +571,12 @@ fn write_persists(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "shuttle")))]
 mod incarnation_tests;
+#[cfg(all(test, feature = "shuttle"))]
+mod shuttle_tests;
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use super::*;
 
@@ -625,6 +645,18 @@ mod tests {
         assert_eq!(a.revision, 1);
         let ops::Response::Put { prev: Some(prev) } = b.response else { panic!("{b:?}") };
         assert_eq!((b.revision, &*prev.value), (2, &b"1"[..]));
+    }
+
+    #[test]
+    fn a_full_peer_queue_drops_frames_instead_of_blocking() {
+        let mut n = node("full-peer");
+        // Nothing drains this queue, like a peer that is unreachable.
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        n.peers.insert(1, tx);
+        n.send(1, PeerFrame::Msg(Bytes::from_static(b"first")));
+        n.send(1, PeerFrame::Msg(Bytes::from_static(b"second")));
+        assert_eq!(rx.try_recv().unwrap(), PeerFrame::Msg(Bytes::from_static(b"first")).encode());
+        assert!(rx.try_recv().is_err(), "the frame that did not fit was dropped");
     }
 
     #[test]

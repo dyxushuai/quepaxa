@@ -19,6 +19,16 @@ tokio = { version = "1.53.3", features = ["io-util", "macros", "net", "rt-multi-
 prost = "0.14.4"
 tonic = { version = "0.14.6", default-features = false, features = ["codegen", "router", "server", "channel", "transport"] }
 tonic-prost = "0.14.6"
+# Systematic thread-schedule exploration for the writer handoff (src/node/shuttle_tests.rs);
+# only built with the `shuttle` feature, which swaps `std::sync` for it (src/sync.rs).
+shuttle = { version = "=0.9.8", optional = true }
+
+[features]
+shuttle = ["dep:shuttle"]
+
+[dev-dependencies]
+# Simulated network and clock for the peer link and client pipeline tests (src/turmoil_tests.rs).
+turmoil = "=0.7.2"
 
 [build-dependencies]
 # Compiles proto/ without a system protoc.

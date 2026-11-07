@@ -11,11 +11,11 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 
 use crate::kv::{Entry, Kv};
+use crate::sync::{Arc, Mutex};
 
 /// The application state persisted with a snapshot.
 pub struct Snapshot {
@@ -43,6 +43,10 @@ pub struct SnapshotWriter {
 }
 
 impl SnapshotWriter {
+    pub fn new(dir: &Path) -> Self {
+        Self { dir: dir.to_path_buf(), newest: Arc::default() }
+    }
+
     /// Durably replaces `snapshot.bin` with `bytes` (a snapshot through `through`); returns
     /// `false` without writing if a snapshot at least as new was already saved.
     pub fn save(&self, through: u64, bytes: &[u8]) -> io::Result<bool> {
@@ -172,26 +176,8 @@ impl Disk {
         // may have left the entry only in memory.
         log.sync_all()?;
         sync_dir(dir)?;
-        let snapshots = SnapshotWriter { dir: dir.to_path_buf(), newest: Arc::default() };
+        let snapshots = SnapshotWriter::new(dir);
         Ok((Self { dir: dir.to_path_buf(), log, snapshots }, records))
-    }
-
-    /// Appends records durably (one fsync for the whole group).
-    pub fn append(&mut self, records: &[Bytes]) -> io::Result<()> {
-        self.log.write_all(&frame(records))?;
-        self.log.sync_data()
-    }
-
-    /// Atomically replaces the whole log (write new file, fsync, rename, fsync directory).
-    pub fn replace(&mut self, records: &[Bytes]) -> io::Result<()> {
-        let tmp = self.dir.join("records.tmp");
-        let mut f = File::create(&tmp)?;
-        f.write_all(&frame(records))?;
-        f.sync_all()?;
-        fs::rename(&tmp, self.dir.join("records.log"))?;
-        sync_dir(&self.dir)?;
-        self.log = OpenOptions::new().append(true).open(self.dir.join("records.log"))?;
-        Ok(())
     }
 
     pub fn snapshots(&self) -> SnapshotWriter {
@@ -204,6 +190,33 @@ impl Disk {
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
+    }
+}
+
+/// The record log, as the writer thread uses it.
+pub trait Log {
+    /// Appends records durably (one fsync for the whole group).
+    fn append(&mut self, records: &[Bytes]) -> io::Result<()>;
+    /// Atomically replaces the whole log.
+    fn replace(&mut self, records: &[Bytes]) -> io::Result<()>;
+}
+
+impl Log for Disk {
+    fn append(&mut self, records: &[Bytes]) -> io::Result<()> {
+        self.log.write_all(&frame(records))?;
+        self.log.sync_data()
+    }
+
+    /// Writes a new file, fsyncs it, renames it over the log and fsyncs the directory.
+    fn replace(&mut self, records: &[Bytes]) -> io::Result<()> {
+        let tmp = self.dir.join("records.tmp");
+        let mut f = File::create(&tmp)?;
+        f.write_all(&frame(records))?;
+        f.sync_all()?;
+        fs::rename(&tmp, self.dir.join("records.log"))?;
+        sync_dir(&self.dir)?;
+        self.log = OpenOptions::new().append(true).open(self.dir.join("records.log"))?;
+        Ok(())
     }
 }
 
@@ -266,7 +279,7 @@ pub fn decode_snapshot(b: &Bytes) -> Option<Snapshot> {
     Some(Snapshot { through, core, kv })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "shuttle")))]
 mod tests {
     use super::*;
 
