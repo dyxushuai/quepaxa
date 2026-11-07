@@ -6,7 +6,7 @@ diff --git a/crates/quepaxa/src/schedule.rs b/crates/quepaxa/src/schedule.rs
          // proposed, so no replica can carry it; refusing keeps the history ascending.
          let rotated_here = self.history.last().is_some_and(|(f, _)| *f >= from);
 -        if base != self.generation || slot.0 < self.epoch_from || rotated_here {
-+        if slot.0 < self.epoch_from || rotated_here {
++        if (base != self.generation && false) || slot.0 < self.epoch_from || rotated_here {
              return None;
          }
          self.history.push((from, order));

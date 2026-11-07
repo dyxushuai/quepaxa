@@ -11,8 +11,8 @@ read-mark-from-registers-only	QPX_SIM_SEEDS=300	cargo nextest run --release -p q
 read-ignores-an-epoch	QPX_SIM_MEMBERSHIP_SEEDS=400	cargo nextest run --release -p quepaxa-sim --test replica_sim membership_changes	linearizability|stale read
 leader-reuses-h-after-restart	-	cargo nextest run --release -p quepaxa-sim --test model_check	G5 unique H|G4 fast-path lock|G1
 reconfiguration-takes-effect-early	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	G[1345] |agreement|InvalidCoreState|linearizability|did not converge
-reconfiguration-applied-twice	-	cargo nextest run -p quepaxa schedule	late duplicate
-stale-change-applied	-	cargo nextest run -p quepaxa schedule	stale change
+reconfiguration-applied-twice	-	cargo nextest run --no-fail-fast -p quepaxa schedule	late duplicate
+stale-change-applied	-	cargo nextest run --no-fail-fast -p quepaxa schedule	stale change
 proposer-uses-configured-members	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	did not converge|G[1345] |agreement
 retire-without-the-new-majority	-	cargo nextest run -p quepaxa --lib caught_up_majority	retired with only one of three
 trace-phase0-adopts-the-first-reply	-	verification/tla/traces.sh	REJECTED
