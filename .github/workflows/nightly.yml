@@ -255,16 +255,44 @@ jobs:
           path: mutants.out/
 
   report:
+    # One open issue tracks a failing streak: each failed scheduled run comments on it, and
+    # the third in a row raises its priority, so a red nightly cannot go unnoticed for days.
     needs: [fuzz, simulation, scenarios, deep, tla, tlaps, verus, kani, bench, coverage, mutants]
     if: failure() && github.event_name == 'schedule'
     runs-on: ubuntu-24.04
     permissions:
       issues: write
     steps:
-      - name: Open an issue for the failed run
+      - name: Open or update the nightly failure issue
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh issue create -R "$GITHUB_REPOSITORY" --label needs-triage \
-            --title "Nightly assurance failed ($(date -u +%F))" \
-            --body "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Failing seeds, schedules and fuzz inputs are in the job logs and artifacts (simulator and model-checker failures print the seed or schedule that reproduces them)."
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label nightly-failure --state open --json number --jq '.[0].number // empty')
+          if [ -z "$open" ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --label needs-triage --label nightly-failure \
+              --title "Nightly assurance failing (since $(date -u +%F))" \
+              --body "Run: $run. Failing seeds, schedules and fuzz inputs are in the job logs and artifacts (simulator and model-checker failures print the seed or schedule that reproduces them). Later failures comment here; a passing scheduled run closes this issue."
+            exit 0
+          fi
+          gh issue comment -R "$GITHUB_REPOSITORY" "$open" --body "Failed again on $(date -u +%F): $run"
+          streak=$(( $(gh issue view -R "$GITHUB_REPOSITORY" "$open" --json comments --jq '[.comments[] | select(.body | startswith("Failed again"))] | length') + 1 ))
+          if [ "$streak" -ge 3 ]; then
+            gh issue edit -R "$GITHUB_REPOSITORY" "$open" --add-label "priority: high"
+          fi
+
+  recover:
+    needs: [fuzz, simulation, scenarios, deep, tla, tlaps, verus, kani, bench, coverage, mutants]
+    if: ${{ !failure() && !cancelled() && github.event_name == 'schedule' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Close the nightly failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label nightly-failure --state open --json number --jq '.[0].number // empty')
+          if [ -n "$open" ]; then
+            gh issue close -R "$GITHUB_REPOSITORY" "$open" --comment "Passed on $(date -u +%F): $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          fi
