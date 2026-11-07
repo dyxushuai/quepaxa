@@ -171,8 +171,10 @@ impl Replica {
                     Body::ReadReply { incarnation, round, high } => {
                         self.on_read_reply(from, incarnation, round, high)
                     }
-                    Body::RttProbe { sent, table } => self.on_rtt_probe(from, sent, table),
-                    Body::RttReply { sent } => self.on_rtt_reply(from, sent),
+                    Body::RttProbe { incarnation, sent, table } => {
+                        self.on_rtt_probe(from, incarnation, sent, table)
+                    }
+                    Body::RttReply { incarnation, sent } => self.on_rtt_reply(from, incarnation, sent),
                 }
             }
             // Before driving: a retirement barrier it submits is proposed in this round.

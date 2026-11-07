@@ -20,7 +20,7 @@ fn probes(out: &[Action]) -> Vec<Sent> {
     out.iter()
         .filter_map(|a| match a {
             Action::Send(o) => match Message::decode(&o.bytes, &r_wire()) {
-                Ok(Message { body: Body::RttProbe { sent, table }, .. }) => Some((o.to, sent, table)),
+                Ok(Message { body: Body::RttProbe { sent, table, .. }, .. }) => Some((o.to, sent, table)),
                 _ => None,
             },
             _ => None,
@@ -32,7 +32,7 @@ fn rtt_replies(out: &[Action]) -> Vec<(NodeId, u64)> {
     out.iter()
         .filter_map(|a| match a {
             Action::Send(o) => match Message::decode(&o.bytes, &r_wire()) {
-                Ok(Message { body: Body::RttReply { sent }, .. }) => Some((o.to, sent)),
+                Ok(Message { body: Body::RttReply { sent, .. }, .. }) => Some((o.to, sent)),
                 _ => None,
             },
             _ => None,
@@ -43,7 +43,8 @@ fn rtt_replies(out: &[Action]) -> Vec<(NodeId, u64)> {
 /// Delivers `from`'s answer to a probe `r` sent it at `sent`, arriving at `at`.
 fn answer(r: &mut Replica, from: u32, sent: u64, at: u64) {
     r.placement.awaiting.entry(NodeId(from)).or_default().push(sent);
-    r.handle(Timestamp(at), from_peer(from, r.me.0, Body::RttReply { sent })).unwrap();
+    r.handle(Timestamp(at), from_peer(from, r.me.0, Body::RttReply { incarnation: r.incarnation, sent }))
+        .unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
 }
@@ -125,19 +126,28 @@ fn only_the_reply_to_the_latest_probe_counts() {
     let mut r = placed(0);
     let mut out = Vec::new();
     // Unsolicited: no probe went to member 1.
-    r.handle(Timestamp(5 * MS), from_peer(1, 0, Body::RttReply { sent: MS })).unwrap();
+    r.handle(Timestamp(5 * MS), from_peer(1, 0, Body::RttReply { incarnation: r.incarnation, sent: MS }))
+        .unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.fresh_rtt(NodeId(1)), None);
     answer(&mut r, 1, 10 * MS, 12 * MS);
     assert_eq!(r.fresh_rtt(NodeId(1)), Some(2 * MS));
     // A duplicate of the same reply, arriving much later, is not sampled again.
-    r.handle(Timestamp(900 * MS), from_peer(1, 0, Body::RttReply { sent: 10 * MS })).unwrap();
+    r.handle(
+        Timestamp(900 * MS),
+        from_peer(1, 0, Body::RttReply { incarnation: r.incarnation, sent: 10 * MS }),
+    )
+    .unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.fresh_rtt(NodeId(1)), Some(2 * MS));
     // Nor is a reply to a probe older than one already answered.
     r.placement.awaiting.insert(NodeId(1), alloc::vec![920 * MS, 930 * MS]);
     answer(&mut r, 1, 940 * MS, 941 * MS);
-    r.handle(Timestamp(950 * MS), from_peer(1, 0, Body::RttReply { sent: 920 * MS })).unwrap();
+    r.handle(
+        Timestamp(950 * MS),
+        from_peer(1, 0, Body::RttReply { incarnation: r.incarnation, sent: 920 * MS }),
+    )
+    .unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.placement.awaiting[&NodeId(1)], [] as [u64; 0]);
     assert_eq!(r.fresh_rtt(NodeId(1)), Some(2 * MS - MS / 4 + MS / 8));
@@ -155,7 +165,7 @@ fn a_round_trip_longer_than_the_probe_interval_is_measured() {
     r.handle_timeout(first.after(PROBE_INTERVAL)).unwrap();
     r.poll_actions(&mut out);
     let late = first.after(PROBE_INTERVAL + PROBE_INTERVAL / 2);
-    r.handle(late, from_peer(1, 0, Body::RttReply { sent: first.0 })).unwrap();
+    r.handle(late, from_peer(1, 0, Body::RttReply { incarnation: r.incarnation, sent: first.0 })).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.fresh_rtt(NodeId(1)), Some(PROBE_INTERVAL + PROBE_INTERVAL / 2));
 }
@@ -165,7 +175,8 @@ fn a_probe_is_answered_and_its_table_kept() {
     let mut r = placed(0);
     let mut out = Vec::new();
     let table = alloc::vec![(NodeId(0), 70 * MS), (NodeId(2), 30 * MS), (NodeId(9), MS)];
-    r.handle(Timestamp(3 * MS), from_peer(1, 0, Body::RttProbe { sent: 12345, table })).unwrap();
+    r.handle(Timestamp(3 * MS), from_peer(1, 0, Body::RttProbe { incarnation: 7, sent: 12345, table }))
+        .unwrap();
     r.poll_actions(&mut out);
     assert_eq!(rtt_replies(&out), [(NodeId(1), 12345)]);
     let kept = &r.placement.tables[&NodeId(1)];
@@ -212,7 +223,11 @@ fn a_member_without_placement_neither_probes_nor_answers() {
     apply_writes(&mut r, Timestamp(MS), &[1]);
     assert_eq!(r.next_deadline(), None);
     assert!(r.placement.writes.is_empty(), "nothing is counted");
-    r.handle(Timestamp(2 * MS), from_peer(1, 0, Body::RttProbe { sent: 7, table: Vec::new() })).unwrap();
+    r.handle(
+        Timestamp(2 * MS),
+        from_peer(1, 0, Body::RttProbe { incarnation: 7, sent: 7, table: Vec::new() }),
+    )
+    .unwrap();
     r.poll_actions(&mut out);
     assert!(rtt_replies(&out).is_empty());
     assert!(r.placement.tables.is_empty());
@@ -239,4 +254,17 @@ fn a_restarted_replica_measures_afresh() {
     let r = Replica::new(cfg, [], Timestamp(0)).unwrap();
     assert!(r.placement.rtt.is_empty() && r.placement.tables.is_empty() && r.placement.writes.is_empty());
     assert_eq!(r.placement.next_probe, None);
+}
+
+#[test]
+fn a_reply_to_another_incarnations_probe_is_ignored() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    // Same send time, but echoed for a previous incarnation (its clock started over).
+    r.placement.awaiting.entry(NodeId(1)).or_default().push(MS);
+    let old = r.incarnation - 1;
+    r.handle(Timestamp(5 * MS), from_peer(1, 0, Body::RttReply { incarnation: old, sent: MS })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), None);
+    assert_eq!(r.placement.awaiting[&NodeId(1)], [MS], "the probe still awaits its own reply");
 }

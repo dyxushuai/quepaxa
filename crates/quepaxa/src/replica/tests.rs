@@ -54,9 +54,13 @@ fn arb_body() -> impl Strategy<Value = Body> {
             .prop_map(|(first, proposals)| Body::Entries { first, proposals }),
         slot.prop_map(|through| Body::Compacted { through }),
         (any::<u64>(), proptest::collection::vec((0u32..4, any::<u64>()), 0..4)).prop_map(|(sent, rows)| {
-            Body::RttProbe { sent, table: rows.into_iter().map(|(n, rtt)| (NodeId(n), rtt)).collect() }
+            Body::RttProbe {
+                incarnation: 1,
+                sent,
+                table: rows.into_iter().map(|(n, rtt)| (NodeId(n), rtt)).collect(),
+            }
         }),
-        any::<u64>().prop_map(|sent| Body::RttReply { sent }),
+        (0u64..3, any::<u64>()).prop_map(|(incarnation, sent)| Body::RttReply { incarnation, sent }),
     ]
 }
 

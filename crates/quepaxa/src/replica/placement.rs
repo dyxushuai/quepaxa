@@ -107,11 +107,18 @@ impl Replica {
                 sent.remove(0);
             }
             sent.push(now.0);
-            self.send(to, Body::RttProbe { sent: now.0, table: table.clone() });
+            let incarnation = self.incarnation;
+            self.send(to, Body::RttProbe { incarnation, sent: now.0, table: table.clone() });
         }
     }
 
-    pub(super) fn on_rtt_probe(&mut self, from: NodeId, sent: u64, mut table: Vec<(NodeId, u64)>) {
+    pub(super) fn on_rtt_probe(
+        &mut self,
+        from: NodeId,
+        incarnation: u64,
+        sent: u64,
+        mut table: Vec<(NodeId, u64)>,
+    ) {
         if !self.cfg.placement {
             return;
         }
@@ -121,11 +128,13 @@ impl Replica {
         }
         table.retain(|(n, _)| members.contains(n));
         self.placement.tables.insert(from, (table, self.now));
-        self.send(from, Body::RttReply { sent });
+        self.send(from, Body::RttReply { incarnation, sent });
     }
 
-    pub(super) fn on_rtt_reply(&mut self, from: NodeId, sent: u64) {
-        if !self.cfg.placement || sent > self.now.0 {
+    pub(super) fn on_rtt_reply(&mut self, from: NodeId, incarnation: u64, sent: u64) {
+        // A previous incarnation's probe may share a send time with this one's: a host may
+        // start its clock over on restart.
+        if !self.cfg.placement || incarnation != self.incarnation || sent > self.now.0 {
             return;
         }
         let Some(probes) = self.placement.awaiting.get_mut(&from) else { return };
