@@ -411,8 +411,9 @@ fn one_write_a_round_reaches_the_floor() {
     let mut r = leader(0, &[0, 1, 2]);
     rounds(&mut r, PROBE_INTERVAL, 60, &rows(&three(50)), &[(1, 1)]);
     assert_eq!(r.placement.rates[&NodeId(1)], 8);
-||||||| parent of 039c11a (feat(replica): expose where the leader is and why)
+}
 
+#[test]
 fn a_move_that_takes_effect_advances_the_epoch_and_counts() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
@@ -426,7 +427,8 @@ fn a_move_that_takes_effect_advances_the_epoch_and_counts() {
         .unwrap();
     let first = r.committed;
     let decided = alloc::vec![Proposal { priority: 1, key, value }];
-    r.handle(r.now, tests::from_peer(1, 0, Body::Entries { first: Slot(first), proposals: decided })).unwrap();
+    r.handle(r.now, tests::from_peer(1, 0, Body::Entries { first: Slot(first), proposals: decided }))
+        .unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
     // Decided, not yet in force: the gauges still show the epoch in force.
