@@ -40,6 +40,14 @@ fn rtt_replies(out: &[Action]) -> Vec<(NodeId, u64)> {
         .collect()
 }
 
+/// Delivers `from`'s answer to a probe `r` sent it at `sent`, arriving at `at`.
+fn answer(r: &mut Replica, from: u32, sent: u64, at: u64) {
+    r.placement.awaiting.insert(NodeId(from), sent);
+    r.handle(Timestamp(at), from_peer(from, r.me.0, Body::RttReply { sent })).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+}
+
 /// Applies one decided slot holding an application entry from each of `origins`.
 fn apply_writes(r: &mut Replica, at: Timestamp, origins: &[u32]) {
     let items: Vec<Item> = origins
@@ -83,21 +91,17 @@ fn a_write_starts_probing_every_other_member() {
 #[test]
 fn round_trips_converge_and_an_outlier_moves_the_average_by_an_eighth() {
     let mut r = placed(0);
-    let mut out = Vec::new();
     let mut t = 0;
     for _ in 0..4 {
         t += PROBE_INTERVAL;
-        r.handle(Timestamp(t + 80 * MS), from_peer(1, 0, Body::RttReply { sent: t })).unwrap();
-        r.poll_actions(&mut out);
+        answer(&mut r, 1, t, t + 80 * MS);
     }
     assert_eq!(r.fresh_rtt(NodeId(1)), Some(80 * MS));
     t += PROBE_INTERVAL;
-    r.handle(Timestamp(t + 880 * MS), from_peer(1, 0, Body::RttReply { sent: t })).unwrap();
-    r.poll_actions(&mut out);
+    answer(&mut r, 1, t, t + 880 * MS);
     assert_eq!(r.fresh_rtt(NodeId(1)), Some(80 * MS - 10 * MS + 110 * MS));
     // A reply claiming a send time in the future is ignored.
-    r.handle(Timestamp(t + 881 * MS), from_peer(1, 0, Body::RttReply { sent: t + 900 * MS })).unwrap();
-    r.poll_actions(&mut out);
+    answer(&mut r, 1, t + 900 * MS, t + 881 * MS);
     assert_eq!(r.fresh_rtt(NodeId(1)), Some(180 * MS));
 }
 
@@ -105,12 +109,36 @@ fn round_trips_converge_and_an_outlier_moves_the_average_by_an_eighth() {
 fn a_round_trip_not_sampled_for_a_while_is_unknown() {
     let mut r = placed(0);
     let mut out = Vec::new();
-    r.handle(Timestamp(5 * MS), from_peer(1, 0, Body::RttReply { sent: MS })).unwrap();
-    r.poll_actions(&mut out);
+    answer(&mut r, 1, MS, 5 * MS);
     assert_eq!(r.fresh_rtt(NodeId(1)), Some(4 * MS));
-    r.handle_timeout(Timestamp(5 * MS + 5 * PROBE_INTERVAL)).unwrap();
+    let later = 5 * MS + 5 * PROBE_INTERVAL;
+    r.handle_timeout(Timestamp(later)).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.fresh_rtt(NodeId(1)), None);
+    // The next sample starts a new average rather than blending into the stale one.
+    answer(&mut r, 1, later, later + 200 * MS);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(200 * MS));
+}
+
+#[test]
+fn only_the_reply_to_the_latest_probe_counts() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    // Unsolicited: no probe went to member 1.
+    r.handle(Timestamp(5 * MS), from_peer(1, 0, Body::RttReply { sent: MS })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), None);
+    answer(&mut r, 1, 10 * MS, 12 * MS);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(2 * MS));
+    // A duplicate of the same reply, arriving much later, is not sampled again.
+    r.handle(Timestamp(900 * MS), from_peer(1, 0, Body::RttReply { sent: 10 * MS })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(2 * MS));
+    // Nor is a late reply to an earlier probe once a newer one is out.
+    r.placement.awaiting.insert(NodeId(1), 20 * MS);
+    r.handle(Timestamp(950 * MS), from_peer(1, 0, Body::RttReply { sent: 15 * MS })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(2 * MS));
 }
 
 #[test]
@@ -130,8 +158,7 @@ fn a_probe_is_answered_and_its_table_kept() {
 fn the_probe_carries_this_members_fresh_round_trips() {
     let mut r = placed(0);
     let mut out = Vec::new();
-    r.handle(Timestamp(5 * MS), from_peer(2, 0, Body::RttReply { sent: MS })).unwrap();
-    r.poll_actions(&mut out);
+    answer(&mut r, 2, MS, 5 * MS);
     apply_writes(&mut r, Timestamp(6 * MS), &[0]);
     let at = r.next_deadline().unwrap();
     r.handle_timeout(at).unwrap();
@@ -170,8 +197,7 @@ fn a_member_without_placement_neither_probes_nor_answers() {
     r.poll_actions(&mut out);
     assert!(rtt_replies(&out).is_empty());
     assert!(r.placement.tables.is_empty());
-    r.handle(Timestamp(3 * MS), from_peer(1, 0, Body::RttReply { sent: MS })).unwrap();
-    r.poll_actions(&mut out);
+    answer(&mut r, 1, MS, 3 * MS);
     assert_eq!(r.fresh_rtt(NodeId(1)), None);
 }
 
