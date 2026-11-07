@@ -33,10 +33,12 @@ pub(super) const ACTIVE_FOR: u64 = 4 * PROBE_INTERVAL;
 pub(super) struct Placement {
     /// Smoothed round trip to each member, in nanoseconds, and when it was last sampled.
     pub(super) rtt: BTreeMap<NodeId, (u64, Timestamp)>,
-    /// The send time of the probe each member has not answered yet. Only its reply counts:
-    /// a duplicate, a late reply to an earlier probe or to a previous incarnation's, or one
-    /// from a member no longer probed would skew the average.
-    pub(super) awaiting: BTreeMap<NodeId, u64>,
+    /// Send times of the probes each member has not answered yet, oldest first, as many as
+    /// fit in `FRESH_FOR` (a round trip longer than `PROBE_INTERVAL` is still measured).
+    /// Only a reply to one of them counts, and it retires the older ones too: a duplicate,
+    /// a reply to a previous incarnation's probe, or one from a member no longer probed
+    /// would skew the average.
+    pub(super) awaiting: BTreeMap<NodeId, Vec<u64>>,
     /// Each member's latest round-trip table, from its probes, and when it arrived.
     pub(super) tables: BTreeMap<NodeId, (Vec<(NodeId, u64)>, Timestamp)>,
     /// Application entries applied, per origin.
@@ -100,7 +102,11 @@ impl Replica {
             members.iter().filter_map(|&m| Some((m, self.fresh_rtt(m)?))).collect();
         let me = self.me;
         for &to in members.iter().filter(|&&m| m != me) {
-            self.placement.awaiting.insert(to, now.0);
+            let sent = self.placement.awaiting.entry(to).or_default();
+            if sent.len() as u64 >= FRESH_FOR / PROBE_INTERVAL {
+                sent.remove(0);
+            }
+            sent.push(now.0);
             self.send(to, Body::RttProbe { sent: now.0, table: table.clone() });
         }
     }
@@ -119,10 +125,12 @@ impl Replica {
     }
 
     pub(super) fn on_rtt_reply(&mut self, from: NodeId, sent: u64) {
-        if !self.cfg.placement || self.placement.awaiting.get(&from) != Some(&sent) || sent > self.now.0 {
+        if !self.cfg.placement || sent > self.now.0 {
             return;
         }
-        self.placement.awaiting.remove(&from);
+        let Some(probes) = self.placement.awaiting.get_mut(&from) else { return };
+        let Some(i) = probes.iter().position(|&s| s == sent) else { return };
+        probes.drain(..=i);
         let sample = self.now.0 - sent;
         let now = self.now;
         // An average not sampled for a while says nothing about the path now: start over.

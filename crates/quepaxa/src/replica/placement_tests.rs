@@ -42,7 +42,7 @@ fn rtt_replies(out: &[Action]) -> Vec<(NodeId, u64)> {
 
 /// Delivers `from`'s answer to a probe `r` sent it at `sent`, arriving at `at`.
 fn answer(r: &mut Replica, from: u32, sent: u64, at: u64) {
-    r.placement.awaiting.insert(NodeId(from), sent);
+    r.placement.awaiting.entry(NodeId(from)).or_default().push(sent);
     r.handle(Timestamp(at), from_peer(from, r.me.0, Body::RttReply { sent })).unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
@@ -134,11 +134,30 @@ fn only_the_reply_to_the_latest_probe_counts() {
     r.handle(Timestamp(900 * MS), from_peer(1, 0, Body::RttReply { sent: 10 * MS })).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.fresh_rtt(NodeId(1)), Some(2 * MS));
-    // Nor is a late reply to an earlier probe once a newer one is out.
-    r.placement.awaiting.insert(NodeId(1), 20 * MS);
-    r.handle(Timestamp(950 * MS), from_peer(1, 0, Body::RttReply { sent: 15 * MS })).unwrap();
+    // Nor is a reply to a probe older than one already answered.
+    r.placement.awaiting.insert(NodeId(1), alloc::vec![920 * MS, 930 * MS]);
+    answer(&mut r, 1, 940 * MS, 941 * MS);
+    r.handle(Timestamp(950 * MS), from_peer(1, 0, Body::RttReply { sent: 920 * MS })).unwrap();
     r.poll_actions(&mut out);
-    assert_eq!(r.fresh_rtt(NodeId(1)), Some(2 * MS));
+    assert_eq!(r.placement.awaiting[&NodeId(1)], [] as [u64; 0]);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(2 * MS - MS / 4 + MS / 8));
+}
+
+#[test]
+fn a_round_trip_longer_than_the_probe_interval_is_measured() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    apply_writes(&mut r, Timestamp(MS), &[1]);
+    // Probes go out every second; member 1 answers the first one 1.5 s later.
+    let first = r.next_deadline().unwrap();
+    r.handle_timeout(first).unwrap();
+    r.poll_actions(&mut out);
+    r.handle_timeout(first.after(PROBE_INTERVAL)).unwrap();
+    r.poll_actions(&mut out);
+    let late = first.after(PROBE_INTERVAL + PROBE_INTERVAL / 2);
+    r.handle(late, from_peer(1, 0, Body::RttReply { sent: first.0 })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(PROBE_INTERVAL + PROBE_INTERVAL / 2));
 }
 
 #[test]
