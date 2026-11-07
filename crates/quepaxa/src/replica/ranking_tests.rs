@@ -405,3 +405,10 @@ fn the_best_member_is_placed_even_if_another_started_the_period() {
     rounds(&mut r, t, SUSTAIN / PROBE_INTERVAL, &wan(), &all);
     assert_eq!(moved(&r).map(|o| o[0]), Some(0));
 }
+
+#[test]
+fn one_write_a_round_reaches_the_floor() {
+    let mut r = leader(0, &[0, 1, 2]);
+    rounds(&mut r, PROBE_INTERVAL, 60, &rows(&three(50)), &[(1, 1)]);
+    assert_eq!(r.placement.rates[&NodeId(1)], 8);
+}

@@ -40,10 +40,13 @@ impl Replica {
         for origin in writes.keys() {
             p.rates.entry(*origin).or_default();
         }
-        // Rounded up, so a writer that stopped decays to nothing; one that left no longer
-        // counts.
+        // A writer converges to eight times its writes per round; one that stopped decays
+        // (rounded up) to nothing, and one that left no longer counts.
         p.rates.retain(|origin, rate| {
-            *rate = *rate - rate.div_ceil(8) + writes.get(origin).copied().unwrap_or(0);
+            *rate = match writes.get(origin).copied().unwrap_or(0) {
+                0 => *rate - rate.div_ceil(8),
+                n => *rate - *rate / 8 + n,
+            };
             *rate > 0 && members.contains(origin)
         });
         // A leader that led for a whole hold starts over.
