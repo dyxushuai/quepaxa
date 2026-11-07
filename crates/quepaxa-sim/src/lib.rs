@@ -33,6 +33,7 @@ enum Event {
     Timer { node: usize, generation: u64, at: u64 },
     Restart { node: usize },
     Kill { node: usize },
+    Reorder,
     Tick,
 }
 
@@ -163,6 +164,9 @@ impl Sim {
         if let Some((node, at)) = sim.cfg.kill {
             sim.push(at * MS, Event::Kill { node });
         }
+        if let Some((_, at, _)) = sim.cfg.reorder {
+            sim.push(at * MS, Event::Reorder);
+        }
         for i in 0..sim.nodes.len() {
             if sim.cfg.absent != Some(i) {
                 sim.start(i);
@@ -278,6 +282,7 @@ impl Sim {
                     && n.outstanding.is_empty()
             })
             && self.kv.no_pending_reads()
+            && (self.cfg.reorder.is_none() || self.report.reorder_in_force_us.is_some())
     }
 
     fn config(&mut self, i: usize) -> Config {
@@ -389,6 +394,7 @@ impl Sim {
                 }
             }
             Event::Kill { node } => self.crash(node),
+            Event::Reorder => self.reorder()?,
             Event::Deliver { to, bytes } => {
                 let Some(r) = self.nodes[to].replica.as_mut() else {
                     return Ok(());
@@ -527,6 +533,25 @@ impl Sim {
             }
             Err(quepaxa::Error::ReconfigurationPending | quepaxa::Error::Busy) => {}
             Err(e) => return Err(self.fail(&format!("propose_reconfiguration failed: {e}"))),
+        }
+        self.drain(i);
+        Ok(())
+    }
+
+    /// Proposes the configured leader order for the members in force.
+    fn reorder(&mut self) -> Result<(), String> {
+        let (i, _, order) = self.cfg.reorder.clone().expect("scheduled only when configured");
+        let members = self.members.iter().map(|&m| NodeId(m as u32)).collect();
+        let ids = order.iter().map(|&m| NodeId(m as u32)).collect();
+        let Some(r) = self.nodes[i].replica.as_mut() else {
+            return Err(self.fail(&format!("n{i} is down when the reorder is due")));
+        };
+        match r.propose_reconfiguration(Timestamp(self.now), members, ids) {
+            Ok(id) => {
+                self.nodes[i].changes.insert(id);
+                let _ = writeln!(self.trace, "{} n{i} proposes order {order:?}", self.now);
+            }
+            Err(e) => return Err(self.fail(&format!("reorder failed: {e}"))),
         }
         self.drain(i);
         Ok(())

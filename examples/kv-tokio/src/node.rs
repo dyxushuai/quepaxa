@@ -462,8 +462,8 @@ impl Node {
                     eprintln!("kv-tokio: not a member of epoch {epoch} and no longer needed; exiting");
                     std::process::exit(0);
                 }
-                Action::Dropped { id, .. } => {
-                    self.pending_writes.dropped(id);
+                Action::Dropped { id, reason } => {
+                    self.pending_writes.dropped(id, reason);
                     if let Some((_, r)) = self.reads.remove(&id) {
                         let _ = r.send(Reply::Failed(Failure::Fenced));
                     }

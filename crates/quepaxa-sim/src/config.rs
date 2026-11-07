@@ -38,6 +38,8 @@ pub struct SimConfig {
     /// Probability per tick (per mille) of proposing a new membership of `nodes` replicas
     /// drawn from members and spares.
     pub reconfigure: u32,
+    /// At `.1` virtual ms, replica `.0` proposes the same members with leader order `.2`.
+    pub reorder: Option<(usize, u64, Vec<usize>)>,
     /// Upper bound on one persist's latency.
     pub max_persist_ms: u64,
     /// Replica limit on concurrent slots.
@@ -112,6 +114,7 @@ impl SimConfig {
             silent_leader_takeover: true,
             spares: 0,
             reconfigure: 0,
+            reorder: None,
             max_persist_ms: 5,
             in_flight_slots: 4,
             absent: None,
@@ -162,6 +165,11 @@ pub struct Report {
     pub commits: Vec<(usize, u64, u64)>,
     /// Membership changes applied (by the first replica to apply each).
     pub reconfigurations: u64,
+    /// When any replica first reported the configured reorder decided (virtual microseconds).
+    pub reorder_decided_us: Option<u64>,
+    /// When the agreed log first reached the reorder's first slot: every slot before it is
+    /// agreed and the new order governs the next (virtual microseconds).
+    pub reorder_in_force_us: Option<u64>,
     /// Writes acknowledged while their replica was in a connected majority (R4).
     pub held_writes: u64,
 }

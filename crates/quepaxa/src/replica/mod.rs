@@ -396,11 +396,16 @@ impl Replica {
     /// be a member) and catches up before its first slot. See
     /// [`guide::membership`](crate::guide::membership).
     ///
+    /// A change carries the generation of the leader orders it was computed from. If
+    /// another change or a leader rotation is decided first, every replica ignores it and
+    /// its id is reported as [`Action::Dropped`] with [`DropReason::Superseded`].
+    /// [`DropReason::Unresolved`] means this replica learned it from a snapshot and cannot
+    /// tell.
+    ///
     /// # Errors
     ///
     /// - [`Error::ReconfigurationPending`] while a change (decided, or proposed here) has
-    ///   not taken effect. A concurrent change proposed elsewhere and decided after another
-    ///   is ignored by every replica.
+    ///   not taken effect.
     /// - [`Error::InvalidConfig`] if `members` is empty, has duplicates or more than 1024
     ///   ids, or `leader_order` is not a permutation of `members`.
     /// - As [`Replica::propose`] otherwise.
@@ -427,7 +432,8 @@ impl Replica {
         if self.schedule.epoch().1 > self.committed || proposed_here {
             return Err(Error::ReconfigurationPending);
         }
-        self.enqueue(now, crate::schedule::encode_order(&order), Kind::Reconfigure)
+        let change = crate::schedule::encode_change(self.schedule.generation(), &order);
+        self.enqueue(now, change, Kind::Reconfigure)
     }
 
     fn enqueue(&mut self, now: Timestamp, payload: Bytes, kind: Kind) -> Result<ProposalId, Error> {

@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/schedule.rs b/crates/quepaxa/src/schedule.rs
+--- a/crates/quepaxa/src/schedule.rs
++++ b/crates/quepaxa/src/schedule.rs
+@@ -151,7 +151,7 @@ impl Schedule {
+         // A rotation counted in this slot advanced the generation after the change was
+         // proposed, so no replica can carry it; refusing keeps the history ascending.
+         let rotated_here = self.history.last().is_some_and(|(f, _)| *f >= from);
+-        if base != self.generation || slot.0 < self.epoch_from || rotated_here {
++        if (base != self.generation && false) || slot.0 < self.epoch_from || rotated_here {
+             return None;
+         }
+         self.history.push((from, order));

@@ -137,6 +137,31 @@ p99 reached 6-17 s. The library defaults (50 ms retransmit, 1 s hedge cap) are t
 LAN: on a WAN set `retransmit_interval` above the round trip to the farthest member of a
 majority, and `hedge_max` above the slowest client commit path.
 
+## Order change in time (`cargo test --release -p quepaxa-sim --test order_change -- --ignored --nocapture`)
+
+A membership or leader-order change decided in slot `s` governs slots from `s + 64` on
+(`LAG`). How long that takes in time (#150): the leader (replica 0) proposes the same members
+with another leader first while clients write at a fixed rate spread over all five
+replicas. Measured from the first replica to report the change decided to the agreed log
+reaching its first slot, 3 seeds (min-max), fault-free. WAN: the placement above with
+us-east leading, WAN timers. LAN: 1-2 ms one-way, the library's default timers (50 ms
+retransmit, 1 s hedge cap). Both run 8 slots in flight. The decision itself takes one
+commit (80-130 ms on the WAN, under 10 ms on the LAN).
+
+| Writes/s | WAN | LAN |
+|---|---|---|
+| idle | 3.5-3.6 s | 189-230 ms |
+| 1 | 3.5-4.2 s | 132-208 ms |
+| 10 | 3.2-3.4 s | 142-214 ms |
+| 100 | 0.76-0.85 s | 173-185 ms |
+| 1,000 | 0.67-0.71 s | 64-69 ms |
+
+With few writes the leader fills the 64 slots with empty batches, a window of in-flight
+slots at a time after a hedge delay; from about 100 writes/s writes fill them sooner. Even
+idle, a change takes effect within about 4 s: over 40 times shorter than a sustained period
+of about 3 minutes and over 140 times shorter than a hold of about 10 minutes after an
+order change, so `LAG` does not constrain those defaults.
+
 ## Against etcd
 
 The [follow-up at `617ee8f`](optimize/etcd-degraded-leader-report.md) excludes

@@ -10,7 +10,7 @@ use crate::schedule::Schedule;
 use crate::types::NodeId;
 
 /// Only this version is read; earlier ones are rejected (no compatibility before 1.0).
-const VERSION: u8 = 4;
+const VERSION: u8 = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CoreState {

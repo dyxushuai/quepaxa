@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use bytes::Bytes;
-use quepaxa::{Action, Config, Input, NodeId, PersistId, ProposalId, Replica, Timestamp};
+use quepaxa::{Action, Config, DropReason, Input, NodeId, PersistId, ProposalId, Replica, Timestamp};
 
 /// Bounds of one exploration.
 #[derive(Clone, Debug)]
@@ -479,6 +479,21 @@ impl State {
                     self.ledger.commit(slot.0, &entries)?;
                 }
                 Action::Committed { id, .. } if self.change == Some((i, id)) => self.change = None,
+                // A copy proposed again after a crash loses to the original: the operator
+                // checks that the members in force are the ones it wanted.
+                Action::Dropped { id, reason: DropReason::Superseded } if self.change == Some((i, id)) => {
+                    let mut want: Vec<u32> = self.reconfigure.iter().flatten().map(|m| m.0).collect();
+                    want.sort_unstable();
+                    let mut have =
+                        self.epochs.values().next_back().map(|(_, m)| m.clone()).unwrap_or_default();
+                    have.sort_unstable();
+                    if have != want {
+                        return Err(format!(
+                            "n{i}'s change was superseded by members {have:?}, not {want:?}"
+                        ));
+                    }
+                    self.change = None;
+                }
                 Action::Committed { id, slot } => {
                     self.nodes[i].acked.insert(id);
                     let payload = self.nodes[i].proposed.get(&id).cloned().unwrap_or_default();

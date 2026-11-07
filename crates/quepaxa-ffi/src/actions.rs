@@ -111,6 +111,8 @@ pub unsafe extern "C" fn qpx_poll(h: *mut qpx_replica, out: *mut qpx_action) -> 
                 v.id = id.0;
                 v.flags = match reason {
                     DropReason::Fenced => QPX_DROP_FENCED,
+                    DropReason::Superseded => QPX_DROP_SUPERSEDED,
+                    DropReason::Unresolved => QPX_DROP_UNRESOLVED,
                     _ => 0,
                 };
             }

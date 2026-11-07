@@ -7,8 +7,12 @@
 (* proposer computes for it, and the model checks the rules around that:  *)
 (*                                                                         *)
 (* - A change decided in slot t installs new members from slot t + LAG,   *)
-(*   unless an earlier change has not taken effect yet (then it is        *)
-(*   ignored). A replica drives only slots below its commit index + LAG,  *)
+(*   unless an earlier change has not taken effect yet, or another change *)
+(*   was installed after the generation it was computed from (then it is  *)
+(*   ignored). FreshInstalls: every installed change was computed from    *)
+(*   the generation in force at its slot, so none built on an outdated    *)
+(*   configuration undoes a newer one. A replica drives only slots below  *)
+(*   its commit index + LAG,                                              *)
 (*   computing their members from the log prefix it knows.                *)
 (*   ViewAgree: every replica that may drive a slot computes its true     *)
 (*   members, so all its proposers use the same recorders.                *)
@@ -34,7 +38,8 @@
 (* back; that is not covered.                                             *)
 (*                                                                         *)
 (* Not modelled: what happens inside a slot (QuePaxa.tla), leader         *)
-(* rotation, snapshots, liveness. run.sh checks that seeded bugs in each  *)
+(* rotation (it advances the generation like a change; here only changes *)
+(* do), snapshots, liveness. run.sh checks that seeded bugs in each  *)
 (* rule are found; MembershipProof.tla proves the rules.                  *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
@@ -46,11 +51,11 @@ CONSTANTS Replicas,     \* e.g. 1..4
           LAG           \* slots between deciding a change and its effect
 
 Slots == 0..N-1
-\* A slot's value: nothing decided yet, a write, or a change to members m.
-None == [k |-> "none", m |-> {}]
-Write == [k |-> "write", m |-> {}]
-Change(S) == [k |-> "change", m |-> S]
-Values == {Write} \cup {Change(S) : S \in Changes}
+\* A slot's value: nothing decided yet, a write, or a change to members m computed from
+\* generation b (the number of changes installed when it was proposed).
+None == [k |-> "none", m |-> {}, b |-> 0]
+Write == [k |-> "write", m |-> {}, b |-> 0]
+Values == {Write} \cup [k : {"change"}, m : Changes, b : 0..N]
 
 VARIABLES decided,  \* decided[s]: the value of slot s, or None
           log,      \* log[r]: slots r knows decided (memory)
@@ -64,15 +69,15 @@ Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 \* Length of the contiguous prefix of slots in L (the commit index).
 Prefix(L) == CHOOSE n \in 0..N : (\A t \in 0..n-1 : t \in L) /\ (n = N \/ n \notin L)
 
-Start == [cur |-> InitMembers, nxt |-> InitMembers, from |-> 0]
+Start == [cur |-> InitMembers, nxt |-> InitMembers, from |-> 0, gen |-> 0]
 
 \* Slot t folded into the schedule st, where val[t] is what the slot holds as far as the
 \* folding replica knows (Write if it does not know it).
 FoldStep(st, t, val) ==
     LET act == IF st.from <= t THEN [st EXCEPT !.cur = st.nxt] ELSE st
         v == val[t]
-    IN IF v.k = "change" /\ act.from <= t
-       THEN [act EXCEPT !.nxt = v.m, !.from = t + LAG]
+    IN IF v.k = "change" /\ act.from <= t /\ v.b = act.gen
+       THEN [act EXCEPT !.nxt = v.m, !.from = t + LAG, !.gen = @ + 1]
        ELSE act
 
 \* The schedule after folding slots 0..n-1 of val (a recursive function, which TLAPS can
@@ -102,8 +107,9 @@ Init ==
     /\ dlog = [r \in Replicas |-> {}]
     /\ retired = {}
 
-\* r drives s to v with a live majority of the members it computes for s. A change never
-\* names a retired replica: the operator does not add back a replica that shut down.
+\* r drives s to v with a live majority of the members it computes for s. A change carries
+\* a generation r has seen, possibly an outdated one (it was proposed earlier). A change
+\* never names a retired replica: the operator does not add back a replica that shut down.
 Decide(r, s, v) ==
     LET M == MembersAt(s, Known(r))
     IN /\ CanDrive(r, s)
@@ -111,6 +117,7 @@ Decide(r, s, v) ==
        /\ r \in M
        /\ \E Q \in Maj(M) : Q \cap retired = {}
        /\ v.m \cap retired = {}
+       /\ v.b <= Latest(r).gen
        /\ decided' = [decided EXCEPT ![s] = v]
        /\ log' = [log EXCEPT ![r] = @ \cup {s}]
        /\ UNCHANGED <<dlog, retired>>
@@ -168,6 +175,12 @@ Spec == Init /\ [][Next]_vars
 ViewAgree ==
     \A r \in Replicas, s \in Slots :
         CanDrive(r, s) => MembersAt(s, Known(r)) = MembersAt(s, Truth)
+
+\* A change installs (its epoch starts LAG slots later) only when computed from the
+\* generation in force at its slot.
+FreshInstalls ==
+    \A t \in Slots : Folded(Truth)[t + 1].from = t + LAG =>
+        Truth[t].k = "change" /\ Truth[t].b = Folded(Truth)[t].gen
 
 \* The members in force after the last slot, and those of a change still pending.
 Current == Folded(Truth)[N]

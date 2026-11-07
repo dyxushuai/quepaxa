@@ -17,7 +17,7 @@ use bytes::BufMut;
 
 use crate::codec::{DecodeError, Reader};
 
-use crate::types::{NodeId, ProposalId, Slot};
+use crate::types::{NodeId, Slot};
 
 /// Slots between deciding a schedule change and it taking effect.
 pub(crate) const LAG: u64 = 64;
@@ -26,12 +26,11 @@ const ROTATE_AFTER: u32 = 8;
 /// Upper bound on members in one order (keeps decoding allocations bounded).
 pub(crate) const MAX_MEMBERS: usize = 1024;
 
-/// Identity of a proposed membership change: `(origin, incarnation, id)`.
-pub(crate) type ChangeKey = (NodeId, u64, ProposalId);
-
-/// Encodes a membership change's new order (members, preferred leaders first).
-pub(crate) fn encode_order(order: &[NodeId]) -> bytes::Bytes {
-    let mut out = Vec::with_capacity(4 + 4 * order.len());
+/// Encodes a membership change: the generation it was computed from (see
+/// [`Schedule::generation`]) and the new order (members, preferred leaders first).
+pub(crate) fn encode_change(base: u64, order: &[NodeId]) -> bytes::Bytes {
+    let mut out = Vec::with_capacity(12 + 4 * order.len());
+    out.put_u64_le(base);
     out.put_u32_le(order.len() as u32);
     for n in order {
         out.put_u32_le(n.0);
@@ -39,9 +38,11 @@ pub(crate) fn encode_order(order: &[NodeId]) -> bytes::Bytes {
     bytes::Bytes::from(out)
 }
 
-/// Decodes an order written by [`encode_order`]: non-empty, without duplicates.
-pub(crate) fn decode_order(b: &bytes::Bytes) -> Option<Vec<NodeId>> {
+/// Decodes a change written by [`encode_change`]: its base generation and an order that is
+/// non-empty and without duplicates.
+pub(crate) fn decode_change(b: &bytes::Bytes) -> Option<(u64, Vec<NodeId>)> {
     let mut r = Reader::new(b);
+    let base = r.u64().ok()?;
     let len = r.u32().ok()? as usize;
     if len == 0 || len > MAX_MEMBERS {
         return None;
@@ -55,7 +56,7 @@ pub(crate) fn decode_order(b: &bytes::Bytes) -> Option<Vec<NodeId>> {
         order.push(n);
     }
     r.finish().ok()?;
-    Some(order)
+    Some((base, order))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,9 +70,11 @@ pub(crate) struct Schedule {
     /// Membership epoch in force from `epoch_from` (0: the configured members).
     epoch: u64,
     epoch_from: u64,
-    /// Changes already applied or ignored, so another copy decided later (hedging may
-    /// include one twice) is ignored too and never reverts a newer membership.
-    settled: Vec<ChangeKey>,
+    /// Changes applied plus rotations counted: every change to the orders this schedule
+    /// will hand out. A change computed from an older generation is ignored, so neither a
+    /// late copy of a change (hedging may include one twice) nor a change built on an
+    /// outdated order can undo a newer change or rotation.
+    generation: u64,
 }
 
 impl Schedule {
@@ -90,7 +93,7 @@ impl Schedule {
             quiet_until: 0,
             epoch: 0,
             epoch_from: 0,
-            settled: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -133,26 +136,27 @@ impl Schedule {
         (self.epoch, self.epoch_from)
     }
 
-    /// Applies membership change `key`, decided in `slot`: from `slot + LAG` on, `order`
-    /// (the new members, preferred leaders first) leads. Returns the new epoch and its first
-    /// slot, or `None` if ignored because another change has not taken effect yet or this
-    /// one was already applied or ignored. Feed it in slot order, after `observe` for the
-    /// same slot.
-    pub fn reconfigure(&mut self, slot: Slot, key: ChangeKey, order: Vec<NodeId>) -> Option<(u64, u64)> {
-        if self.settled.contains(&key) {
-            return None;
-        }
-        self.settled.push(key);
-        if slot.0 < self.epoch_from {
-            return None;
-        }
+    /// The generation a change proposed now must carry to be applied.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Applies a membership change computed at generation `base`, decided in `slot`: from
+    /// `slot + LAG` on, `order` (the new members, preferred leaders first) leads. Returns the
+    /// new epoch and its first slot, or `None` if ignored because another change has not
+    /// taken effect yet, or because a change or rotation came after the one it was computed
+    /// from. Feed it in slot order, after `observe` for the same slot.
+    pub fn reconfigure(&mut self, slot: Slot, base: u64, order: Vec<NodeId>) -> Option<(u64, u64)> {
         let from = slot.0 + LAG;
-        // A rotation counted in this very slot is superseded.
-        if self.history.last().is_some_and(|(f, _)| *f == from) {
-            self.history.pop();
+        // A rotation counted in this slot advanced the generation after the change was
+        // proposed, so no replica can carry it; refusing keeps the history ascending.
+        let rotated_here = self.history.last().is_some_and(|(f, _)| *f >= from);
+        if base != self.generation || slot.0 < self.epoch_from || rotated_here {
+            return None;
         }
         self.history.push((from, order));
         self.epoch += 1;
+        self.generation += 1;
         self.epoch_from = from;
         self.streak = 0;
         self.quiet_until = from;
@@ -175,12 +179,7 @@ impl Schedule {
     pub fn encode(&self, out: &mut Vec<u8>) {
         out.put_u64_le(self.epoch);
         out.put_u64_le(self.epoch_from);
-        out.put_u32_le(self.settled.len() as u32);
-        for (origin, incarnation, id) in &self.settled {
-            out.put_u32_le(origin.0);
-            out.put_u64_le(*incarnation);
-            out.put_u64_le(id.0);
-        }
+        out.put_u64_le(self.generation);
         out.put_u32_le(self.streak);
         out.put_u64_le(self.quiet_until);
         out.put_u32_le(self.history.len() as u32);
@@ -198,12 +197,9 @@ impl Schedule {
     pub fn decode(r: &mut Reader<'_>, members: &[NodeId]) -> Result<Self, DecodeError> {
         let epoch = r.u64()?;
         let epoch_from = r.u64()?;
-        let n = r.u32()? as usize;
-        let mut settled = Vec::new();
-        for _ in 0..n {
-            settled.push((NodeId(r.u32()?), r.u64()?, ProposalId(r.u64()?)));
-        }
-        if (settled.len() as u64) < epoch {
+        let generation = r.u64()?;
+        // Every epoch came from an applied change, which advanced the generation.
+        if generation < epoch {
             return Err(DecodeError::BadTag);
         }
         let streak = r.u32()?;
@@ -234,22 +230,34 @@ impl Schedule {
         if history.is_empty() || !history.is_sorted_by_key(|(f, _)| *f) {
             return Err(DecodeError::BadTag);
         }
-        Ok(Self { history, streak, quiet_until, epoch, epoch_from, settled })
+        Ok(Self { history, streak, quiet_until, epoch, epoch_from, generation })
     }
 
     /// Whether this could be the schedule after feeding every slot below `next`: the
-    /// invariant verification/verus/schedule.rs proves the window rule under. Entries start
-    /// in increasing slots, the first at or before the last slot fed and every one at most
-    /// `LAG` after it.
+    /// invariant verification/verus/schedule.rs proves the window rule and the generation
+    /// bound under. Entries start in increasing slots, the first at or before the last slot
+    /// fed and every one (and the quiet and epoch bounds) at most `LAG` after it; each bump
+    /// of the generation moved one of those bounds `LAG` on, so it cannot overflow.
     pub fn fits(&self, next: u64) -> bool {
         let increasing = self.history.windows(2).all(|w| w[0].0 < w[1].0);
+        let bumps = u128::from(self.generation) * u128::from(LAG);
+        let bounded = bumps <= u128::from(self.quiet_until) + u128::from(self.epoch_from);
         match next.checked_sub(1) {
             Some(fed) => {
+                let reach = fed.saturating_add(LAG);
                 increasing
+                    && bounded
                     && self.history[0].0 <= fed
-                    && self.history.iter().all(|(from, _)| *from <= fed.saturating_add(LAG))
+                    && self.history.iter().all(|(from, _)| *from <= reach)
+                    && self.quiet_until <= reach
+                    && self.epoch_from <= reach
             }
-            None => self.history.len() == 1 && self.history[0].0 == 0,
+            None => {
+                self.history.len() == 1
+                    && self.history[0].0 == 0
+                    && self.quiet_until == 0
+                    && self.epoch_from == 0
+            }
         }
     }
 
@@ -268,6 +276,7 @@ impl Schedule {
             order.rotate_left(1);
             let from = slot.0 + LAG;
             self.history.push((from, order));
+            self.generation += 1;
             self.streak = 0;
             self.quiet_until = from;
             self.prune(slot);
@@ -329,7 +338,7 @@ mod tests {
             let mut out = Vec::new();
             out.put_u64_le(0);
             out.put_u64_le(0);
-            out.put_u32_le(0);
+            out.put_u64_le(0);
             out.put_u32_le(0);
             out.put_u64_le(0);
             out.put_u32_le(froms.len() as u32);
@@ -347,14 +356,10 @@ mod tests {
         assert!(decode(&encoded(&[9, 0])).is_err());
     }
 
-    fn key(id: u64) -> ChangeKey {
-        (NodeId(0), 1, ProposalId(id))
-    }
-
     #[test]
     fn a_membership_change_takes_effect_a_window_later() {
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
-        assert_eq!(s.reconfigure(Slot(10), key(1), ids(&[3, 1, 2])), Some((1, 10 + LAG)));
+        assert_eq!(s.reconfigure(Slot(10), 0, ids(&[3, 1, 2])), Some((1, 10 + LAG)));
         assert_eq!(s.members(Slot(10 + LAG - 1)), ids(&[0, 1, 2]));
         assert_eq!((s.members(Slot(10 + LAG)), s.leader(Slot(10 + LAG))), (&ids(&[3, 1, 2])[..], NodeId(3)));
         assert!(s.knows(NodeId(3)) && s.knows(NodeId(0)));
@@ -364,57 +369,86 @@ mod tests {
     #[test]
     fn one_change_at_a_time_and_never_twice() {
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
-        s.reconfigure(Slot(10), key(1), ids(&[1, 2, 3])).unwrap();
-        assert_eq!(s.reconfigure(Slot(11), key(2), ids(&[0, 1])), None, "the first is still pending");
-        assert_eq!(s.reconfigure(Slot(10 + LAG), key(1), ids(&[1, 2, 3])), None, "a late duplicate");
-        assert_eq!(
-            s.reconfigure(Slot(10 + LAG), key(2), ids(&[0, 1])),
-            None,
-            "a late copy of an ignored one"
-        );
-        assert_eq!(s.reconfigure(Slot(10 + LAG), key(3), ids(&[0, 1])), Some((2, 10 + 2 * LAG)));
+        s.reconfigure(Slot(10), 0, ids(&[1, 2, 3])).unwrap();
+        assert_eq!(s.reconfigure(Slot(11), 1, ids(&[0, 1])), None, "the first is still pending");
+        assert_eq!(s.reconfigure(Slot(10 + LAG), 0, ids(&[1, 2, 3])), None, "a late duplicate");
+        assert_eq!(s.reconfigure(Slot(10 + LAG), 1, ids(&[0, 1])), Some((2, 10 + 2 * LAG)));
         assert_eq!(s.epoch(), (2, 10 + 2 * LAG));
     }
 
     #[test]
-    fn a_change_supersedes_a_rotation_counted_in_the_same_slot() {
+    fn a_change_computed_before_a_newer_one_never_undoes_it() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2, 4]));
+        // B is computed at generation 0, A removes 4, and B is decided only once A is in
+        // force: it would put 4 back.
+        s.reconfigure(Slot(10), 0, ids(&[0, 1, 2])).unwrap();
+        assert_eq!(s.reconfigure(Slot(10 + LAG + 5), 0, ids(&[0, 1, 2, 4])), None, "a stale change");
+        assert_eq!(s.members(Slot(10 + 3 * LAG)), ids(&[0, 1, 2]));
+        assert_eq!(s.epoch(), (1, 10 + LAG));
+    }
+
+    #[test]
+    fn a_change_computed_before_a_rotation_is_ignored() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2]));
+        let base = s.generation();
+        for slot in 0..8 {
+            s.observe(Slot(slot), NodeId(1));
+        }
+        assert_eq!(s.generation(), base + 1, "the rotation counts");
+        assert_eq!(s.reconfigure(Slot(8 + LAG), base, ids(&[0, 1, 2])), None);
+        assert_eq!(s.leader(Slot(8 + LAG)), NodeId(1));
+        assert!(s.reconfigure(Slot(8 + LAG), base + 1, ids(&[0, 1, 2])).is_some());
+    }
+
+    #[test]
+    fn a_change_decided_in_the_slot_that_counts_a_rotation_is_ignored() {
+        // Its proposer computed it before learning that slot, so before the rotation.
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
         for slot in 0..8 {
             s.observe(Slot(slot), NodeId(1));
         }
-        s.reconfigure(Slot(7), key(1), ids(&[2, 0])).unwrap();
-        assert_eq!(s.members(Slot(7 + LAG)), ids(&[2, 0]));
-        // Rotations resume in the new epoch, counted from its own leader.
-        for slot in (7 + LAG)..(7 + LAG + 8) {
+        assert_eq!(s.reconfigure(Slot(7), 0, ids(&[2, 0])), None);
+        // Not even one carrying the new generation, which no proposer could have known.
+        assert_eq!(s.reconfigure(Slot(7), 1, ids(&[2, 0])), None);
+        assert_eq!(s.members(Slot(7 + LAG)), ids(&[1, 2, 0]));
+        // Rotations resume once the change after it takes effect, counted from its leader.
+        s.reconfigure(Slot(8 + LAG), 1, ids(&[2, 0])).unwrap();
+        for slot in (8 + 2 * LAG)..(8 + 2 * LAG + 8) {
             s.observe(Slot(slot), NodeId(0));
         }
-        assert_eq!(s.leader(Slot(7 + 2 * LAG + 7)), NodeId(0));
+        assert_eq!(s.leader(Slot(8 + 3 * LAG + 7)), NodeId(0));
     }
 
     #[test]
     fn epochs_round_trip() {
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
-        s.reconfigure(Slot(3), key(9), ids(&[4, 5, 6, 7])).unwrap();
+        s.reconfigure(Slot(3), 0, ids(&[4, 5, 6, 7])).unwrap();
         let mut out = Vec::new();
         s.encode(&mut out);
         let b = bytes::Bytes::from(out);
-        assert_eq!(Schedule::decode(&mut Reader::new(&b), &ids(&[0, 1, 2])), Ok(s));
+        let mut restored = Schedule::decode(&mut Reader::new(&b), &ids(&[0, 1, 2]));
+        assert_eq!(restored, Ok(s));
+        // Restored between the change's decision and its effect, it still ignores a copy.
+        let restored = restored.as_mut().unwrap();
+        assert_eq!(restored.reconfigure(Slot(3 + LAG), 0, ids(&[4, 5, 6, 7])), None);
+        assert_eq!(restored.epoch(), (1, 3 + LAG));
     }
 
     #[test]
-    fn orders_decode_only_when_well_formed() {
-        assert_eq!(decode_order(&encode_order(&ids(&[2, 0]))), Some(ids(&[2, 0])));
-        assert_eq!(decode_order(&encode_order(&[])), None);
-        assert_eq!(decode_order(&encode_order(&ids(&[1, 1]))), None);
-        assert_eq!(decode_order(&bytes::Bytes::from_static(&[1, 0, 0, 0])), None);
+    fn changes_decode_only_when_well_formed() {
+        assert_eq!(decode_change(&encode_change(3, &ids(&[2, 0]))), Some((3, ids(&[2, 0]))));
+        assert_eq!(decode_change(&encode_change(0, &[])), None);
+        assert_eq!(decode_change(&encode_change(0, &ids(&[1, 1]))), None);
+        assert_eq!(decode_change(&bytes::Bytes::from_static(&[0; 8])), None);
+        assert_eq!(decode_change(&bytes::Bytes::from_static(&[1, 0, 0, 0, 5, 0, 0, 0])), None);
     }
 
     #[test]
-    fn orders_are_bounded_in_size() {
+    fn changes_are_bounded_in_size() {
         let at_most = (0..MAX_MEMBERS as u32).map(NodeId).collect::<Vec<_>>();
-        assert!(decode_order(&encode_order(&at_most)).is_some());
+        assert!(decode_change(&encode_change(0, &at_most)).is_some());
         let too_many = (0..=MAX_MEMBERS as u32).map(NodeId).collect::<Vec<_>>();
-        assert_eq!(decode_order(&encode_order(&too_many)), None);
+        assert_eq!(decode_change(&encode_change(0, &too_many)), None);
     }
 
     #[test]
@@ -431,12 +465,7 @@ mod tests {
         let mut out = Vec::new();
         out.put_u64_le(epoch);
         out.put_u64_le(0);
-        out.put_u32_le(epoch as u32);
-        for k in 0..epoch {
-            out.put_u32_le(0);
-            out.put_u64_le(1);
-            out.put_u64_le(k);
-        }
+        out.put_u64_le(epoch);
         out.put_u32_le(0);
         out.put_u64_le(0);
         out.put_u32_le(1);
@@ -461,10 +490,9 @@ mod tests {
         let max: Vec<u32> = (0..MAX_MEMBERS as u32).collect();
         let over: Vec<u32> = (0..=MAX_MEMBERS as u32).collect();
         assert!(decode(1, &max) && !decode(1, &over));
-        // An epoch needs at least as many settled changes.
+        // An epoch needs a generation at least as large.
         let mut short = encoded(2, &[5]).to_vec();
-        short[16..20].copy_from_slice(&1u32.to_le_bytes());
-        short.drain(20..40);
+        short[16..24].copy_from_slice(&1u64.to_le_bytes());
         let short = bytes::Bytes::from(short);
         assert!(Schedule::decode(&mut Reader::new(&short), &members).is_err());
     }
@@ -497,7 +525,20 @@ mod tests {
             ..s.clone()
         };
         assert!(!tied.fits(10));
-        let far = Schedule { history: alloc::vec![(0, ids(&[0, 1, 2])), (10 + LAG, ids(&[1, 2, 0]))], ..s };
+        let far =
+            Schedule { history: alloc::vec![(0, ids(&[0, 1, 2])), (10 + LAG, ids(&[1, 2, 0]))], ..s.clone() };
         assert!(!far.fits(10) && far.fits(11));
+    }
+
+    #[test]
+    fn fits_bounds_the_generation_by_the_slots_fed() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2]));
+        s.reconfigure(Slot(3), 0, ids(&[0, 1])).unwrap();
+        assert!(s.fits(4));
+        // A generation no run of slots could reach would overflow at the next change.
+        let forged = Schedule { generation: u64::MAX, ..s.clone() };
+        assert!(!forged.fits(4) && !forged.fits(u64::MAX));
+        let quiet_ahead = Schedule { quiet_until: 4 + LAG, ..s };
+        assert!(!quiet_ahead.fits(4) && quiet_ahead.fits(5));
     }
 }

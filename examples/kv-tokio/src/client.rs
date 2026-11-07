@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use quepaxa::{NodeId, ProposalId};
+use quepaxa::{DropReason, NodeId, ProposalId};
 use tokio::sync::oneshot;
 
 use crate::ops::{Applied, RangeReq, Request, Response};
@@ -39,6 +39,10 @@ pub enum Failure {
     OutcomeUnknown,
     /// The replica fenced; the read was not served.
     Fenced,
+    /// A membership change was ignored: another change or a rotation came first.
+    Superseded,
+    /// A membership change was decided, but a snapshot hid whether it was applied.
+    Unresolved,
 }
 
 /// The line protocol's reply to a request.
@@ -57,6 +61,8 @@ pub fn line(reply: Reply) -> String {
         Reply::Failed(Failure::Refused(e)) => format!("ERR {e}"),
         Reply::Failed(Failure::OutcomeUnknown) => "ERR outcome unknown (replica fenced)".to_owned(),
         Reply::Failed(Failure::Fenced) => "ERR replica fenced".to_owned(),
+        Reply::Failed(Failure::Superseded) => "ERR change superseded; propose it again".to_owned(),
+        Reply::Failed(Failure::Unresolved) => "ERR change decided; check the members in force".to_owned(),
     }
 }
 
@@ -96,10 +102,15 @@ impl Pending {
         }
     }
 
-    pub fn dropped(&mut self, id: ProposalId) {
+    pub fn dropped(&mut self, id: ProposalId, reason: DropReason) {
         self.results.remove(&id);
         if let Some((_, reply)) = self.writes.remove(&id) {
-            let _ = reply.send(Reply::Failed(Failure::OutcomeUnknown));
+            let failure = match reason {
+                DropReason::Superseded => Failure::Superseded,
+                DropReason::Unresolved => Failure::Unresolved,
+                _ => Failure::OutcomeUnknown,
+            };
+            let _ = reply.send(Reply::Failed(failure));
         }
     }
 }
@@ -155,9 +166,20 @@ mod tests {
         let mut p = Pending::default();
         let mut rx = waiting(&mut p, 2, b"req");
         p.applied(3, ProposalId(2), b"req", put_result(1));
-        p.dropped(ProposalId(2));
+        p.dropped(ProposalId(2), DropReason::Fenced);
         assert_eq!(rx.try_recv(), Ok(Reply::Failed(Failure::OutcomeUnknown)));
         assert!(p.writes.is_empty() && p.results.is_empty());
+    }
+
+    #[test]
+    fn an_ignored_change_reports_why() {
+        let mut p = Pending::default();
+        let mut superseded = waiting(&mut p, 2, b"");
+        let mut unresolved = waiting(&mut p, 3, b"");
+        p.dropped(ProposalId(2), DropReason::Superseded);
+        p.dropped(ProposalId(3), DropReason::Unresolved);
+        assert_eq!(superseded.try_recv(), Ok(Reply::Failed(Failure::Superseded)));
+        assert_eq!(unresolved.try_recv(), Ok(Reply::Failed(Failure::Unresolved)));
     }
 
     #[test]

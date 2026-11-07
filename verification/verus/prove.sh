@@ -4,7 +4,8 @@
 # never lets a send or effect overtake the writes it depends on; commit-time deduplication
 # (dedup.rs, from crates/quepaxa/src/dedup.rs) applies an entry at most once; the leader
 # schedule (schedule.rs, from crates/quepaxa/src/schedule.rs) never changes the order of a
-# slot within LAG of the slots fed. Uses Verus, fetched
+# slot within LAG of the slots fed, and a change computed from an older generation installs
+# nothing. Uses Verus, fetched
 # (pinned, checksum verified) into target/verus-<digest>, and the Rust toolchain that
 # release requires (installed with rustup if missing). Linux x86_64 only.
 #
@@ -54,6 +55,10 @@ bugs=(
   schedule rotation-takes-effect-early   '0,/let from = slot \+ LAG;/s//let from = slot + LAG - 1;/'
   schedule change-takes-effect-early     '/fn reconfigure/,$ s/let from = slot \+ LAG;/let from = slot + LAG - 1;/'
   schedule prune-drops-the-window        's/let keep_from = self\.order_index\(slot\);/let keep_from = self.order_index(slot + LAG);/'
+  schedule stale-change-applied         's/if base != self\.generation \|\| /if /'
+  schedule rotation-not-counted         '0,/self\.generation = self\.generation \+ 1;/s///'
+  schedule change-not-counted           '/fn reconfigure/,$ s/self\.generation = self\.generation \+ 1;//'
+  schedule change-in-a-rotated-slot     's/ \|\| rotated_here//'
 )
 mkdir -p "$work"
 status=0

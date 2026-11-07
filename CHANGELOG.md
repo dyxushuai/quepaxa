@@ -3,6 +3,16 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- `quepaxa` (breaking, wire and storage): a membership change carries the generation of
+  the leader orders it was computed from (changes applied plus rotations counted), and
+  every replica ignores one whose generation is out of date. Before, a change decided
+  after another took effect could undo it. The ignored change's proposer gets
+  `Dropped { reason: Superseded }` (C: `QPX_DROP_SUPERSEDED`, ABI 0.9) instead of
+  `Committed`; one resolved by a snapshot gets `Unresolved` (`QPX_DROP_UNRESOLVED`).
+  Snapshots no longer keep every change's id; older snapshots are rejected.
+
 ## 0.6.0 — 2026-11-06
 
 Recovery from a degraded leader, measured against etcd v3.7.2 on three and five members and

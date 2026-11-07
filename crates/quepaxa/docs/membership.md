@@ -36,9 +36,15 @@ empty batches like stalled slots (the leader first, the others if it is down), s
 takes effect without traffic.
 
 - **One change at a time.** Proposing while a change has not taken effect returns
-  [`ReconfigurationPending`](crate::Error::ReconfigurationPending). Of two changes proposed
-  concurrently on different replicas, the one decided first wins; every replica ignores the
-  other (its proposer still sees `Committed`, but no `Reconfigured` follows).
+  [`ReconfigurationPending`](crate::Error::ReconfigurationPending). A change carries the
+  generation of the leader orders it was computed from (changes applied plus leader
+  rotations). Every replica ignores a change whose generation is out of date when it is
+  decided, even long after the previous change took effect, so of two changes proposed
+  concurrently the one decided first wins and the other can never undo it. Its proposer
+  sees [`Dropped`](crate::Action::Dropped) with
+  [`Superseded`](crate::DropReason::Superseded); propose it again against the members in
+  force. A replica that learned the slot from a snapshot cannot tell whether the change
+  applied and reports [`Unresolved`](crate::DropReason::Unresolved) instead.
 - **Adding a replica.** Start it with the cluster's *original* [`Config`](crate::Config) — its
   own id need not be a member. Once the change is decided, members also send it their
   decisions, so it catches up (in bulk, or from a snapshot) during the window and votes

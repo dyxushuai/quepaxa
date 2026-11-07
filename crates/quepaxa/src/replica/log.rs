@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 
 use super::{Decision, Effect, Replica};
-use crate::api::Action;
+use crate::api::{Action, DropReason};
 use crate::batch::{self, Kind};
 use crate::codec::{Body, reply_proposal};
 use crate::durable::Record;
@@ -112,9 +112,9 @@ impl Replica {
         while let Some(d) = self.log.get(&Slot(self.committed)) {
             let slot = Slot(self.committed);
             self.schedule.observe(slot, d.proposal.key.origin);
-            for (key, payload) in batch::changes(&d.proposal.value) {
-                if let Some(order) = crate::schedule::decode_order(&payload) {
-                    self.schedule.reconfigure(slot, key, order);
+            for (_, payload) in batch::changes(&d.proposal.value) {
+                if let Some((base, order)) = crate::schedule::decode_change(&payload) {
+                    self.schedule.reconfigure(slot, base, order);
                 }
             }
             self.committed += 1;
@@ -141,12 +141,24 @@ impl Replica {
             let slot = Slot(self.emitted);
             let key = d.proposal.key;
             self.applied_schedule.observe(slot, key.origin);
-            for (change, payload) in batch::changes(&d.proposal.value) {
-                if let Some(order) = crate::schedule::decode_order(&payload)
-                    && let Some((epoch, from)) =
-                        self.applied_schedule.reconfigure(slot, change, order.clone())
-                {
-                    self.actions.push(Action::Reconfigured { epoch, from: Slot(from), members: order });
+            // Local changes every replica ignores, reported as such rather than committed.
+            let mut superseded = Vec::new();
+            // A batch may carry one change twice (a forward delivered twice); the first copy
+            // decides, as dedup keeps only it below.
+            let mut seen = Vec::new();
+            for (key, payload) in batch::changes(&d.proposal.value) {
+                if seen.contains(&key) {
+                    continue;
+                }
+                seen.push(key);
+                let (origin, incarnation, id) = key;
+                let Some((base, order)) = crate::schedule::decode_change(&payload) else { continue };
+                match self.applied_schedule.reconfigure(slot, base, order.clone()) {
+                    Some((epoch, from)) => {
+                        self.actions.push(Action::Reconfigured { epoch, from: Slot(from), members: order });
+                    }
+                    None if origin == self.me && incarnation == self.incarnation => superseded.push(id),
+                    None => {}
                 }
             }
             let mut items = batch::decode(&d.proposal.value).unwrap_or_else(|_| {
@@ -166,6 +178,12 @@ impl Replica {
                 if self.retire_barrier.is_some_and(|(_, b)| b == id) {
                     self.outstanding.remove(&id);
                     self.confirm_retired();
+                    continue;
+                }
+                if superseded.contains(&id) {
+                    if self.outstanding.remove(&id).is_some() {
+                        self.actions.push(Action::Dropped { id, reason: DropReason::Superseded });
+                    }
                     continue;
                 }
                 if let Some((at, _, hedged)) = self.outstanding.remove(&id) {
