@@ -155,7 +155,9 @@ struct State {
     members: usize,
     /// Every applied epoch: first slot and members. All replicas must agree on them.
     epochs: BTreeMap<u64, (u64, Vec<u32>)>,
-    /// The membership change awaiting `Committed`, and where (it is in no `Commit`).
+    /// The membership change to make (its members), and the proposal awaiting `Committed`
+    /// and where (it is in no `Commit`).
+    reconfigure: Option<Vec<NodeId>>,
     change: Option<(usize, ProposalId)>,
 }
 
@@ -191,7 +193,8 @@ impl State {
     fn fingerprint(&self) -> u64 {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         for n in &self.nodes {
-            (n.replica.fingerprint(), &n.durable, n.now, n.next_commit, &n.proposed, &n.reads).hash(&mut h);
+            (n.replica.fingerprint(), &n.durable, n.now, n.next_commit, &n.proposed, &n.acked, &n.reads)
+                .hash(&mut h);
         }
         (
             &self.events,
@@ -412,10 +415,7 @@ impl State {
         n.durable.extend(kept);
         n.starts += 1;
         n.next_commit = 0;
-        // Its ids restart; whether the change commits no longer matters to a client.
-        if self.change.is_some_and(|(at, _)| at == node) {
-            self.change = None;
-        }
+        let rechange = self.change.take_if(|(at, _)| *at == node).is_some();
         // Its clients' reads are lost with it.
         n.reads.clear();
         // The client retries exactly the writes it never saw acknowledged.
@@ -428,12 +428,25 @@ impl State {
         n.replica = Replica::new(config(total, node, n.starts), n.durable.clone(), Timestamp(n.now))
             .map_err(|e| e.to_string())?;
         self.drain(node)?;
+        // The operator proposes the change again unless the replica still has it pending.
+        if rechange {
+            let members = self.reconfigure.clone().expect("a change was proposed");
+            let n = &mut self.nodes[node];
+            match n.replica.propose_reconfiguration(Timestamp(n.now), members, Vec::new()) {
+                Ok(id) => self.change = Some((node, id)),
+                Err(quepaxa::Error::ReconfigurationPending) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+            self.drain(node)?;
+        }
         // The client retries writes whose outcome it never learned, as new payloads.
         for p in lost {
             self.required.retain(|r| *r != p);
-            self.warmup.remove(&p);
             let retry =
                 Bytes::from(format!("{}/retry{}", String::from_utf8_lossy(&p), self.nodes[node].starts));
+            if self.warmup.remove(&p) {
+                self.warmup.insert(retry.clone());
+            }
             self.propose(node, retry)?;
         }
         Ok(())
@@ -484,6 +497,12 @@ impl State {
                         }
                         Some(_) => {}
                         None => {
+                            if let Some((other, _)) = self.epochs.iter().find(|(_, (f, _))| *f == from.0) {
+                                return Err(format!(
+                                    "n{i} applied epoch {epoch} from {}, where another replica began epoch {other}",
+                                    from.0
+                                ));
+                            }
                             self.epochs.insert(epoch, (from.0, members));
                         }
                     }
@@ -527,11 +546,18 @@ impl State {
         self.history.observe(self.members, &live)
     }
 
-    /// Every client write committed somewhere, every read finished, the change committed.
+    /// Every client write committed somewhere and acknowledged to its client, every read
+    /// issued and finished, and the membership change in effect and acknowledged.
     fn served(&self) -> bool {
         self.required.iter().all(|p| self.ledger.is_committed(p))
-            && self.nodes.iter().all(|n| n.reads.is_empty())
+            && self.later.is_empty()
+            && self.read_at.is_empty()
+            && self
+                .nodes
+                .iter()
+                .all(|n| n.reads.is_empty() && n.proposed.keys().all(|id| n.acked.contains(id)))
             && self.change.is_none()
+            && (self.reconfigure.is_none() || !self.epochs.is_empty())
     }
 
     fn complete(&self) -> bool {
@@ -574,6 +600,7 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         deputy: false,
         members: cfg.nodes,
         epochs: BTreeMap::new(),
+        reconfigure: None,
         change: None,
     };
     for i in 0..init.nodes.len() {
@@ -581,11 +608,12 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
     }
     if let Some((at, members)) = &cfg.reconfigure {
         let n = &mut init.nodes[*at];
-        let members = members.iter().map(|&m| NodeId(m as u32)).collect();
+        let members: Vec<NodeId> = members.iter().map(|&m| NodeId(m as u32)).collect();
         let id = n
             .replica
-            .propose_reconfiguration(Timestamp(0), members, Vec::new())
+            .propose_reconfiguration(Timestamp(0), members.clone(), Vec::new())
             .map_err(|e| e.to_string())?;
+        init.reconfigure = Some(members);
         init.change = Some((*at, id));
         init.drain(*at)?;
     }
