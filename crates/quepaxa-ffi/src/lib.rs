@@ -119,7 +119,8 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// `qpx_config_init` and `qpx_get_metrics` (incompatible).
 /// 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range;
 /// `QPX_METRIC_STEPPED_ASIDE`.
-pub const QPX_ABI_VERSION_MINOR: u32 = 8;
+/// 0.9: `QPX_DROP_SUPERSEDED`, `QPX_DROP_UNRESOLVED`.
+pub const QPX_ABI_VERSION_MINOR: u32 = 9;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -185,6 +186,12 @@ pub const QPX_ACTION_RETIRED: u32 = 9;
 pub const QPX_PERSIST_REPLACE: u32 = 1;
 /// `flags` of `QPX_ACTION_DROPPED`: the replica is fenced (outcome unknown).
 pub const QPX_DROP_FENCED: u32 = 1;
+/// `flags` of `QPX_ACTION_DROPPED`: a membership change was decided but ignored, because
+/// another change or a rotation came first. Nothing changed (ABI 0.9).
+pub const QPX_DROP_SUPERSEDED: u32 = 2;
+/// `flags` of `QPX_ACTION_DROPPED`: a membership change was decided, but an installed
+/// snapshot hid whether it was applied; check the members in force (ABI 0.9).
+pub const QPX_DROP_UNRESOLVED: u32 = 3;
 
 /// A borrowed byte range. `ptr` may be null when `len` is 0.
 #[repr(C)]

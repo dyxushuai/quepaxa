@@ -93,6 +93,7 @@ unsafe fn drain(r: &[*mut qpx_replica], i: usize, net: &mut Vec<(u32, Vec<u8>)>,
                 out.push(format!("epoch {} from {} {members:?}", a.id, a.slot).into_bytes());
             }
             QPX_ACTION_RETIRED => out.push(format!("retired {}", a.id).into_bytes()),
+            QPX_ACTION_DROPPED => out.push(format!("dropped {} reason {}", a.id, a.flags).into_bytes()),
             _ => {}
         }
     }
@@ -382,6 +383,47 @@ fn membership_changes_through_the_c_abi() {
         assert_eq!((i, retired), (i, usize::from(i == 2)));
     }
     assert!(seen[2].iter().any(|e| e == b"retired 1"));
+    for h in r {
+        unsafe { qpx_replica_free(h) };
+    }
+}
+
+#[test]
+fn a_change_overtaken_by_another_is_dropped_as_superseded() {
+    let members = [0, 1, 2];
+    let r: Vec<_> = (0..N as u32).map(|i| unsafe { new_replica(i, &members) }).collect();
+    let mut net = Vec::new();
+    let mut seen = vec![Vec::new(); N];
+    for (i, c) in seen.iter_mut().enumerate() {
+        unsafe { drain(&r, i, &mut net, c) };
+    }
+    // Both changes are computed from the starting order; whichever is decided first wins.
+    let (mut first, mut second) = (0, 0);
+    let order = [1u32, 0, 2];
+    let rc =
+        unsafe { qpx_propose_reconfiguration(r[0], 0, members.as_ptr(), 3, order.as_ptr(), 3, &mut first) };
+    assert_eq!(rc, QPX_OK);
+    let order = [2u32, 0, 1];
+    let rc =
+        unsafe { qpx_propose_reconfiguration(r[1], 0, members.as_ptr(), 3, order.as_ptr(), 3, &mut second) };
+    assert_eq!(rc, QPX_OK);
+    for (i, c) in seen.iter_mut().enumerate() {
+        unsafe { drain(&r, i, &mut net, c) };
+    }
+    while !net.is_empty() {
+        let (to, m) = net.remove(0);
+        assert_eq!(unsafe { qpx_handle_message(r[to as usize], 0, m.as_ptr(), m.len()) }, QPX_OK);
+        unsafe { drain(&r, to as usize, &mut net, &mut seen[to as usize]) };
+    }
+    let dropped: Vec<_> = seen
+        .iter()
+        .flatten()
+        .filter(|e| e.starts_with(b"dropped"))
+        .map(|e| String::from_utf8_lossy(e).into_owned())
+        .collect();
+    assert_eq!(dropped.len(), 1, "{dropped:?}");
+    let losing = if seen[0].iter().any(|e| e.starts_with(b"dropped")) { first } else { second };
+    assert_eq!(dropped[0], format!("dropped {losing} reason {QPX_DROP_SUPERSEDED}"));
     for h in r {
         unsafe { qpx_replica_free(h) };
     }

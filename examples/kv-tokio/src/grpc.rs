@@ -71,6 +71,8 @@ fn failure(f: Failure) -> Status {
             Status::unknown("replica fenced; the request may or may not have committed")
         }
         Failure::Fenced => Status::unavailable("replica fenced"),
+        Failure::Superseded => Status::aborted("change superseded; propose it again"),
+        Failure::Unresolved => Status::unknown("change decided; check the members in force"),
     }
 }
 

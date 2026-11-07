@@ -34,7 +34,8 @@
 // `qpx_config_init` and `qpx_get_metrics` (incompatible).
 // 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range;
 // `QPX_METRIC_STEPPED_ASIDE`.
-#define QPX_ABI_VERSION_MINOR 8
+// 0.9: `QPX_DROP_SUPERSEDED`, `QPX_DROP_UNRESOLVED`.
+#define QPX_ABI_VERSION_MINOR 9
 
 // Success.
 #define QPX_OK 0
@@ -125,6 +126,14 @@
 
 // `flags` of `QPX_ACTION_DROPPED`: the replica is fenced (outcome unknown).
 #define QPX_DROP_FENCED 1
+
+// `flags` of `QPX_ACTION_DROPPED`: a membership change was decided but ignored, because
+// another change or a rotation came first. Nothing changed (ABI 0.9).
+#define QPX_DROP_SUPERSEDED 2
+
+// `flags` of `QPX_ACTION_DROPPED`: a membership change was decided, but an installed
+// snapshot hid whether it was applied; check the members in force (ABI 0.9).
+#define QPX_DROP_UNRESOLVED 3
 
 // Network messages rejected (malformed, foreign or from non-members).
 #define QPX_METRIC_MESSAGES_REJECTED 1

@@ -212,6 +212,14 @@ pub enum DropReason {
     /// The replica fenced itself after a storage failure. As after a crash, the outcome is
     /// unknown: the proposal may already have reached a quorum and may still commit.
     Fenced,
+    /// A membership change was decided but ignored by every replica: another change or a
+    /// leader rotation came after the configuration it was computed from. Nothing changed;
+    /// propose it again against the members now in force.
+    Superseded,
+    /// A membership change was decided, but this replica learned it from an installed
+    /// snapshot, which does not record whether it was applied or ignored. Check the members
+    /// now in force.
+    Unresolved,
 }
 
 /// Work the caller must carry out, in the order returned.

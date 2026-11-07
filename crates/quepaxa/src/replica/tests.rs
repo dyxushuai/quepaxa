@@ -532,17 +532,20 @@ fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
         key: ValueKey { origin: NodeId(1), incarnation: 1, seq },
         value: batch::encode(items),
     };
-    let change = |id: u64, members: &[u32]| Item {
+    let change = |id: u64, base: u64, members: &[u32]| Item {
         entry: Entry {
             origin: NodeId(1),
             incarnation: 1,
             id: ProposalId(id),
-            payload: crate::schedule::encode_order(&members.iter().copied().map(NodeId).collect::<Vec<_>>()),
+            payload: crate::schedule::encode_change(
+                base,
+                &members.iter().copied().map(NodeId).collect::<Vec<_>>(),
+            ),
         },
         kind: Kind::Reconfigure,
     };
     // Slot 0 removes replica 0 from slot 64 on; slots 1-63 are empty.
-    let mut first = alloc::vec![decided(0, &[change(0, &[1, 2, 3])])];
+    let mut first = alloc::vec![decided(0, &[change(0, 0, &[1, 2, 3])])];
     first.extend((1..64).map(|s| decided(s, &[])));
     r.handle(Timestamp(1), from_peer(Body::Entries { first: Slot(0), proposals: first })).unwrap();
     r.poll_actions(&mut out);
@@ -554,7 +557,7 @@ fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
         kind: Kind::Barrier,
     };
     out.clear();
-    let page = alloc::vec![decided(64, &[own]), decided(65, &[change(1, &[0, 1, 2, 3])])];
+    let page = alloc::vec![decided(64, &[own]), decided(65, &[change(1, 1, &[0, 1, 2, 3])])];
     r.handle(Timestamp(2), from_peer(Body::Entries { first: Slot(64), proposals: page })).unwrap();
     r.poll_actions(&mut out);
     assert!(out.iter().any(|a| matches!(a, Action::Reconfigured { epoch: 2, .. })), "{out:?}");
@@ -565,7 +568,7 @@ fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
 fn a_change_learned_from_others_blocks_another_until_it_takes_effect() {
     let mut r = replica();
     let mut out = Vec::new();
-    let order = crate::schedule::encode_order(&[NodeId(1), NodeId(2), NodeId(3)]);
+    let order = crate::schedule::encode_change(0, &[NodeId(1), NodeId(2), NodeId(3)]);
     let change = Item {
         entry: Entry { origin: NodeId(1), incarnation: 1, id: ProposalId(0), payload: order },
         kind: Kind::Reconfigure,
@@ -584,6 +587,67 @@ fn a_change_learned_from_others_blocks_another_until_it_takes_effect() {
     let again =
         r.propose_reconfiguration(Timestamp(1), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], Vec::new());
     assert_eq!(again, Err(Error::ReconfigurationPending));
+}
+
+#[test]
+fn a_local_change_overtaken_by_another_is_dropped_as_superseded() {
+    let mut r = replica();
+    let mut out = Vec::new();
+    let mine =
+        r.propose_reconfiguration(Timestamp(1), alloc::vec![NodeId(0), NodeId(1)], Vec::new()).unwrap();
+    r.poll_actions(&mut out);
+    let item = |origin: u32, incarnation: u64, id: ProposalId, members: &[u32]| Item {
+        entry: Entry {
+            origin: NodeId(origin),
+            incarnation,
+            id,
+            payload: crate::schedule::encode_change(
+                0,
+                &members.iter().copied().map(NodeId).collect::<Vec<_>>(),
+            ),
+        },
+        kind: Kind::Reconfigure,
+    };
+    let decided = |seq: u64, items: &[Item]| Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(1), incarnation: 1, seq },
+        value: batch::encode(items),
+    };
+    // A peer's change from the same generation is decided first; then this replica's.
+    let proposals = alloc::vec![
+        decided(0, &[item(1, 1, ProposalId(0), &[1, 2])]),
+        decided(1, &[item(0, r.incarnation, mine, &[0, 1])]),
+    ];
+    let env =
+        Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 0 };
+    let body = Body::Entries { first: Slot(0), proposals };
+    r.handle(Timestamp(2), Input::Message(Message { env, body }.encode())).unwrap();
+    out.clear();
+    r.poll_actions(&mut out);
+    assert_eq!(r.schedule.epoch(), (1, 64), "only the first change applies");
+    assert_eq!(r.schedule.position(NodeId(0), Slot(64)), 2, "removed by the first change");
+    assert!(out.contains(&Action::Dropped { id: mine, reason: DropReason::Superseded }), "{out:?}");
+    assert!(!out.iter().any(|a| matches!(a, Action::Committed { id, .. } if *id == mine)), "{out:?}");
+    assert_eq!(out.iter().filter(|a| matches!(a, Action::Reconfigured { .. })).count(), 1, "{out:?}");
+}
+
+#[test]
+fn a_local_change_resolved_by_a_snapshot_is_dropped_as_unresolved() {
+    let mut r = replica();
+    let mut out = Vec::new();
+    let mine =
+        r.propose_reconfiguration(Timestamp(1), alloc::vec![NodeId(0), NodeId(1)], Vec::new()).unwrap();
+    r.poll_actions(&mut out);
+    let mut dedup = Dedup::default();
+    dedup.first_time(NodeId(0), r.incarnation, mine);
+    let members = [NodeId(0), NodeId(1), NodeId(2)];
+    let state =
+        CoreState { next: 10, leaders: members.to_vec(), schedule: Schedule::new(&members), dedup }.encode();
+    assert_eq!(r.install_snapshot(Timestamp(2), Slot(9), state), Ok(true));
+    out.clear();
+    r.poll_actions(&mut out);
+    assert!(out.contains(&Action::Dropped { id: mine, reason: DropReason::Unresolved }), "{out:?}");
+    assert!(!out.iter().any(|a| matches!(a, Action::Committed { id, .. } if *id == mine)), "{out:?}");
 }
 
 #[test]

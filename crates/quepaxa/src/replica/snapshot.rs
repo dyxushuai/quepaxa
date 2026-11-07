@@ -9,7 +9,8 @@ use alloc::vec::Vec;
 use bytes::Bytes;
 
 use super::Replica;
-use crate::api::{Action, Error};
+use crate::api::{Action, DropReason, Error};
+use crate::batch::Kind;
 use crate::core_state::CoreState;
 use crate::durable::Record;
 use crate::types::{NodeId, Slot, Timestamp};
@@ -110,13 +111,18 @@ impl Replica {
             .outstanding
             .iter()
             .filter(|(id, _)| self.dedup.contains(me, inc, **id))
-            .map(|(id, _)| *id)
+            .map(|(id, (_, kind, _))| (*id, *kind))
             .collect();
-        for id in done {
+        for (id, kind) in done {
             self.outstanding.remove(&id);
             self.forwarded.remove(&id);
             if self.retire_barrier.is_some_and(|(_, b)| b == id) {
                 self.confirm_retired();
+                continue;
+            }
+            // A decided change enters dedup whether it was applied or ignored.
+            if kind == Kind::Reconfigure {
+                self.actions.push(Action::Dropped { id, reason: DropReason::Unresolved });
                 continue;
             }
             self.actions.push(Action::Committed { id, slot: through });

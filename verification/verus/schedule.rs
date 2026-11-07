@@ -7,11 +7,15 @@
 // k - LAG is fed, slot k's members and leader are fixed: every replica that drives k
 // (only below its commit index + LAG) computes the same ones. Every slot has an order, and
 // every order is non-empty, so `leader` never indexes out of bounds.
+// Also proved: the generation (changes applied plus rotations counted) never decreases and
+// advances whenever an order is added, so a change carrying an older generation installs
+// nothing, and each change, carrying the generation it was computed from, installs at most
+// once. The generation and epoch never overflow.
 // Assumed: slots stay at most MAX_SLOT (the replica rejects larger ones), and a schedule
 // restored from a snapshot satisfies `inv` for the slots it covers (Schedule::fits, checked
 // when the snapshot's core state is decoded).
 //
-// Nodes are u32 and change keys u64. Departures from the original's code, forced by what
+// Nodes are u32. Departures from the original's code, forced by what
 // vstd specifies, are marked DEV; VERIFICATION.md lists them. When schedule.rs changes,
 // port the change here. Encoding, decoding, `knows`, `everyone` and `position` are not
 // ported.
@@ -59,7 +63,7 @@ pub struct Schedule {
     pub quiet_until: u64,
     pub epoch: u64,
     pub epoch_from: u64,
-    pub settled: Vec<u64>,
+    pub generation: u64,
     /// The last slot fed, if any.
     pub fed: Ghost<Option<u64>>,
 }
@@ -100,10 +104,16 @@ impl Schedule {
     pub open spec fn inv(&self) -> bool {
         &&& well_formed(self.view())
         &&& self.streak < ROTATE_AFTER
+        &&& self.epoch <= self.generation
+        // Each bump sets quiet_until (and a change also epoch_from) to its slot + LAG, so
+        // the generation stays far below u64::MAX.
+        &&& self.generation as int * LAG as int <= self.quiet_until as int + self.epoch_from as int
         &&& match self.fed@ {
                 Some(f) => f <= MAX_SLOT && self.view()[0].0 <= f
+                    && self.quiet_until <= f + LAG && self.epoch_from <= f + LAG
                     && forall|i: int| 0 <= i < self.view().len() ==> (#[trigger] self.view()[i]).0 <= f + LAG,
-                None => self.view().len() == 1 && self.view()[0].0 == 0,
+                None => self.view().len() == 1 && self.view()[0].0 == 0
+                    && self.quiet_until == 0 && self.epoch_from == 0,
             }
     }
 
@@ -117,7 +127,7 @@ impl Schedule {
             quiet_until: 0,
             epoch: 0,
             epoch_from: 0,
-            settled: Vec::new(),
+            generation: 0,
             fed: Ghost(None),
         };
         assert(s.view().len() == 1 && s.view()[0].1.len() > 0);
@@ -159,6 +169,8 @@ impl Schedule {
         ensures
             final(self).inv(), final(self).fed@ == Some(slot),
             window_kept(old(self).view(), final(self).view(), slot),
+            final(self).generation >= old(self).generation,
+            final(self).generation == old(self).generation ==> final(self).view() == old(self).view(),
     {
         let ghost h0 = self.view();
         proof { self.lemma_fed(slot); }
@@ -186,6 +198,7 @@ impl Schedule {
             proof { lemma_push(h0, e, slot); }
             self.streak = 0;
             self.quiet_until = from;
+            self.generation = self.generation + 1;
             self.prune(slot);
             proof { assert(h1[0] == h0[0]); self.lemma_after_prune(h0, h1, slot); }
         } else {
@@ -194,54 +207,43 @@ impl Schedule {
         self.fed = Ghost(Some(slot));
     }
 
-    /// Applies membership change `key`, decided in `slot`: from `slot + LAG` on, `order`
-    /// leads. Feed it in slot order, after `observe` for the same slot.
-    pub fn reconfigure(&mut self, slot: u64, key: u64, order: Vec<u32>) -> (r: Option<(u64, u64)>)
+    /// Applies a membership change computed at generation `base`, decided in `slot`: from
+    /// `slot + LAG` on, `order` leads. Feed it in slot order, after `observe` for the same
+    /// slot.
+    pub fn reconfigure(&mut self, slot: u64, base: u64, order: Vec<u32>) -> (r: Option<(u64, u64)>)
         requires
             old(self).inv(), slot <= MAX_SLOT, order@.len() > 0,
             match old(self).fed@ { Some(f) => f <= slot, None => true },
         ensures
             final(self).inv(), final(self).fed@ == Some(slot),
             window_kept(old(self).view(), final(self).view(), slot),
+            base != old(self).generation ==> r is None,
+            r is Some ==> final(self).generation == base + 1,
+            r is None ==> final(self).generation == old(self).generation
+                && final(self).view() == old(self).view(),
     {
         let ghost h0 = self.view();
         proof { self.lemma_fed(slot); }
-        // DEV: the epoch counter is not ported (`epoch + 1` would need a bound; it only
-        // names the epoch).
-        if settled_has(&self.settled, key) {
-            self.fed = Ghost(Some(slot));
-            proof { lemma_same(h0, slot); }
-            return None;
-        }
-        self.settled.push(key);
-        if slot < self.epoch_from {
-            self.fed = Ghost(Some(slot));
-            proof { lemma_same(h0, slot); }
-            return None;
-        }
         let from = slot + LAG;
-        let ghost e = (from, order@);
         let n = self.history.len();
-        // A rotation counted in this very slot is superseded.
-        if self.history[n - 1].0 == from {
-            assert(n >= 2) by {
-                if n == 1 { assert(h0[0].0 <= slot); }
+        let rotated_here = self.history[n - 1].0 >= from;
+        if base != self.generation || slot < self.epoch_from || rotated_here {
+            self.fed = Ghost(Some(slot));
+            proof { lemma_same(h0, slot); }
+            return None;
+        }
+        let ghost e = (from, order@);
+        self.history.push((from, order));
+        assert(self.view() =~= h0.push(e));
+        proof {
+            assert forall|i: int| 0 <= i < h0.len() implies (#[trigger] h0[i]).0 < e.0 by {
+                assert(h0[i].0 <= h0[n - 1].0);
             }
-            self.history.pop();
-            self.history.push((from, order));
-            assert(self.view() =~= h0.drop_last().push(e));
-            proof { lemma_replace_last(h0, e, slot); }
-        } else {
-            self.history.push((from, order));
-            assert(self.view() =~= h0.push(e));
-            proof {
-                assert forall|i: int| 0 <= i < h0.len() implies h0[i].0 < e.0 by {
-                    assert(h0[i].0 <= h0[n - 1].0);
-                }
-                lemma_push(h0, e, slot);
-            }
+            lemma_push(h0, e, slot);
         }
         let ghost h1 = self.view();
+        self.epoch = self.epoch + 1;
+        self.generation = self.generation + 1;
         self.epoch_from = from;
         self.streak = 0;
         self.quiet_until = from;
@@ -301,7 +303,7 @@ impl Schedule {
             final(self).streak == old(self).streak, final(self).fed == old(self).fed,
             final(self).quiet_until == old(self).quiet_until,
             final(self).epoch == old(self).epoch, final(self).epoch_from == old(self).epoch_from,
-            final(self).settled@ == old(self).settled@,
+            final(self).generation == old(self).generation,
     {
         let keep_from = self.order_index(slot);
         // DEV: `drain(..keep_from)` keeps the tail with `split_off`.
@@ -344,34 +346,6 @@ proof fn lemma_push(h: Seq<Entry>, e: Entry, s: u64)
     }
 }
 
-/// Replacing a last entry that starts at s + LAG keeps every slot below it.
-proof fn lemma_replace_last(h: Seq<Entry>, e: Entry, s: u64)
-    requires
-        well_formed(h), h.len() >= 2, e.1.len() > 0, e.0 == s + LAG, s <= MAX_SLOT,
-        h[h.len() - 1].0 == e.0,
-    ensures
-        well_formed(h.drop_last().push(e)), window_kept(h, h.drop_last().push(e), s),
-{
-    let h1 = h.drop_last();
-    let h2 = h1.push(e);
-    assert(well_formed(h1)) by {
-        assert forall|i: int| 0 <= i < h1.len() implies (#[trigger] h1[i]).1.len() > 0 by {
-            assert(h1[i] == h[i]);
-        }
-    }
-    assert forall|i: int| 0 <= i < h1.len() implies h1[i].0 < e.0 by {
-        assert(h[i].0 < h[h.len() - 1].0);
-    }
-    lemma_push(h1, e, s);
-    assert forall|k: u64| s <= k < s + LAG implies #[trigger] kept_at(h, h2, k) by {
-        lemma_in_force(h, k);
-        lemma_in_force(h1, k);
-        let i0 = choose|i: int| in_force(h1, k, i);
-        assert(in_force(h, k, i0));
-        assert(kept_at(h1, h2, k));
-    }
-}
-
 /// The rotated order, first leader last. DEV: built by hand for `rotate_left(1)`.
 fn rotate1(o: &Vec<u32>) -> (r: Vec<u32>)
     requires o@.len() > 0,
@@ -388,23 +362,6 @@ fn rotate1(o: &Vec<u32>) -> (r: Vec<u32>)
     }
     r.push(o[0]);
     r
-}
-
-/// Whether `key` was settled. DEV: a loop for `contains`.
-fn settled_has(settled: &Vec<u64>, key: u64) -> (r: bool)
-    ensures r == settled@.contains(key),
-{
-    let mut j = 0;
-    while j < settled.len()
-        invariant j <= settled@.len(), forall|x: int| 0 <= x < j ==> settled@[x] != key,
-        decreases settled@.len() - j,
-    {
-        if settled[j] == key {
-            return true;
-        }
-        j = j + 1;
-    }
-    false
 }
 
 /// An unchanged history keeps every slot.

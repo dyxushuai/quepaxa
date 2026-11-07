@@ -135,6 +135,7 @@ impl Sim {
             }
             Action::Dropped { id, .. } => {
                 self.nodes[i].outstanding.remove(&id);
+                self.nodes[i].changes.remove(&id);
                 self.kv.read_dropped(i, id);
             }
             Action::Reconfigured { epoch, members, from } => {

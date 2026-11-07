@@ -37,11 +37,11 @@ LEMMA FoldedSubsets ==
   <2>2. val[n].m \subseteq Replicas BY MAssumptions DEF Slots
   <2>3. st.cur \subseteq Replicas /\ st.nxt \subseteq Replicas BY MAssumptions
   <2>4. act.cur \subseteq Replicas /\ act.nxt \subseteq Replicas BY <2>1, <2>3 DEF IsSt
-  <2>5. CASE val[n].k = "change" /\ act.from <= n
-    <3>1. Folded(val)[n + 1] = [act EXCEPT !.nxt = val[n].m, !.from = n + LAG]
+  <2>5. CASE val[n].k = "change" /\ act.from <= n /\ val[n].b = act.gen
+    <3>1. Folded(val)[n + 1] = [act EXCEPT !.nxt = val[n].m, !.from = n + LAG, !.gen = @ + 1]
       BY <2>1, <2>5 DEF FoldStep
     <3> QED BY <3>1, <2>2, <2>4, <2>1 DEF IsSt
-  <2>6. CASE ~(val[n].k = "change" /\ act.from <= n)
+  <2>6. CASE ~(val[n].k = "change" /\ act.from <= n /\ val[n].b = act.gen)
     <3>1. Folded(val)[n + 1] = act BY <2>1, <2>6 DEF FoldStep
     <3> QED BY <3>1, <2>4
   <2> QED BY <2>5, <2>6
@@ -125,7 +125,7 @@ LEMMA TruthFacts ==
     PROVE  /\ \A t \in Slots : Truth[t] = IF decided[t] = None THEN Write ELSE decided[t]
            /\ \A t \in Slots : Truth[t].m \subseteq Replicas
            /\ \A t \in Slots : decided[t] = None => Truth[t].k # "change" /\ Truth[t].m = {}
-<1>1. \A v \in Values : v.m \subseteq Replicas BY RAssumptions DEF Values, Write, Change
+<1>1. \A v \in Values : v.m \subseteq Replicas BY RAssumptions, ValueKinds DEF Write
 <1> QED BY <1>1 DEF Inv, Truth, Write
 
 \* Retired replicas name no member set still to come.
@@ -217,7 +217,9 @@ LEMMA DecideTruth ==
            /\ \A k \in 0..N : (\A w \in 0..(k - 1) : decided[w] # None) => Folded(tv2)[k] = Folded(tv)[k]
            /\ \A t \in Slots : decided[t] # None => MembersAt(t, tv2) = MembersAt(t, tv)
            /\ MembersAt(s, tv2) = MembersAt(s, tv)
-<1>0. \A u \in Values : u # None BY DEF Values, Write, Change, None
+<1>0. \A u \in Values : u # None
+  <2> SUFFICES ASSUME NEW u \in Values PROVE u.k # "none" BY DEF None
+  <2> QED BY ValueKinds DEF Write
 <1>1. decided' = [decided EXCEPT ![s] = v] /\ decided[s] = None BY DEF Decide
 <1>2. \A t \in Slots \ {s} : tv2[t] = tv[t] BY <1>1 DEF RInv, Inv, Truth
 <1>3. tv2[s] = v BY <1>0, <1>1 DEF RInv, Inv, Truth
@@ -268,7 +270,7 @@ LEMMA DecideStep ==
   BY DEF Decide
 <1>3. \A t \in Slots : decided[t] # None => decided'[t] = decided[t] BY <1>2 DEF RInv, Inv
 <1>4. \A t \in Slots : decided'[t] # None <=> (decided[t] # None \/ t = s)
-  BY <1>2, Values # {} DEF RInv, Inv, Values, Write, Change, None
+  BY <1>2, Values # {} DEF RInv, Inv, Values, Write, None
 <1>5. Inv' BY NextInv DEF RInv, Next
 <1>6. DecidedBelow'
   <2> SUFFICES ASSUME NEW t \in Slots, decided'[t] # None, NEW u \in 0..(t - LAG)
@@ -419,7 +421,7 @@ LEMMA RetireStep ==
   <2>2. decided[t] # None /\ tv[t].k = "change"
     <3>1. tv[t] = IF decided[t] = None THEN Write ELSE decided[t] BY <2>1, <1>0, TruthFacts DEF RInv
     <3>2. decided[t] \in Values \cup {None} BY <2>1 DEF RInv, Inv
-    <3> QED BY <3>1, <3>2 DEF Write, Values, Change, None
+    <3> QED BY <3>1, <3>2 DEF Write, Values, None
   <2> QED BY <2>1, <2>2, <1>1, <1>2, MAssumptions
 <1>9a. RetiredAt(r, kr) BY <1>0, <1>7, <1>8, <1>1 DEF RetiredAt
 <1>9. RetiredAt(r, kr)' BY <1>9a, <1>u, <1>s DEF RetiredAt
@@ -473,7 +475,8 @@ LEMMA RetireStep ==
       <4>1. \A q \in caught : q \notin retired'
         <5> SUFFICES ASSUME NEW q \in caught, q \in retired PROVE FALSE BY <1>1
         <5>1. PICK kx \in 0..K : RetiredAt(q, kx) BY <3>1
-        <5>2. q \notin Folded(tv)[kr].nxt BY <5>1, <3>2, <1>7, <2>b, MAssumptions
+        <5>a. kx \in 0..N /\ kr \in 0..N /\ kx <= kr BY <5>1, <3>2, <1>7, MAssumptions
+        <5>2. q \notin Folded(tv)[kr].nxt BY <5>1, <5>a, <2>b
         <5> QED BY <5>2, <1>7
       <4>2. \A x \in retired' : \E kx \in 0..kr : RetiredAt(x, kx)'
         <5> SUFFICES ASSUME NEW x \in retired' PROVE \E kx \in 0..kr : RetiredAt(x, kx)' OBVIOUS
