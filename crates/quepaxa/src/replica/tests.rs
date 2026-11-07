@@ -1027,4 +1027,26 @@ fn the_leader_leaves_the_next_leaders_slots_to_it() {
     });
     assert!(forwarded, "{out:?}");
     assert!(r.proposers.is_empty(), "nothing is proposed in the new leader's slots");
+    // A follower that has not seen the change yet still hands this replica its entries.
+    out.clear();
+    let entry = Item {
+        entry: Entry {
+            origin: NodeId(2),
+            incarnation: 1,
+            id: ProposalId(7),
+            payload: Bytes::from_static(b"late"),
+        },
+        kind: Kind::App,
+    };
+    let env =
+        Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(2), to: NodeId(0), commit_index: 62 };
+    let body = Body::Forward { batch: batch::encode(&[entry]) };
+    r.handle(Timestamp(4), Input::Message(Message { env, body }.encode())).unwrap();
+    r.poll_actions(&mut out);
+    assert!(r.proposers.is_empty(), "a lagging follower's entries are not proposed here");
+    let handed_on = out.iter().any(|a| {
+        matches!(a, Action::Send(o) if o.to == NodeId(1)
+            && matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::Forward { .. }, .. })))
+    });
+    assert!(handed_on, "{out:?}");
 }

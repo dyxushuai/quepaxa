@@ -44,6 +44,8 @@ pub(super) struct Watch {
     pub(super) suspects: BTreeMap<NodeId, Timestamp>,
     /// When a message last arrived from each member.
     pub(super) heard: BTreeMap<NodeId, Timestamp>,
+    /// The commit index each member's latest message carried.
+    pub(super) committed: BTreeMap<NodeId, u64>,
     /// The first forward the member it went to has not said anything since.
     pub(super) asked: Option<(NodeId, Timestamp)>,
     /// Current forwarding destination and when it first received entries in this run.

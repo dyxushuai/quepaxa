@@ -99,6 +99,7 @@ impl Replica {
         if state.next <= self.emitted {
             return Ok(false);
         }
+        let led = self.leads_now();
         self.applied_schedule = state.schedule.clone();
         self.schedule = state.schedule;
         self.dedup = state.dedup;
@@ -134,6 +135,10 @@ impl Replica {
             if b.slot.is_some_and(|s| s.0 < state.next) {
                 b.slot = None;
             }
+        }
+        // The snapshot may carry this replica past its last led slot (`advance_committed`).
+        if led && !self.leads_now() {
+            self.hand_on_unstarted();
         }
         self.raise_floor(state.next, core_state);
         self.advance_committed();

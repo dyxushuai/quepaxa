@@ -102,8 +102,16 @@ impl Replica {
         };
         let cap =
             self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
-        // Stepped aside, this replica hands them on (`watch.rs`).
-        let queue = if self.leads_now() || self.watch.aside { &mut self.pending } else { &mut self.relayed };
+        // Stepped aside, this replica hands them on (`watch.rs`); so it does for a follower
+        // that has not yet seen this replica stop leading, whose entries belong to the new
+        // leader, not to a deputy.
+        let lagging =
+            self.watch.committed.get(&from).is_some_and(|&c| self.schedule.leader(Slot(c)) == self.me);
+        let queue = if self.leads_now() || self.watch.aside || lagging {
+            &mut self.pending
+        } else {
+            &mut self.relayed
+        };
         if queue.len() + entries.len() > cap {
             return; // the origin hedges
         }
