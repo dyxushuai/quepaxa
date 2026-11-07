@@ -1,6 +1,6 @@
 ---
 name: quepaxa
-last_updated: 2026-10-31
+last_updated: 2026-11-08
 ---
 
 # quepaxa Strategy
@@ -35,11 +35,9 @@ stores, lock and lease services) - they hire quepaxa as the consensus engine und
   database ambitions.
 - `quepaxa-ffi` and the prebuilt platform libraries are maintained (released, CI green), not
   extended.
-- Single-datacenter throughput only needs to be good enough; no optimizing for benchmark
-  numbers.
 
-_Resist a change when:_ it serves general database workloads, single-datacenter benchmarks or
-service features rather than the engine's cross-region availability.
+_Resist a change when:_ it serves general database workloads or service features rather than
+the engine, or departs from the paper without a recorded reason.
 
 ## Key metrics
 
@@ -54,6 +52,15 @@ service features rather than the engine's cross-region availability.
   Measured in the GitHub tracker.
 
 ## Tracks
+
+### Paper conformance
+
+Implement every mechanism of the QuePaxa paper (SOSP 2023), and reproduce its evaluation:
+`docs/paper-conformance.md` lists each one with its status, evidence and issue, and every
+deviation is either removed or recorded with its reason.
+
+_Why it serves the approach:_ the engine's claims are the paper's claims; a missing mechanism
+(bandit leader tuning, batch-ID dissemination) is a claim the engine cannot make.
 
 ### Cross-region liveness and tail latency
 

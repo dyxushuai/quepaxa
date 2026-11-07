@@ -46,7 +46,8 @@ priority, and a majority holding it first at step 4 forces every proposer to ado
 
 ## Around the core protocol
 
-What the paper leaves open, the crate fixes as follows:
+What the paper leaves open, the crate fixes as follows (the repository's
+`docs/paper-conformance.md` checks every mechanism of the paper against the crate):
 
 - **Log.** Each slot is an independent instance; a replica drives up to
   `max_in_flight_slots` at once and applies decided slots in order.
