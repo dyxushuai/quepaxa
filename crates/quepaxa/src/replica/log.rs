@@ -143,7 +143,15 @@ impl Replica {
             self.applied_schedule.observe(slot, key.origin);
             // Local changes every replica ignores, reported as such rather than committed.
             let mut superseded = Vec::new();
-            for ((origin, incarnation, id), payload) in batch::changes(&d.proposal.value) {
+            // A batch may carry one change twice (a forward delivered twice); the first copy
+            // decides, as dedup keeps only it below.
+            let mut seen = Vec::new();
+            for (key, payload) in batch::changes(&d.proposal.value) {
+                if seen.contains(&key) {
+                    continue;
+                }
+                seen.push(key);
+                let (origin, incarnation, id) = key;
                 let Some((base, order)) = crate::schedule::decode_change(&payload) else { continue };
                 match self.applied_schedule.reconfigure(slot, base, order.clone()) {
                     Some((epoch, from)) => {

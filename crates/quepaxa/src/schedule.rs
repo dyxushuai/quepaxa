@@ -234,18 +234,30 @@ impl Schedule {
     }
 
     /// Whether this could be the schedule after feeding every slot below `next`: the
-    /// invariant verification/verus/schedule.rs proves the window rule under. Entries start
-    /// in increasing slots, the first at or before the last slot fed and every one at most
-    /// `LAG` after it.
+    /// invariant verification/verus/schedule.rs proves the window rule and the generation
+    /// bound under. Entries start in increasing slots, the first at or before the last slot
+    /// fed and every one (and the quiet and epoch bounds) at most `LAG` after it; each bump
+    /// of the generation moved one of those bounds `LAG` on, so it cannot overflow.
     pub fn fits(&self, next: u64) -> bool {
         let increasing = self.history.windows(2).all(|w| w[0].0 < w[1].0);
+        let bumps = u128::from(self.generation) * u128::from(LAG);
+        let bounded = bumps <= u128::from(self.quiet_until) + u128::from(self.epoch_from);
         match next.checked_sub(1) {
             Some(fed) => {
+                let reach = fed.saturating_add(LAG);
                 increasing
+                    && bounded
                     && self.history[0].0 <= fed
-                    && self.history.iter().all(|(from, _)| *from <= fed.saturating_add(LAG))
+                    && self.history.iter().all(|(from, _)| *from <= reach)
+                    && self.quiet_until <= reach
+                    && self.epoch_from <= reach
             }
-            None => self.history.len() == 1 && self.history[0].0 == 0,
+            None => {
+                self.history.len() == 1
+                    && self.history[0].0 == 0
+                    && self.quiet_until == 0
+                    && self.epoch_from == 0
+            }
         }
     }
 
@@ -513,7 +525,20 @@ mod tests {
             ..s.clone()
         };
         assert!(!tied.fits(10));
-        let far = Schedule { history: alloc::vec![(0, ids(&[0, 1, 2])), (10 + LAG, ids(&[1, 2, 0]))], ..s };
+        let far =
+            Schedule { history: alloc::vec![(0, ids(&[0, 1, 2])), (10 + LAG, ids(&[1, 2, 0]))], ..s.clone() };
         assert!(!far.fits(10) && far.fits(11));
+    }
+
+    #[test]
+    fn fits_bounds_the_generation_by_the_slots_fed() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2]));
+        s.reconfigure(Slot(3), 0, ids(&[0, 1])).unwrap();
+        assert!(s.fits(4));
+        // A generation no run of slots could reach would overflow at the next change.
+        let forged = Schedule { generation: u64::MAX, ..s.clone() };
+        assert!(!forged.fits(4) && !forged.fits(u64::MAX));
+        let quiet_ahead = Schedule { quiet_until: 4 + LAG, ..s };
+        assert!(!quiet_ahead.fits(4) && quiet_ahead.fits(5));
     }
 }

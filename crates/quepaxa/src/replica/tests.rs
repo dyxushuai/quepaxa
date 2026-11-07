@@ -632,6 +632,38 @@ fn a_local_change_overtaken_by_another_is_dropped_as_superseded() {
 }
 
 #[test]
+fn a_local_change_decided_twice_in_one_batch_commits_once() {
+    let mut r = replica();
+    let mut out = Vec::new();
+    let mine =
+        r.propose_reconfiguration(Timestamp(1), alloc::vec![NodeId(0), NodeId(1)], Vec::new()).unwrap();
+    r.poll_actions(&mut out);
+    let copy = Item {
+        entry: Entry {
+            origin: NodeId(0),
+            incarnation: r.incarnation,
+            id: mine,
+            payload: crate::schedule::encode_change(0, &[NodeId(0), NodeId(1)]),
+        },
+        kind: Kind::Reconfigure,
+    };
+    let decided = Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(1), incarnation: 1, seq: 0 },
+        value: batch::encode(&[copy.clone(), copy]),
+    };
+    let env =
+        Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 0 };
+    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![decided] };
+    r.handle(Timestamp(2), Input::Message(Message { env, body }.encode())).unwrap();
+    out.clear();
+    r.poll_actions(&mut out);
+    assert_eq!(r.schedule.epoch(), (1, 64));
+    assert!(out.iter().any(|a| matches!(a, Action::Committed { id, .. } if *id == mine)), "{out:?}");
+    assert!(!out.iter().any(|a| matches!(a, Action::Dropped { .. })), "{out:?}");
+}
+
+#[test]
 fn a_local_change_resolved_by_a_snapshot_is_dropped_as_unresolved() {
     let mut r = replica();
     let mut out = Vec::new();
