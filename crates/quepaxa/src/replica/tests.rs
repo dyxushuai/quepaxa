@@ -983,3 +983,48 @@ fn an_answer_to_a_previous_incarnations_read_does_not_count() {
     r.poll_actions(&mut out);
     assert!(!out.iter().any(|a| matches!(a, Action::ReadReady { id, .. } if *id == read)), "{out:?}");
 }
+
+#[test]
+fn the_leader_leaves_the_next_leaders_slots_to_it() {
+    // Slot 0 decides an order change that makes replica 1 the leader from slot 64; slots
+    // 1-59 are empty, so this replica (the leader until then) drives slots up to 67.
+    let mut r = replica();
+    let mut out = Vec::new();
+    let change = Item {
+        entry: Entry {
+            origin: NodeId(1),
+            incarnation: 1,
+            id: ProposalId(0),
+            payload: crate::schedule::encode_change(0, &[NodeId(1), NodeId(0), NodeId(2)]),
+        },
+        kind: Kind::Reconfigure,
+    };
+    let decided = |seq: u64, items: &[Item]| Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(1), incarnation: 1, seq },
+        value: batch::encode(items),
+    };
+    let mut proposals = alloc::vec![decided(0, &[change])];
+    proposals.extend((1..60).map(|s| decided(s, &[])));
+    r.handle(Timestamp(1), from_peer(1, 0, Body::Entries { first: Slot(0), proposals })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!((r.committed, r.schedule.leader(Slot(64))), (60, NodeId(1)));
+    for k in 0..20u32 {
+        r.propose(Timestamp(2), Bytes::from(k.to_le_bytes().to_vec())).unwrap();
+        r.poll_actions(&mut out);
+    }
+    let started: Vec<u64> = r.proposers.keys().map(|s| s.0).collect();
+    assert_eq!(started, [60, 61, 62, 63], "only the slots this replica still leads");
+    // Its slots decide elsewhere; past the change it hands its entries to the new leader.
+    out.clear();
+    let rest = (60..64).map(|s| decided(s, &[])).collect();
+    r.handle(Timestamp(3), from_peer(1, 0, Body::Entries { first: Slot(60), proposals: rest })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.committed, 64);
+    let forwarded = out.iter().any(|a| {
+        matches!(a, Action::Send(o) if o.to == NodeId(1)
+            && matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::Forward { .. }, .. })))
+    });
+    assert!(forwarded, "{out:?}");
+    assert!(r.proposers.is_empty(), "nothing is proposed in the new leader's slots");
+}

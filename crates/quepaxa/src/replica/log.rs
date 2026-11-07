@@ -109,6 +109,7 @@ impl Replica {
     /// Extends the contiguous decided prefix, feeding each newly decided slot to the leader
     /// schedule in order.
     pub(super) fn advance_committed(&mut self) {
+        let led = self.leads_now();
         while let Some(d) = self.log.get(&Slot(self.committed)) {
             let slot = Slot(self.committed);
             self.schedule.observe(slot, d.proposal.key.origin);
@@ -118,6 +119,9 @@ impl Replica {
                 }
             }
             self.committed += 1;
+        }
+        if led && !self.leads_now() {
+            self.hand_on_unstarted();
         }
         self.seen = self.seen.split_off(&Slot(self.committed));
         // Something past our prefix is decided (or a peer is ahead): keep the next slot
