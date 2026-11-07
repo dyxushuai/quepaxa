@@ -23,6 +23,8 @@ const KIND_COMPACTED: u8 = 7;
 const KIND_READ_QUERY: u8 = 8;
 const KIND_READ_REPLY: u8 = 9;
 const KIND_FORWARD_ACK: u8 = 10;
+const KIND_RTT_PROBE: u8 = 11;
+const KIND_RTT_REPLY: u8 = 12;
 
 const VALUE_INLINE: u8 = 0;
 
@@ -115,6 +117,18 @@ pub(crate) enum Body {
         round: u64,
         high: Slot,
     },
+    /// Leader placement: the sender's incarnation and clock when sent, and its smoothed
+    /// round trip to each member it has a fresh one for, in nanoseconds.
+    RttProbe {
+        incarnation: u64,
+        sent: u64,
+        table: Vec<(NodeId, u64)>,
+    },
+    /// Echoes an `RttProbe`'s `incarnation` and `sent`.
+    RttReply {
+        incarnation: u64,
+        sent: u64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +149,8 @@ impl Body {
             | Body::Compacted { .. }
             | Body::ReadQuery { .. }
             | Body::ReadReply { .. }
+            | Body::RttProbe { .. }
+            | Body::RttReply { .. }
             | Body::ForwardAck => 0,
         }
     }
@@ -187,6 +203,8 @@ impl Message {
             Body::ReadQuery { .. } => KIND_READ_QUERY,
             Body::ReadReply { .. } => KIND_READ_REPLY,
             Body::ForwardAck => KIND_FORWARD_ACK,
+            Body::RttProbe { .. } => KIND_RTT_PROBE,
+            Body::RttReply { .. } => KIND_RTT_REPLY,
         });
         let e = &self.env;
         out.put_slice(&e.cluster_id);
@@ -232,6 +250,19 @@ impl Message {
                 out.put_u64_le(*round);
                 out.put_u64_le(high.0);
             }
+            Body::RttProbe { incarnation, sent, table } => {
+                out.put_u64_le(*incarnation);
+                out.put_u64_le(*sent);
+                out.put_u32_le(table.len() as u32);
+                for (node, rtt) in table {
+                    out.put_u32_le(node.0);
+                    out.put_u64_le(*rtt);
+                }
+            }
+            Body::RttReply { incarnation, sent } => {
+                out.put_u64_le(*incarnation);
+                out.put_u64_le(*sent);
+            }
         }
         Bytes::from(out)
     }
@@ -245,7 +276,9 @@ impl Message {
             | Body::Compacted { .. }
             | Body::ReadQuery { .. }
             | Body::ReadReply { .. }
+            | Body::RttReply { .. }
             | Body::ForwardAck => 0,
+            Body::RttProbe { table, .. } => 20 + 12 * table.len(),
             Body::Forward { batch } => batch.len(),
             Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len() + 33).sum(),
         }
@@ -311,6 +344,18 @@ impl Message {
             KIND_READ_REPLY => {
                 Body::ReadReply { incarnation: r.u64()?, round: r.u64()?, high: Slot(r.u64()?) }
             }
+            KIND_RTT_PROBE => {
+                let incarnation = r.u64()?;
+                let sent = r.u64()?;
+                let n = r.u32()? as usize;
+                // Each row takes 12 bytes, bounding the allocation by input size.
+                let mut table = Vec::with_capacity(n.min(buf.len() / 12));
+                for _ in 0..n {
+                    table.push((NodeId(r.u32()?), r.u64()?));
+                }
+                Body::RttProbe { incarnation, sent, table }
+            }
+            KIND_RTT_REPLY => Body::RttReply { incarnation: r.u64()?, sent: r.u64()? },
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -521,6 +566,30 @@ mod tests {
     }
 
     #[test]
+    fn rtt_messages_match_golden_bytes_v1() {
+        let probe = Message {
+            env: env(),
+            body: Body::RttProbe { incarnation: 2, sent: 5, table: alloc::vec![(NodeId(3), 0x0102)] },
+        };
+        let body = "0200000000000000 0500000000000000 01000000 03000000 0201000000000000";
+        assert_eq!(probe.encode().to_vec(), golden("0b", body));
+        let reply = Message { env: env(), body: Body::RttReply { incarnation: 2, sent: 5 } };
+        assert_eq!(reply.encode().to_vec(), golden("0c", "0200000000000000 0500000000000000"));
+    }
+
+    #[test]
+    fn an_rtt_table_longer_than_its_bytes_is_rejected() {
+        let probe = Message {
+            env: env(),
+            body: Body::RttProbe { incarnation: 2, sent: 5, table: alloc::vec![(NodeId(3), 1)] },
+        };
+        let mut bytes = probe.encode().to_vec();
+        let n = bytes.len() - 16;
+        bytes[n..n + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(Message::decode(&Bytes::from(bytes), &CTX), Err(DecodeError::Truncated));
+    }
+
+    #[test]
     fn read_query_and_reply_match_golden_bytes_v1() {
         let query = Message { env: env(), body: Body::ReadQuery { incarnation: 3, round: 7 } };
         assert_eq!(query.encode().to_vec(), golden("08", "0300000000000000 0700000000000000"));
@@ -657,6 +726,8 @@ mod tests {
                 Body::ReadQuery { incarnation: from, round },
                 Body::ReadReply { incarnation: from, round, high: Slot(from) },
                 Body::ForwardAck,
+                Body::RttProbe { incarnation: 2, sent: from, table: alloc::vec![(NodeId(round as u32), from), (NodeId(2), round)] },
+                Body::RttReply { incarnation: 2, sent: round },
             ] {
                 let m = Message { env: env(), body };
                 proptest::prop_assert_eq!(Message::decode(&m.encode(), &CTX).unwrap(), m);

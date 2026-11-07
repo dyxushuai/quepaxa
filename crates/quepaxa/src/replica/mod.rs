@@ -8,6 +8,7 @@
 mod gate;
 mod log;
 mod messages;
+mod placement;
 mod proposing;
 mod reads;
 mod retire;
@@ -125,6 +126,8 @@ pub struct Replica {
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
     /// Whether this replica suspects the leader it hands entries to (`watch.rs`).
     watch: watch::Watch,
+    /// Round trips and write origins for leader placement (`placement.rs`).
+    placement: placement::Placement,
     /// Own proposals awaiting commit: when they were made, what they are, and whether they
     /// were hedged.
     outstanding: BTreeMap<ProposalId, (Timestamp, Kind, bool)>,
@@ -282,6 +285,7 @@ impl Replica {
             relayed: VecDeque::new(),
             forwarded: BTreeMap::new(),
             watch: watch::Watch::default(),
+            placement: placement::Placement::default(),
             outstanding: BTreeMap::new(),
             reads: reads::Reads::default(),
             commit_latency: None,
@@ -666,6 +670,8 @@ impl Replica {
     }
 }
 
+#[cfg(test)]
+mod placement_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

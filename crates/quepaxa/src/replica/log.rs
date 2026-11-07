@@ -166,6 +166,7 @@ impl Replica {
                 Vec::new()
             });
             items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
+            self.count_writes(&items);
             let mine: Vec<ProposalId> = items
                 .iter()
                 .filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)

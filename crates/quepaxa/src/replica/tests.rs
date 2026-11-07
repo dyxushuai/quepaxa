@@ -53,6 +53,14 @@ fn arb_body() -> impl Strategy<Value = Body> {
         (slot.clone(), proptest::collection::vec(p, 0..3))
             .prop_map(|(first, proposals)| Body::Entries { first, proposals }),
         slot.prop_map(|through| Body::Compacted { through }),
+        (any::<u64>(), proptest::collection::vec((0u32..4, any::<u64>()), 0..4)).prop_map(|(sent, rows)| {
+            Body::RttProbe {
+                incarnation: 1,
+                sent,
+                table: rows.into_iter().map(|(n, rtt)| (NodeId(n), rtt)).collect(),
+            }
+        }),
+        (0u64..3, any::<u64>()).prop_map(|(incarnation, sent)| Body::RttReply { incarnation, sent }),
     ]
 }
 
@@ -269,6 +277,7 @@ proptest! {
     #[test]
     fn arbitrary_member_messages_are_handled(msgs in proptest::collection::vec((1u32..3, arb_body()), 1..40)) {
         let mut r = replica();
+        r.cfg.placement = true;
         r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
         let mut out = Vec::new();
         r.poll_actions(&mut out);
