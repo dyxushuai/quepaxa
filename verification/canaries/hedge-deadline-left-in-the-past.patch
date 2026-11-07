@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/replica/proposing.rs b/crates/quepaxa/src/replica/proposing.rs
+index 8938e07..32ff744 100644
+--- a/crates/quepaxa/src/replica/proposing.rs
++++ b/crates/quepaxa/src/replica/proposing.rs
+@@ -322,7 +322,7 @@ impl Replica {
+         let late: Vec<_> = self
+             .forwarded
+             .iter()
+-            .filter(|(_, (_, at))| self.late_at(*at) <= now)
++            .filter(|(_, (_, at))| self.late_at(*at) < now)
+             .map(|(id, _)| *id)
+             .collect();
+         for id in late {

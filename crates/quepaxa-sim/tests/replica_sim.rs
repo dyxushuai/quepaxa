@@ -67,6 +67,35 @@ fn hostile_runs_stay_safe_and_converge() {
 }
 
 #[test]
+fn writes_commit_within_the_bound_while_a_majority_is_connected() {
+    // Without crashes and with rarer partitions, a majority stays connected for seconds, long
+    // enough to hold its writes to the progress bound (at hostile rates a crash or a cut off
+    // leader rescues a stuck write first); minorities are still cut off, links lose and
+    // duplicate.
+    for_seeds(seed_count(40), |seed| {
+        let n = [3, 5][(seed % 2) as usize];
+        let cfg = SimConfig { crash: 0, partition: 1, fault_phase_ms: 6_000, ..SimConfig::hostile(n, seed) };
+        let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
+        assert!(report.held_writes > 0, "seed {seed}: no write was held to the bound");
+    });
+}
+
+#[test]
+fn a_write_cut_off_in_a_minority_is_not_held_to_the_bound() {
+    let cfg = SimConfig { isolate: Some((2, 500, 5_000)), fault_phase_ms: 6_000, ..calm(3, 1) };
+    let bound = cfg.progress_bound_ms().expect("calm links are connected");
+    let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
+    let slowest = report
+        .commits
+        .iter()
+        .filter(|c| c.0 == 2 && (500_000..5_500_000).contains(&c.1))
+        .map(|c| (c.2 - c.1) / 1_000)
+        .max()
+        .expect("n2 took writes while cut off");
+    assert!(slowest > bound, "n2's slowest write took {slowest} ms, within the {bound} ms bound");
+}
+
+#[test]
 fn crash_heavy_runs_never_lose_acknowledged_state() {
     for_seeds(seed_count(40), |seed| {
         if let Err(e) = Sim::new(SimConfig::durability_stress(3, seed)).run() {

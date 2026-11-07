@@ -52,6 +52,9 @@ pub struct SimConfig {
     /// Slow these replicas' disks from `.1` for `.2` virtual ms: writes started meanwhile take
     /// up to `slow_persist_ms` instead of `max_persist_ms`.
     pub disk_slow: Option<(Vec<usize>, u64, u64)>,
+    /// Cut this replica off from the others from `.1` for `.2` virtual ms, in place of random
+    /// partitions.
+    pub isolate: Option<(usize, u64, u64)>,
     /// Upper bound on one persist's latency on a slowed disk.
     pub slow_persist_ms: u64,
     /// Snapshot and compact every this many applied slots.
@@ -61,6 +64,21 @@ pub struct SimConfig {
 }
 
 impl SimConfig {
+    /// How long a write proposed at a member of a connected majority may take to commit
+    /// (R4), or `None` if links lose too much for a majority to count as connected.
+    ///
+    /// A forward the network loses is retried only once the entry is late (`hedge_max` while
+    /// the leader makes progress) and the hedged slot is lost to the leader's (a few
+    /// retransmit intervals). Each loss costs one such round, and each round cuts the tail
+    /// about tenfold or more. At 5% loss the slowest write took 1.8 s over 100,000 hostile
+    /// seeds, and 2.6 s over 20,000 seeds without crashes and with rarer partitions (longer
+    /// windows: 24 writes over 2 s, 3 over 2.4 s). Eight rounds (4 s there) leave three rounds
+    /// of margin for the nightly seed count. At 25% loss, chains of losses outlast any bound
+    /// shorter than the fault phase.
+    pub fn progress_bound_ms(&self) -> Option<u64> {
+        (self.drop <= 50).then_some(8 * (self.hedge_max_ms + 5 * self.retransmit_ms))
+    }
+
     /// Long fsyncs, frequent crashes and heavy loss: maximizes the window in which a reply
     /// could escape before its write is durable.
     pub fn durability_stress(nodes: usize, seed: u64) -> Self {
@@ -100,6 +118,7 @@ impl SimConfig {
             kill: None,
             disk_stall: None,
             disk_slow: None,
+            isolate: None,
             slow_persist_ms: 40,
             compact_every: Some(32),
             max_message_bytes: 1 << 20,
@@ -143,4 +162,6 @@ pub struct Report {
     pub commits: Vec<(usize, u64, u64)>,
     /// Membership changes applied (by the first replica to apply each).
     pub reconfigurations: u64,
+    /// Writes acknowledged while their replica was in a connected majority (R4).
+    pub held_writes: u64,
 }

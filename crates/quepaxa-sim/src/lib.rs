@@ -60,6 +60,9 @@ struct Node {
     disk_busy_until: u64,
     disk_next_group: Option<u64>,
     timer_at: Option<u64>,
+    /// After a timer left a deadline at or before the time it fired: that time and the
+    /// replica's fingerprint, to tell a timer storm from progress.
+    past_deadline: Option<(u64, u64)>,
     /// Next slot this node's commit stream must deliver.
     next_commit: u64,
     /// Durable application snapshot (survives crashes).
@@ -102,6 +105,7 @@ pub struct Sim {
     epoch: u64,
     /// Every announced epoch: first slot and members. All replicas must agree on them.
     epochs: BTreeMap<u64, (u64, Vec<usize>)>,
+    progress: invariants::Progress,
 }
 
 fn cluster_id() -> [u8; 16] {
@@ -123,6 +127,7 @@ impl Sim {
                 disk_busy_until: 0,
                 disk_next_group: None,
                 timer_at: None,
+                past_deadline: None,
                 next_commit: 0,
                 snapshot: None,
                 installed: None,
@@ -153,6 +158,7 @@ impl Sim {
             members: initial,
             epoch: 0,
             epochs: BTreeMap::new(),
+            progress: invariants::Progress::default(),
         };
         if let Some((node, at)) = sim.cfg.kill {
             sim.push(at * MS, Event::Kill { node });
@@ -254,6 +260,7 @@ impl Sim {
     fn heal(&mut self) {
         self.faults_on = false;
         self.cut.clear();
+        self.progress.clear();
         let _ = writeln!(self.trace, "{} heal", self.now);
         for i in 0..self.nodes.len() {
             if self.nodes[i].replica.is_none() {
@@ -309,6 +316,7 @@ impl Sim {
         node.proposed_at.clear();
         node.changes.clear();
         node.timer_at = None;
+        node.past_deadline = None;
         let _ = writeln!(self.trace, "{} start n{i} g{}", self.now, node.generation);
         self.drain(i);
         // The application's snapshot may be newer than the replica's last durable compaction.
@@ -355,6 +363,7 @@ impl Sim {
             Event::Tick => {
                 if self.faults_on {
                     self.inject_faults();
+                    self.check_progress()?;
                 }
                 if self.faults_on && self.chance(self.cfg.propose) {
                     let i = self.member();
@@ -416,9 +425,62 @@ impl Sim {
                 let r = n.replica.as_mut().expect("live generation");
                 r.handle_timeout(Timestamp(self.now)).map_err(|e| e.to_string())?;
                 self.drain(node);
+                self.check_timer_storm(node)?;
             }
         }
         self.check_internal()
+    }
+
+    /// A timer that fires and leaves its deadline in the past with nothing changed fires
+    /// again at once, forever: fail on the second such firing rather than spin.
+    fn check_timer_storm(&mut self, node: usize) -> Result<(), String> {
+        let now = self.now;
+        let Some(r) = self.nodes[node].replica.as_ref() else { return Ok(()) };
+        let past = r.next_deadline().filter(|d| d.0 <= now).map(|d| (d.0, r.fingerprint()));
+        let n = &mut self.nodes[node];
+        let Some((deadline, fp)) = past else {
+            n.past_deadline = None;
+            return Ok(());
+        };
+        if n.past_deadline.replace((now, fp)) == Some((now, fp)) {
+            return Err(self.fail(&format!(
+                "timer storm: n{node} keeps firing its deadline {deadline} at {now} without progress"
+            )));
+        }
+        Ok(())
+    }
+
+    /// R4: while a majority of members is alive, mutually connected and on working disks,
+    /// each write proposed at one of them commits within [`SimConfig::progress_bound_ms`] of
+    /// when it was proposed, or of when its replica joined that majority if later. Members
+    /// cut off by the partition, down, or with a stalled or slowed disk are outside it.
+    fn check_progress(&mut self) -> Result<(), String> {
+        let Some(bound) = self.cfg.progress_bound_ms().map(|ms| ms * MS) else { return Ok(()) };
+        let healthy: BTreeSet<usize> = self
+            .members
+            .iter()
+            .copied()
+            .filter(|&i| {
+                self.nodes[i].replica.is_some()
+                    && !self.cut.contains(&i)
+                    && self.during(&self.cfg.disk_stall, i).is_none()
+                    && self.during(&self.cfg.disk_slow, i).is_none()
+            })
+            .collect();
+        self.progress.observe(self.now, &healthy, self.members.len());
+        let stuck = self.progress.held().find_map(|(i, since)| {
+            let n = &self.nodes[i];
+            let oldest = n.outstanding.keys().filter_map(|id| Some((*n.proposed_at.get(id)?, *id))).min();
+            oldest.filter(|(at, _)| self.now > (*at).max(since) + bound).map(|(at, id)| (i, at, id))
+        });
+        if let Some((i, at, id)) = stuck {
+            return Err(self.fail(&format!(
+                "no progress: n{i}'s write {id:?} proposed at {} ms is not committed {} ms later in connected majority {healthy:?}",
+                at / MS,
+                bound / MS
+            )));
+        }
+        Ok(())
     }
 
     /// G1, G3–G5 across every live replica's protocol state.
@@ -472,7 +534,13 @@ impl Sim {
 
     fn inject_faults(&mut self) {
         let n = self.cfg.nodes;
-        if self.cut.is_empty() && n > 2 && self.chance(self.cfg.partition) {
+        if let Some((x, at, ms)) = self.cfg.isolate {
+            let on = (at * MS..(at + ms) * MS).contains(&self.now);
+            if on != self.cut.contains(&x) {
+                self.cut = if on { BTreeSet::from([x]) } else { BTreeSet::new() };
+                let _ = writeln!(self.trace, "{} isolate {:?}", self.now, self.cut);
+            }
+        } else if self.cut.is_empty() && n > 2 && self.chance(self.cfg.partition) {
             while self.cut.len() < (n - 1) / 2 {
                 let x = self.member();
                 self.cut.insert(x);

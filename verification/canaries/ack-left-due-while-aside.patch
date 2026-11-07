@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
+index 94a405a..05bbe92 100644
+--- a/crates/quepaxa/src/replica/watch.rs
++++ b/crates/quepaxa/src/replica/watch.rs
+@@ -209,7 +209,6 @@ impl Replica {
+     /// acknowledgements coalesce until the cooldown ends; σ covers that wait.
+     pub(super) fn ack_forward(&mut self, from: NodeId) {
+         if self.stepped_aside() {
+-            self.watch.ack_due.remove(&from);
+             return;
+         }
+         let every = self.ack_every();

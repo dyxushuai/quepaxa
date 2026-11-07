@@ -11,6 +11,9 @@
 //! [`Ledger`] checks what clients see: agreement and validity of committed entries, each
 //! payload committed at most once, and `Committed` only for the exact proposal in the log.
 //!
+//! [`Progress`] tracks which replicas form a connected majority, so that their writes can be
+//! held to a commit-latency bound while faults go on elsewhere.
+//!
 //! Registers move on and are discarded after a durable decision, so the evidence behind
 //! G1, G4 and G5 is accumulated in a [`History`] rather than re-derived from the current
 //! state alone. Evidence remembers which replicas showed it: a crash discards what only the
@@ -208,6 +211,43 @@ impl Ledger {
     /// Payloads proposed so far.
     pub fn proposals(&self) -> usize {
         self.proposed.len()
+    }
+}
+
+/// The members currently forming a connected majority, each with the time from which its
+/// writes are held to the progress bound.
+#[derive(Clone, Debug, Default)]
+pub struct Progress {
+    held: BTreeMap<usize, u64>,
+}
+
+impl Progress {
+    /// Records the healthy members at `now`. One that joins is held from now (it may have to
+    /// catch up); one that leaves, and everyone once no majority is left, is no longer held.
+    pub fn observe(&mut self, now: u64, healthy: &BTreeSet<usize>, members: usize) {
+        if healthy.len() <= members / 2 {
+            self.held.clear();
+            return;
+        }
+        self.held.retain(|i, _| healthy.contains(i));
+        for &i in healthy {
+            self.held.entry(i).or_insert(now);
+        }
+    }
+
+    /// Whether `node` is in the majority, its writes held to the bound.
+    pub fn holds(&self, node: usize) -> bool {
+        self.held.contains_key(&node)
+    }
+
+    /// The held members and since when.
+    pub fn held(&self) -> impl Iterator<Item = (usize, u64)> + '_ {
+        self.held.iter().map(|(i, t)| (*i, *t))
+    }
+
+    /// Forgets everything (faults stopped).
+    pub fn clear(&mut self) {
+        self.held.clear();
     }
 }
 
