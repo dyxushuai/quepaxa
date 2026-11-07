@@ -1,0 +1,197 @@
+//! Leader placement measurement: round-trip probes and write counts.
+
+use super::placement::{ACTIVE_FOR, PROBE_INTERVAL};
+use super::tests::{from_peer, r_wire, replica_as};
+use super::*;
+
+const MS: u64 = 1_000_000;
+
+fn placed(me: u32) -> Replica {
+    let mut r = replica_as(me);
+    r.cfg.placement = true;
+    r
+}
+
+/// A probe as sent: to whom, sent when, with what table.
+type Sent = (NodeId, u64, Vec<(NodeId, u64)>);
+
+/// The `RttProbe`s among `out`.
+fn probes(out: &[Action]) -> Vec<Sent> {
+    out.iter()
+        .filter_map(|a| match a {
+            Action::Send(o) => match Message::decode(&o.bytes, &r_wire()) {
+                Ok(Message { body: Body::RttProbe { sent, table }, .. }) => Some((o.to, sent, table)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+fn rtt_replies(out: &[Action]) -> Vec<(NodeId, u64)> {
+    out.iter()
+        .filter_map(|a| match a {
+            Action::Send(o) => match Message::decode(&o.bytes, &r_wire()) {
+                Ok(Message { body: Body::RttReply { sent }, .. }) => Some((o.to, sent)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Applies one decided slot holding an application entry from each of `origins`.
+fn apply_writes(r: &mut Replica, at: Timestamp, origins: &[u32]) {
+    let items: Vec<Item> = origins
+        .iter()
+        .enumerate()
+        .map(|(i, &o)| Item {
+            entry: Entry {
+                origin: NodeId(o),
+                incarnation: 1,
+                id: ProposalId(r.committed * 16 + i as u64),
+                payload: Bytes::from_static(b"w"),
+            },
+            kind: Kind::App,
+        })
+        .collect();
+    let decided = Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(1), incarnation: 1, seq: r.committed },
+        value: batch::encode(&items),
+    };
+    let slot = Slot(r.committed);
+    r.handle(at, from_peer(1, r.me.0, Body::Decided { slot, proposal: decided })).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+}
+
+#[test]
+fn a_write_starts_probing_every_other_member() {
+    let mut r = placed(0);
+    assert_eq!(r.next_deadline(), None);
+    apply_writes(&mut r, Timestamp(10 * MS), &[1]);
+    let at = r.next_deadline().expect("a probe is due");
+    r.handle_timeout(at).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    let sent: Vec<_> = probes(&out).into_iter().map(|(to, sent, _)| (to, sent)).collect();
+    assert_eq!(sent, [(NodeId(1), at.0), (NodeId(2), at.0)]);
+    assert_eq!(r.placement.next_probe, Some(at.after(PROBE_INTERVAL)));
+}
+
+#[test]
+fn round_trips_converge_and_an_outlier_moves_the_average_by_an_eighth() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    let mut t = 0;
+    for _ in 0..4 {
+        t += PROBE_INTERVAL;
+        r.handle(Timestamp(t + 80 * MS), from_peer(1, 0, Body::RttReply { sent: t })).unwrap();
+        r.poll_actions(&mut out);
+    }
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(80 * MS));
+    t += PROBE_INTERVAL;
+    r.handle(Timestamp(t + 880 * MS), from_peer(1, 0, Body::RttReply { sent: t })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(80 * MS - 10 * MS + 110 * MS));
+    // A reply claiming a send time in the future is ignored.
+    r.handle(Timestamp(t + 881 * MS), from_peer(1, 0, Body::RttReply { sent: t + 900 * MS })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(180 * MS));
+}
+
+#[test]
+fn a_round_trip_not_sampled_for_a_while_is_unknown() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    r.handle(Timestamp(5 * MS), from_peer(1, 0, Body::RttReply { sent: MS })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(4 * MS));
+    r.handle_timeout(Timestamp(5 * MS + 5 * PROBE_INTERVAL)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), None);
+}
+
+#[test]
+fn a_probe_is_answered_and_its_table_kept() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    let table = alloc::vec![(NodeId(0), 70 * MS), (NodeId(2), 30 * MS), (NodeId(9), MS)];
+    r.handle(Timestamp(3 * MS), from_peer(1, 0, Body::RttProbe { sent: 12345, table })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(rtt_replies(&out), [(NodeId(1), 12345)]);
+    let kept = &r.placement.tables[&NodeId(1)];
+    assert_eq!(kept.0, [(NodeId(0), 70 * MS), (NodeId(2), 30 * MS)], "only members in force");
+    assert_eq!(kept.1, Timestamp(3 * MS));
+}
+
+#[test]
+fn the_probe_carries_this_members_fresh_round_trips() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    r.handle(Timestamp(5 * MS), from_peer(2, 0, Body::RttReply { sent: MS })).unwrap();
+    r.poll_actions(&mut out);
+    apply_writes(&mut r, Timestamp(6 * MS), &[0]);
+    let at = r.next_deadline().unwrap();
+    r.handle_timeout(at).unwrap();
+    r.poll_actions(&mut out);
+    let tables: Vec<_> = probes(&out).into_iter().map(|(_, _, t)| t).collect();
+    assert_eq!(tables, [alloc::vec![(NodeId(2), 4 * MS)], alloc::vec![(NodeId(2), 4 * MS)]]);
+}
+
+#[test]
+fn an_idle_cluster_stops_probing_and_goes_quiet() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    apply_writes(&mut r, Timestamp(MS), &[2]);
+    let mut probed = 0;
+    while let Some(at) = r.next_deadline() {
+        assert!(at.0 <= MS + ACTIVE_FOR + 2 * PROBE_INTERVAL, "still probing at {at:?}");
+        r.handle_timeout(at).unwrap();
+        r.poll_actions(&mut out);
+        probed += probes(&out).len();
+        out.clear();
+    }
+    assert!(probed > 0);
+    // A new write starts it again.
+    apply_writes(&mut r, Timestamp(MS + 60 * PROBE_INTERVAL), &[2]);
+    assert!(r.next_deadline().is_some());
+}
+
+#[test]
+fn a_member_without_placement_neither_probes_nor_answers() {
+    let mut r = replica_as(0);
+    let mut out = Vec::new();
+    apply_writes(&mut r, Timestamp(MS), &[1]);
+    assert_eq!(r.next_deadline(), None);
+    assert!(r.placement.writes.is_empty(), "nothing is counted");
+    r.handle(Timestamp(2 * MS), from_peer(1, 0, Body::RttProbe { sent: 7, table: Vec::new() })).unwrap();
+    r.poll_actions(&mut out);
+    assert!(rtt_replies(&out).is_empty());
+    assert!(r.placement.tables.is_empty());
+    r.handle(Timestamp(3 * MS), from_peer(1, 0, Body::RttReply { sent: MS })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.fresh_rtt(NodeId(1)), None);
+}
+
+#[test]
+fn writes_are_counted_by_origin_and_reads_are_not() {
+    let mut r = placed(0);
+    apply_writes(&mut r, Timestamp(MS), &[1, 1, 2]);
+    apply_writes(&mut r, Timestamp(2 * MS), &[2, 0]);
+    let mut out = Vec::new();
+    r.read_barrier(Timestamp(3 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    let counts: Vec<_> = r.placement.writes.iter().map(|(n, c)| (n.0, *c)).collect();
+    assert_eq!(counts, [(0, 1), (1, 2), (2, 2)]);
+}
+
+#[test]
+fn a_restarted_replica_measures_afresh() {
+    let mut cfg = Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    cfg.placement = true;
+    let r = Replica::new(cfg, [], Timestamp(0)).unwrap();
+    assert!(r.placement.rtt.is_empty() && r.placement.tables.is_empty() && r.placement.writes.is_empty());
+    assert_eq!(r.placement.next_probe, None);
+}

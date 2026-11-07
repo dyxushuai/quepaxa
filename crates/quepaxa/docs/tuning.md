@@ -17,6 +17,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `retransmit_interval` | 50 ms | When an unanswered request is sent again. |
 | `hedge_min`, `hedge_max` | 1 ms, 1 s | Bounds of the adaptive hedge delay. |
 | `silent_leader_takeover` | on | Stop waiting for a leader that has said nothing for about a commit latency since a forward. |
+| `placement` | off | Measure round trips to the other members and where writes come from (for leader placement). Enable it on every member or on none. |
 
 ## Throughput
 
@@ -52,6 +53,12 @@ The defaults assume round trips of a few milliseconds.
   than twice that acknowledgement's round trip, than one round trip plus its cooldown, or
   than `hedge_min`, is never counted.
 - **`leader_order`**: put the leader where a majority is closest.
+- **`placement`** (off by default): while writes are being applied, the member probes
+  every other member once a second and keeps a smoothed round trip to each; a round trip
+  not sampled for four seconds counts as unknown. Probing stops four seconds after the
+  last write, so an idle cluster stays quiet. Members with it off neither probe nor
+  answer. Writes are attributed to the member they were proposed at, so clients should
+  submit to their nearest replica.
 
 The repository's simulated five-region benchmark (`docs/benchmarks.md`) shows each effect.
 

@@ -84,6 +84,11 @@ pub struct Config {
     /// for the life of the cluster's state: a replica refuses to start from, or install, a
     /// snapshot built under another order.
     pub leader_order: Vec<NodeId>,
+    /// Whether this member measures round trips to the others and where writes come from,
+    /// for leader placement. While writes flow it probes every member once a second;
+    /// members with it off neither probe nor answer, so enable it on every member. Off by
+    /// default.
+    pub placement: bool,
 }
 
 impl Config {
@@ -106,6 +111,7 @@ impl Config {
             hedge_max: 1000 * MILLI,
             silent_leader_takeover: true,
             leader_order: Vec::new(),
+            placement: false,
         }
     }
 

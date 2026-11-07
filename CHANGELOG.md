@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa` (wire): `Config::placement` (off by default) makes a member measure round
+  trips to the other members with two new message kinds, `RttProbe` and `RttReply`, and
+  count applied writes per origin, while writes flow. Peers of older versions reject the
+  new messages.
 - `quepaxa`: `Replica::propose_leader_order` changes only the leader order of the members
   in force; kv-tokio exposes it as `LEADERS <ids>`. In C,
   `qpx_propose_reconfiguration` with the current members and a new order does the same.
