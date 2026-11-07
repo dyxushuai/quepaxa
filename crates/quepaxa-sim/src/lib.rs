@@ -21,7 +21,7 @@ use quepaxa::{
     Action, Config, Entry, Input, NodeId, Outbound, PersistId, ProposalId, Replica, Slot, Timestamp,
 };
 
-pub use config::{Report, SimConfig};
+pub use config::{Report, SimConfig, WriteWeights};
 pub use rng::SplitMix64;
 
 const MS: u64 = 1_000_000;
@@ -213,6 +213,12 @@ impl Sim {
                     .iter()
                     .filter_map(|n| n.replica.as_ref().map(|r| r.metrics().clone()))
                     .collect();
+                self.report.final_order = self
+                    .members
+                    .iter()
+                    .find_map(|&m| self.nodes[m].replica.as_ref())
+                    .map(|r| r.members().iter().map(|v| v.id.0 as usize).collect())
+                    .unwrap_or_default();
                 if let Err(e) = self.kv.check() {
                     return Err(self.fail(&format!("linearizability: {e}")));
                 }
@@ -298,6 +304,11 @@ impl Sim {
         cfg.max_in_flight_slots = self.cfg.in_flight_slots;
         cfg.max_batch_bytes = 4096;
         cfg.max_message_bytes = self.cfg.max_message_bytes;
+        if let Some((sustain, hold)) = self.cfg.placement {
+            cfg.placement = true;
+            cfg.placement_sustain = sustain * MS;
+            cfg.placement_hold = hold * MS;
+        }
         cfg
     }
 
@@ -371,7 +382,7 @@ impl Sim {
                     self.check_progress()?;
                 }
                 if self.faults_on && self.chance(self.cfg.propose) {
-                    let i = self.member();
+                    let i = self.writer();
                     self.propose(i)?;
                 }
                 if self.faults_on && self.chance(self.cfg.read) {
@@ -506,6 +517,33 @@ impl Sim {
         self.members[self.rng.below(self.members.len() as u64) as usize]
     }
 
+    /// Where a client writes: a random member, weighted by `write_weights` when set.
+    fn writer(&mut self) -> usize {
+        let weights = match &self.cfg.write_weights {
+            None => return self.member(),
+            Some((_, Some((at, later)))) if self.now >= at * MS => later.clone(),
+            Some((weights, _)) => weights.clone(),
+        };
+        let live: Vec<(usize, u64)> = self
+            .members
+            .iter()
+            .map(|&m| (m, u64::from(weights.get(m).copied().unwrap_or(0))))
+            .filter(|(_, w)| *w > 0)
+            .collect();
+        let total: u64 = live.iter().map(|(_, w)| w).sum();
+        if total == 0 {
+            return self.member();
+        }
+        let mut pick = self.rng.below(total);
+        for (m, w) in live {
+            if pick < w {
+                return m;
+            }
+            pick -= w;
+        }
+        unreachable!("pick < total")
+    }
+
     /// Where a client reads: usually a member, sometimes any live replica (one behind, joining,
     /// or removed and not yet retired).
     fn reader(&mut self) -> usize {
@@ -516,8 +554,12 @@ impl Sim {
         live[self.rng.below(live.len() as u64) as usize]
     }
 
-    /// Proposes `nodes` replicas drawn from everyone, at a random member.
+    /// Proposes `nodes` replicas drawn from everyone, at a random member; one time in
+    /// three, only a new leader order for the members in force.
     fn reconfigure(&mut self) -> Result<(), String> {
+        if self.rng.below(3) == 0 {
+            return self.shuffle_order();
+        }
         let mut pool: Vec<usize> = (0..self.nodes.len()).collect();
         for k in (1..pool.len()).rev() {
             pool.swap(k, self.rng.below(k as u64 + 1) as usize);
@@ -533,6 +575,32 @@ impl Sim {
             }
             Err(quepaxa::Error::ReconfigurationPending | quepaxa::Error::Busy) => {}
             Err(e) => return Err(self.fail(&format!("propose_reconfiguration failed: {e}"))),
+        }
+        self.drain(i);
+        Ok(())
+    }
+
+    /// Proposes the members in force in a random order.
+    fn shuffle_order(&mut self) -> Result<(), String> {
+        let mut order = self.members.clone();
+        for k in (1..order.len()).rev() {
+            order.swap(k, self.rng.below(k as u64 + 1) as usize);
+        }
+        let i = self.member();
+        let Some(r) = self.nodes[i].replica.as_mut() else { return Ok(()) };
+        let ids = order.iter().map(|&m| NodeId(m as u32)).collect();
+        match r.propose_leader_order(Timestamp(self.now), ids) {
+            Ok(id) => {
+                self.nodes[i].changes.insert(id);
+                let _ = writeln!(self.trace, "{} n{i} proposes order {order:?}", self.now);
+            }
+            // The replica may know a newer membership than the simulator's view.
+            Err(
+                quepaxa::Error::ReconfigurationPending
+                | quepaxa::Error::Busy
+                | quepaxa::Error::InvalidConfig(_),
+            ) => {}
+            Err(e) => return Err(self.fail(&format!("propose_leader_order failed: {e}"))),
         }
         self.drain(i);
         Ok(())

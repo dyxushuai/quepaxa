@@ -54,8 +54,13 @@ pub struct ModelConfig {
     /// Replicas beyond `nodes`, started outside the membership (to be added by a change).
     pub spares: usize,
     /// A membership change proposed at the start: at that replica, the new members (of
-    /// replicas `0..nodes + spares`), preferred leaders by id.
+    /// replicas `0..nodes + spares`), preferred leaders in that order (the same members in
+    /// another order change only the leader).
     pub reconfigure: Option<(usize, Vec<usize>)>,
+    /// A competing change proposed at the start at another replica, computed from the same
+    /// configuration: whichever is decided second is ignored. Not proposed again after a
+    /// crash.
+    pub rival: Option<(usize, Vec<usize>)>,
 }
 
 impl ModelConfig {
@@ -76,6 +81,7 @@ impl ModelConfig {
             slow_net: None,
             spares: 0,
             reconfigure: None,
+            rival: None,
         }
     }
 }
@@ -159,6 +165,9 @@ struct State {
     /// and where (it is in no `Commit`).
     reconfigure: Option<Vec<NodeId>>,
     change: Option<(usize, ProposalId)>,
+    /// The rival change's members and the proposal awaiting its outcome.
+    rival: Option<Vec<NodeId>>,
+    rival_change: Option<(usize, ProposalId)>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -202,7 +211,7 @@ impl State {
             self.slow_net,
             &self.later,
             self.silenced,
-            (&self.warmup, &self.epochs, self.change),
+            (&self.warmup, &self.epochs, self.change, self.rival_change),
             self.deviations,
             self.crashes,
             self.isolated,
@@ -416,6 +425,7 @@ impl State {
         n.starts += 1;
         n.next_commit = 0;
         let rechange = self.change.take_if(|(at, _)| *at == node).is_some();
+        self.rival_change.take_if(|(at, _)| *at == node);
         // Its clients' reads are lost with it.
         n.reads.clear();
         // The client retries exactly the writes it never saw acknowledged.
@@ -432,7 +442,7 @@ impl State {
         if rechange {
             let members = self.reconfigure.clone().expect("a change was proposed");
             let n = &mut self.nodes[node];
-            match n.replica.propose_reconfiguration(Timestamp(n.now), members, Vec::new()) {
+            match n.replica.propose_reconfiguration(Timestamp(n.now), members.clone(), members) {
                 Ok(id) => self.change = Some((node, id)),
                 Err(quepaxa::Error::ReconfigurationPending) => {}
                 Err(e) => return Err(e.to_string()),
@@ -479,20 +489,28 @@ impl State {
                     self.ledger.commit(slot.0, &entries)?;
                 }
                 Action::Committed { id, .. } if self.change == Some((i, id)) => self.change = None,
-                // A copy proposed again after a crash loses to the original: the operator
-                // checks that the members in force are the ones it wanted.
-                Action::Dropped { id, reason: DropReason::Superseded } if self.change == Some((i, id)) => {
-                    let mut want: Vec<u32> = self.reconfigure.iter().flatten().map(|m| m.0).collect();
-                    want.sort_unstable();
-                    let mut have =
-                        self.epochs.values().next_back().map(|(_, m)| m.clone()).unwrap_or_default();
-                    have.sort_unstable();
-                    if have != want {
+                Action::Committed { id, .. } if self.rival_change == Some((i, id)) => {
+                    self.rival_change = None
+                }
+                // A copy proposed again after a crash loses to the original, and one of two
+                // rivals loses to the other: what is in force is one of the changes made.
+                Action::Dropped { id, reason: DropReason::Superseded }
+                    if self.change == Some((i, id)) || self.rival_change == Some((i, id)) =>
+                {
+                    let have = self.epochs.values().next_back().map(|(_, m)| m.clone()).unwrap_or_default();
+                    let made = |m: &Option<Vec<NodeId>>| {
+                        m.as_ref().is_some_and(|m| m.iter().map(|n| n.0).collect::<Vec<_>>() == have)
+                    };
+                    if !made(&self.reconfigure) && !made(&self.rival) {
                         return Err(format!(
-                            "n{i}'s change was superseded by members {have:?}, not {want:?}"
+                            "n{i}'s change was superseded by {have:?}, which nobody proposed"
                         ));
                     }
-                    self.change = None;
+                    if self.change == Some((i, id)) {
+                        self.change = None;
+                    } else {
+                        self.rival_change = None;
+                    }
                 }
                 Action::Committed { id, slot } => {
                     self.nodes[i].acked.insert(id);
@@ -572,6 +590,7 @@ impl State {
                 .iter()
                 .all(|n| n.reads.is_empty() && n.proposed.keys().all(|id| n.acked.contains(id)))
             && self.change.is_none()
+            && self.rival_change.is_none()
             && (self.reconfigure.is_none() || !self.epochs.is_empty())
     }
 
@@ -617,6 +636,8 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         epochs: BTreeMap::new(),
         reconfigure: None,
         change: None,
+        rival: None,
+        rival_change: None,
     };
     for i in 0..init.nodes.len() {
         init.drain(i)?;
@@ -626,10 +647,21 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         let members: Vec<NodeId> = members.iter().map(|&m| NodeId(m as u32)).collect();
         let id = n
             .replica
-            .propose_reconfiguration(Timestamp(0), members.clone(), Vec::new())
+            .propose_reconfiguration(Timestamp(0), members.clone(), members.clone())
             .map_err(|e| e.to_string())?;
         init.reconfigure = Some(members);
         init.change = Some((*at, id));
+        init.drain(*at)?;
+    }
+    if let Some((at, members)) = &cfg.rival {
+        let n = &mut init.nodes[*at];
+        let members: Vec<NodeId> = members.iter().map(|&m| NodeId(m as u32)).collect();
+        let id = n
+            .replica
+            .propose_reconfiguration(Timestamp(0), members.clone(), members.clone())
+            .map_err(|e| e.to_string())?;
+        init.rival = Some(members);
+        init.rival_change = Some((*at, id));
         init.drain(*at)?;
     }
     for (k, &i) in cfg.proposals.iter().enumerate() {
