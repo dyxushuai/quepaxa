@@ -35,6 +35,11 @@ in log order. If nothing is written meanwhile, slots `s + 1` to `s + 63` are fil
 empty batches like stalled slots (the leader first, the others if it is down), so a change
 takes effect without traffic.
 
+- **Leader placement.** With [`Config::placement`](crate::Config::placement) on every
+  member, the leader moves itself to the member that gives writers the lowest commit
+  latency, by the same kind of change ([tuning](crate::guide::tuning)). An operator's
+  change still goes through; while placement's own change is on its way, a local call
+  gets `ReconfigurationPending`, and one that loses the race reports `Superseded`.
 - **Changing only the leader.** [`propose_leader_order`](crate::Replica::propose_leader_order)
   takes the members in force in a new order, preferred leader first, and makes the same
   kind of change with the members kept: the new leader leads from 64 slots after the

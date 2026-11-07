@@ -83,7 +83,7 @@ impl Replica {
         }
     }
 
-    fn leads_now(&self) -> bool {
+    pub(super) fn leads_now(&self) -> bool {
         self.schedule.leader(Slot(self.committed)) == self.me
     }
 

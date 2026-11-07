@@ -120,6 +120,10 @@ impl Replica {
                 self.confirm_retired();
                 continue;
             }
+            if self.placement.moving == Some(id) {
+                self.placement.moving = None;
+                continue;
+            }
             // A decided change enters dedup whether it was applied or ignored.
             if kind == Kind::Reconfigure {
                 self.actions.push(Action::Dropped { id, reason: DropReason::Unresolved });
