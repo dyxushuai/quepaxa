@@ -501,9 +501,16 @@ impl State {
                     let made = |m: &Option<Vec<NodeId>>| {
                         m.as_ref().is_some_and(|m| m.iter().map(|n| n.0).collect::<Vec<_>>() == have)
                     };
-                    if !made(&self.reconfigure) && !made(&self.rival) {
+                    // The rival is never proposed again, so only the other change beats it;
+                    // the change loses to the rival or to its own earlier copy.
+                    let beaten = if self.rival_change == Some((i, id)) {
+                        made(&self.reconfigure)
+                    } else {
+                        made(&self.reconfigure) || made(&self.rival)
+                    };
+                    if !beaten {
                         return Err(format!(
-                            "n{i}'s change was superseded by {have:?}, which nobody proposed"
+                            "n{i}'s change was superseded by {have:?}, not by the change it lost to"
                         ));
                     }
                     if self.change == Some((i, id)) {
@@ -529,6 +536,13 @@ impl State {
                             ));
                         }
                         Some(_) => {}
+                        // Rivals share a base: once one applies, the other is stale.
+                        None if self.rival.is_some() && !self.epochs.is_empty() => {
+                            return Err(format!(
+                                "n{i} applied epoch {epoch} after {:?}: both rivals applied",
+                                self.epochs
+                            ));
+                        }
                         None => {
                             if let Some((other, _)) = self.epochs.iter().find(|(_, (f, _))| *f == from.0) {
                                 return Err(format!(

@@ -203,7 +203,7 @@ fn membership_changes_under_faults_stay_safe_and_converge() {
 }
 
 #[test]
-fn placement_under_faults_and_membership_changes_stays_safe_and_converges() {
+fn placement_under_faults_and_reconfigurations_stays_safe_and_converges() {
     // Placement with periods short enough to move the leader within a run, under faults.
     // Half the seeds also change membership about twice a second and crash replicas; every
     // change and restart starts a hold, so there placement mostly waits, and moves happen in
@@ -214,8 +214,10 @@ fn placement_under_faults_and_membership_changes_stays_safe_and_converges() {
         .unwrap_or_else(|| env("QPX_SIM_SEEDS").map_or(60, |s| (s / 100).max(60)));
     let moves = AtomicU64::new(0);
     for_seeds(seeds, |seed| {
-        let n = [3, 5][(seed % 2) as usize];
-        let changes = seed / 2 % 2 == 0;
+        // Mixed, so that every nightly shard (seeds equal modulo the shard count) runs both.
+        let mix = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 62;
+        let n = [3, 5][(mix % 2) as usize];
+        let changes = mix / 2 == 0;
         let hostile = SimConfig::hostile(n, seed);
         let cfg = SimConfig {
             spares: 2,
