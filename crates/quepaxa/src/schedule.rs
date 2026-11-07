@@ -131,6 +131,12 @@ impl Schedule {
         all
     }
 
+    /// Whether every order change counted so far (membership change or rotation) is in
+    /// force by `slot`.
+    pub fn settled(&self, slot: Slot) -> bool {
+        self.history.last().is_some_and(|(from, _)| *from <= slot.0)
+    }
+
     /// The latest epoch and the slot it starts at (possibly still in the future).
     pub fn epoch(&self) -> (u64, u64) {
         (self.epoch, self.epoch_from)

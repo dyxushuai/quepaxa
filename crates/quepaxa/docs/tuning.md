@@ -17,7 +17,8 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `retransmit_interval` | 50 ms | When an unanswered request is sent again. |
 | `hedge_min`, `hedge_max` | 1 ms, 1 s | Bounds of the adaptive hedge delay. |
 | `silent_leader_takeover` | on | Stop waiting for a leader that has said nothing for about a commit latency since a forward. |
-| `placement` | off | Measure round trips to the other members and where writes come from (for leader placement). Enable it on every member or on none. |
+| `placement` | off | Move the leader to the member that gives writers the lowest commit latency. Enable it on every member or on none. |
+| `placement_sustain`, `placement_hold` | 3 min, 10 min | How long a gain must last before a move, and how long any order change is left alone. |
 
 ## Throughput
 
@@ -53,12 +54,22 @@ The defaults assume round trips of a few milliseconds.
   than twice that acknowledgement's round trip, than one round trip plus its cooldown, or
   than `hedge_min`, is never counted.
 - **`leader_order`**: put the leader where a majority is closest.
-- **`placement`** (off by default): while writes are being applied, the member probes
+- **`placement`** (off by default): while writes are being applied, each member probes
   every other member once a second and keeps a smoothed round trip to each; a round trip
   not sampled for four seconds counts as unknown. Probing stops four seconds after the
   last write, so an idle cluster stays quiet. Members with it off neither probe nor
-  answer. Writes are attributed to the member they were proposed at, so clients should
-  submit to their nearest replica.
+  answer. The leader in force ranks every member by the commit latency it would give:
+  each writer's round trip to it, weighted by how much that writer writes, plus its round
+  trip to a majority for every write. When another member costs at most 80% of the
+  leader at every round for `placement_sustain`, no order change happened within
+  `placement_hold`, and at least about one write a second flows, the leader proposes an
+  order with that member first (a normal leader-order change, in force 64 slots later).
+  A member any writer cannot reach is never placed first, and a leader that miss-based
+  rotation demoted is not placed first again for a hold (twice as long each time it is
+  demoted again soon). Writes are attributed to the member they were proposed at, so
+  clients should submit to their nearest replica; clients that send everything to the
+  leader make it look best placed. A membership change without a `leader_order` keeps the
+  order of the members that stay, new members last.
 
 The repository's simulated five-region benchmark (`docs/benchmarks.md`) shows each effect.
 

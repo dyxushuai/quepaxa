@@ -10,6 +10,7 @@ mod log;
 mod messages;
 mod placement;
 mod proposing;
+mod ranking;
 mod reads;
 mod retire;
 mod snapshot;
@@ -313,6 +314,9 @@ impl Replica {
             r.seen.entry(slot).or_insert(now);
         }
         r.emit_commits();
+        if r.cfg.placement {
+            r.restart_hold();
+        }
         // After a restart, ask every known replica where the log is: one that was away, even
         // through its own removal, learns what it missed without waiting for someone to write.
         if last_incarnation > 0 {
@@ -426,7 +430,19 @@ impl Replica {
         {
             return Err(Error::InvalidConfig("members must be non-empty and unique"));
         }
-        let order = if leader_order.is_empty() { by_id.clone() } else { leader_order };
+        let order = if !leader_order.is_empty() {
+            leader_order
+        } else if self.cfg.placement {
+            // Placement owns the order: members that stay keep theirs (as last scheduled, a
+            // rotation not yet in force included), new ones go last.
+            let in_force = self.schedule.member_sets_from(Slot(self.committed)).last().unwrap_or_default();
+            let staying = in_force.iter().copied().filter(|n| by_id.contains(n));
+            let mut order: Vec<NodeId> = staying.collect();
+            order.extend(by_id.iter().copied().filter(|n| !in_force.contains(n)));
+            order
+        } else {
+            by_id.clone()
+        };
         let mut sorted = order.clone();
         sorted.sort_unstable();
         if sorted != by_id {
@@ -622,8 +638,8 @@ impl Replica {
 
     fn fence(&mut self) {
         self.fenced = true;
-        let internal = self.retire_barrier.take().map(|(_, id)| id);
-        for id in mem::take(&mut self.outstanding).into_keys().filter(|id| Some(*id) != internal) {
+        let internal = [self.retire_barrier.take().map(|(_, id)| id), self.placement.moving.take()];
+        for id in mem::take(&mut self.outstanding).into_keys().filter(|id| !internal.contains(&Some(*id))) {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }
         self.drop_reads();
@@ -672,6 +688,8 @@ impl Replica {
 
 #[cfg(test)]
 mod placement_tests;
+#[cfg(test)]
+mod ranking_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -84,11 +84,19 @@ pub struct Config {
     /// for the life of the cluster's state: a replica refuses to start from, or install, a
     /// snapshot built under another order.
     pub leader_order: Vec<NodeId>,
-    /// Whether this member measures round trips to the others and where writes come from,
-    /// for leader placement. While writes flow it probes every member once a second;
-    /// members with it off neither probe nor answer, so enable it on every member. Off by
-    /// default.
+    /// Whether this member takes part in leader placement: while writes flow it probes
+    /// every member once a second for round trips and counts where writes come from, and
+    /// while it leads it moves the leader to the member that gives writers the lowest
+    /// commit latency, by an ordinary leader-order change. Members with it off neither
+    /// probe nor answer, so enable it on every member. Off by default. See
+    /// [`guide::tuning`](crate::guide::tuning).
     pub placement: bool,
+    /// How long, in nanoseconds, a member must keep a gain of at least 20% over the leader
+    /// before placement moves the leader to it. Default 3 minutes.
+    pub placement_sustain: u64,
+    /// After any change of the leader order, how long, in nanoseconds, placement leaves it
+    /// alone. Default 10 minutes.
+    pub placement_hold: u64,
 }
 
 impl Config {
@@ -112,6 +120,8 @@ impl Config {
             silent_leader_takeover: true,
             leader_order: Vec::new(),
             placement: false,
+            placement_sustain: 180_000 * MILLI,
+            placement_hold: 600_000 * MILLI,
         }
     }
 

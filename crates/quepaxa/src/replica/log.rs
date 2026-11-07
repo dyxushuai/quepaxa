@@ -181,6 +181,12 @@ impl Replica {
                     self.confirm_retired();
                     continue;
                 }
+                // Placement's own move: applied or ignored, the application never sees it.
+                if self.placement.moving == Some(id) {
+                    self.placement.moving = None;
+                    self.outstanding.remove(&id);
+                    continue;
+                }
                 if superseded.contains(&id) {
                     if self.outstanding.remove(&id).is_some() {
                         self.actions.push(Action::Dropped { id, reason: DropReason::Superseded });
@@ -200,6 +206,9 @@ impl Replica {
                 self.batches.remove(&key.seq);
             }
             self.emitted += 1;
+            if self.cfg.placement {
+                self.note_applied(slot);
+            }
         }
     }
 
