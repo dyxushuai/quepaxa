@@ -17,6 +17,8 @@ pub enum Cmd {
     Stats,
     /// New members, preferred leaders first (empty: by id).
     Reconfigure(Vec<NodeId>, Vec<NodeId>),
+    /// A new leader order for the members in force.
+    LeaderOrder(Vec<NodeId>),
 }
 
 #[derive(Debug, PartialEq, Eq)]

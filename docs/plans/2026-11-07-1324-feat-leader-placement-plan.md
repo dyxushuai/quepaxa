@@ -252,7 +252,7 @@ flowchart TB
   1. Validate the order as a permutation of the members in force at `committed`, then submit through the same path as `propose_reconfiguration`.
   2. Add no C function: `qpx_propose_reconfiguration` with the current members and a new order already makes an order-only change, which keeps the C ABI to R10's scalar additions. Document that use in the C header comment and the membership guide.
   3. Add `LEADERS <ids>` to kv-tokio.
-  4. With placement enabled, give a membership change without an order the in-force order of the staying members, new members last (KTD9).
+  4. With placement enabled, give a membership change without an order the in-force order of the staying members, new members last (KTD9). Moved to U5, which adds the placement switch this step needs.
 - **Test scenarios:**
   - An order naming exactly the members in force is accepted and in force `LAG` slots after its decision.
   - An order missing a member, adding a non-member or repeating one is rejected with `InvalidConfig`.
@@ -294,6 +294,7 @@ flowchart TB
   2. Compute KTD4's cost per member, rank, and track how long the gain has held.
   3. Record when the order in force last changed, from `applied_schedule`, for the hold (KTD5).
   4. Submit the move as an internal change (KTD1) with KTD6's base epoch.
+  5. With placement enabled, a membership change given no order keeps the in-force order of the staying members, new members last (KTD9; moved here from U3). Test: adding a member without an order leaves the leader unchanged.
 - **Execution note:** test-first in `placement_tests.rs` with injected tables and write counts; no network needed.
 - **Technical design:** directional. `evaluate(now)` returns either nothing or an order; the caller submits it. Keeping the decision a pure function of tables, counts, schedule and times makes it testable without a cluster.
 - **Test scenarios:**

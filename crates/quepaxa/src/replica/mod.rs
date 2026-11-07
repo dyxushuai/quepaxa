@@ -428,12 +428,40 @@ impl Replica {
         if sorted != by_id {
             return Err(Error::InvalidConfig("leader_order must list every member exactly once"));
         }
+        self.check_no_change_pending()?;
+        let change = crate::schedule::encode_change(self.schedule.generation(), &order);
+        self.enqueue(now, change, Kind::Reconfigure)
+    }
+
+    /// Proposes a new leader order for the members in force: `order` lists each of them
+    /// once, the preferred leader first. A membership change that keeps the members, decided
+    /// and reported like [`Replica::propose_reconfiguration`] (in C, call
+    /// `qpx_propose_reconfiguration` with the current members and the new order).
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::ReconfigurationPending`] while a change (decided, or proposed here) has
+    ///   not taken effect.
+    /// - [`Error::InvalidConfig`] if `order` is not a permutation of the members in force.
+    /// - As [`Replica::propose`] otherwise.
+    pub fn propose_leader_order(&mut self, now: Timestamp, order: Vec<NodeId>) -> Result<ProposalId, Error> {
+        self.check_no_change_pending()?;
+        let mut in_force = self.schedule.members(Slot(self.committed)).to_vec();
+        in_force.sort_unstable();
+        let mut given = order.clone();
+        given.sort_unstable();
+        if given != in_force {
+            return Err(Error::InvalidConfig("order must list every member in force exactly once"));
+        }
+        self.propose_reconfiguration(now, order.clone(), order)
+    }
+
+    fn check_no_change_pending(&self) -> Result<(), Error> {
         let proposed_here = self.outstanding.values().any(|(_, kind, _)| *kind == Kind::Reconfigure);
         if self.schedule.epoch().1 > self.committed || proposed_here {
             return Err(Error::ReconfigurationPending);
         }
-        let change = crate::schedule::encode_change(self.schedule.generation(), &order);
-        self.enqueue(now, change, Kind::Reconfigure)
+        Ok(())
     }
 
     fn enqueue(&mut self, now: Timestamp, payload: Bytes, kind: Kind) -> Result<ProposalId, Error> {

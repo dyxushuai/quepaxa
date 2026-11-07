@@ -625,3 +625,54 @@ fn membership_changes_are_validated() {
         assert!(matches!(r.propose_reconfiguration(T0, members, order), Err(Error::InvalidConfig(_))));
     }
 }
+
+#[test]
+fn a_leader_order_change_moves_the_leader_a_window_later() {
+    let mut rs: Vec<Replica> = (0..3).map(|i| ordered(i, &[])).collect();
+    let mut seen = run_without(&mut rs, &[]);
+    let id = rs[1].propose_leader_order(T0, vec![NodeId(2), NodeId(0), NodeId(1)]).unwrap();
+    assert_eq!(
+        rs[1].propose_leader_order(T0, vec![NodeId(1), NodeId(0), NodeId(2)]),
+        Err(Error::ReconfigurationPending)
+    );
+    seen.extend(run_without(&mut rs, &[]));
+    let mut t = 1;
+    while rs.iter().any(|r| r.next_deadline().is_some()) {
+        assert!(t < 200, "still busy");
+        for r in &mut rs {
+            r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+        }
+        seen.extend(run_without(&mut rs, &[]));
+        t += 1;
+    }
+    assert!(seen.iter().any(|(i, a)| *i == 1 && matches!(a, Action::Committed { id: c, .. } if *c == id)));
+    for i in 0..3 {
+        let changes: Vec<_> = seen
+            .iter()
+            .filter_map(|(j, a)| match a {
+                Action::Reconfigured { epoch, from, members } if *j == i => {
+                    Some((*epoch, from.0, members.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(changes.len(), 1, "replica {i}: {changes:?}");
+        assert_eq!(changes[0].2, [NodeId(2), NodeId(0), NodeId(1)], "replica {i}");
+        assert_eq!(changes[0].0, 1);
+    }
+    // Writes still commit under the new order.
+    let before = rs[2].commit_index();
+    rs[2].propose(T0, Bytes::from_static(b"after")).unwrap();
+    run_without(&mut rs, &[]);
+    assert!(rs.iter().all(|r| r.commit_index() > before));
+}
+
+#[test]
+fn a_leader_order_must_name_exactly_the_members_in_force() {
+    let mut r = ordered(0, &[]);
+    drain(&mut r);
+    for order in [vec![0, 1], vec![0, 1, 2, 3], vec![0, 1, 1], vec![]] {
+        let order = order.into_iter().map(NodeId).collect();
+        assert!(matches!(r.propose_leader_order(T0, order), Err(Error::InvalidConfig(_))), "accepted");
+    }
+}
