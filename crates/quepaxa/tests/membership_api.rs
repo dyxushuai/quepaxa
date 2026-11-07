@@ -658,7 +658,8 @@ fn a_leader_order_change_moves_the_leader_a_window_later() {
             .collect();
         assert_eq!(changes.len(), 1, "replica {i}: {changes:?}");
         assert_eq!(changes[0].2, [NodeId(2), NodeId(0), NodeId(1)], "replica {i}");
-        assert_eq!(changes[0].0, 1);
+        // Decided in slot 0, the first slot of this cluster: in force a window later.
+        assert_eq!((changes[0].0, changes[0].1), (1, 64), "replica {i}");
     }
     // Writes still commit under the new order.
     let before = rs[2].commit_index();
