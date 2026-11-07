@@ -12,7 +12,9 @@
 # Finally, trace validation (traces.sh) checks the Rust implementation against
 # QuePaxa.tla.
 #
-# Needs Java 11+ (or Docker) and cargo. Usage: verification/tla/run.sh
+# Needs Java 11+ (or Docker) and cargo. Usage: verification/tla/run.sh [part...], where a part
+# is quepaxa, membership, reads, bugs or traces (all of them by default); nightly runs them as
+# parallel jobs, since together they outlast one job's time limit.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
@@ -20,6 +22,13 @@ seconds=${TLA_SECONDS:-120}
 bug_seconds=${TLA_BUG_SECONDS:-120}
 membership_seconds=${TLA_MEMBERSHIP_SECONDS:-1800}
 source "$here/lib.sh"
+
+parts=("$@")
+[[ ${#parts[@]} -eq 0 ]] && parts=(quepaxa membership reads bugs traces)
+for part in "${parts[@]}"; do
+  [[ $part =~ ^(quepaxa|membership|reads|bugs|traces)$ ]] || { echo "unknown part: $part"; exit 2; }
+done
+runs() { [[ " ${parts[*]} " == *" $1 "* ]]; }
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -47,13 +56,15 @@ simulate_ok() {
   fi
 }
 
-simulate_ok QuePaxa.tla QuePaxa QuePaxa "$here/QuePaxa.tla" "$here/QuePaxa.cfg"
-# The proof's inductive invariant (prove.sh) on reachable states: a change to QuePaxa.tla
-# that breaks it shows up here in minutes.
-simulate_ok "QuePaxaProof.tla (IndInv)" QuePaxaProof QuePaxaProof \
-  "$here/QuePaxa.tla" "$here/QuePaxaProof.tla" "$here/QuePaxaProof.cfg"
+if runs quepaxa; then
+  simulate_ok QuePaxa.tla QuePaxa QuePaxa "$here/QuePaxa.tla" "$here/QuePaxa.cfg"
+  # The proof's inductive invariant (prove.sh) on reachable states: a change to QuePaxa.tla
+  # that breaks it shows up here in minutes.
+  simulate_ok "QuePaxaProof.tla (IndInv)" QuePaxaProof QuePaxaProof \
+    "$here/QuePaxa.tla" "$here/QuePaxaProof.tla" "$here/QuePaxaProof.cfg"
+fi
 
-for cfg in Membership MembershipQuorum; do
+runs membership && for cfg in Membership MembershipQuorum; do
   mkdir "$work/$cfg"
   cp "$here/Membership.tla" "$here/$cfg.cfg" "$work/$cfg/"
   out=$(tlc "$work/$cfg" "$membership_seconds" Membership -config "$cfg.cfg" 2>&1)
@@ -67,20 +78,22 @@ for cfg in Membership MembershipQuorum; do
   fi
 done
 
-mkdir "$work/ReadsFixed"
-cp "$here/Membership.tla" "$here/Reads.tla" "$here/ReadsFixed.cfg" "$work/ReadsFixed/"
-out=$(tlc "$work/ReadsFixed" "$membership_seconds" Reads -config ReadsFixed.cfg 2>&1)
-status=$?
-if [[ $status -ne 0 ]] || ! grep -q "0 states left on queue" <<< "$out"; then
-  echo "FAIL    Reads.tla (ReadsFixed.cfg): TLC ended with status $status:"
-  grep -E -A30 "violated|^Error" <<< "$out" | head -60; tail -5 <<< "$out"
-  failed=1
-else
-  echo "OK      Reads.tla (ReadsFixed.cfg): exhaustive, $(grep -oE '[0-9,]+ distinct states found' <<< "$out" | tail -1)"
+if runs reads; then
+  mkdir "$work/ReadsFixed"
+  cp "$here/Membership.tla" "$here/Reads.tla" "$here/ReadsFixed.cfg" "$work/ReadsFixed/"
+  out=$(tlc "$work/ReadsFixed" "$membership_seconds" Reads -config ReadsFixed.cfg 2>&1)
+  status=$?
+  if [[ $status -ne 0 ]] || ! grep -q "0 states left on queue" <<< "$out"; then
+    echo "FAIL    Reads.tla (ReadsFixed.cfg): TLC ended with status $status:"
+    grep -E -A30 "violated|^Error" <<< "$out" | head -60; tail -5 <<< "$out"
+    failed=1
+  else
+    echo "OK      Reads.tla (ReadsFixed.cfg): exhaustive, $(grep -oE '[0-9,]+ distinct states found' <<< "$out" | tail -1)"
+  fi
+  for cfg in Reads ReadsTwoChanges; do
+    simulate_ok "Reads.tla ($cfg.cfg)" Reads "$cfg" "$here/Membership.tla" "$here/Reads.tla" "$here/$cfg.cfg"
+  done
 fi
-for cfg in Reads ReadsTwoChanges; do
-  simulate_ok "Reads.tla ($cfg.cfg)" Reads "$cfg" "$here/Membership.tla" "$here/Reads.tla" "$here/$cfg.cfg"
-done
 
 # spec, its configuration, name, invariant it must violate, seconds to find it ("-" for
 # TLA_BUG_SECONDS), then a sed expression planting the bug. Configurations too large to
@@ -102,7 +115,7 @@ bugs=(
   Reads ReadsFixed "read-counts-earlier-answers" ReadSafe - 's/before \|-> \{t \\in Slots : decided\[t\] # None\}, who \|-> \{\}, k \|-> 1,/before |-> {t \\in Slots : decided[t] # None}, who |-> rd[i].who, k |-> rd[i].k,/; s/^    \/\\ rd\[i\]\.st = "open"$/    \/\\ rd[i].st \\in {"idle", "open"}/'
   Reads ReadsTwoChanges "read-asks-the-newest-epoch-only" ReadSafe - "s/$covering/    LET st == Latest(r) IN {st.nxt}/"
 )
-for ((i = 0; i < ${#bugs[@]}; i += 6)); do
+runs bugs && for ((i = 0; i < ${#bugs[@]}; i += 6)); do
   spec=${bugs[i]} cfg=${bugs[i + 1]} name=${bugs[i + 2]} invariant=${bugs[i + 3]} limit=${bugs[i + 4]}
   [[ $limit == - ]] && limit=$bug_seconds
   mode=(-config "$cfg.cfg")
@@ -121,5 +134,5 @@ for ((i = 0; i < ${#bugs[@]}; i += 6)); do
     failed=1
   fi
 done
-"$here/traces.sh" || failed=1
+if runs traces; then "$here/traces.sh" || failed=1; fi
 exit $failed

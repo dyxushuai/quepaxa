@@ -8,16 +8,18 @@
 # to re-prove every obligation instead of reusing proved ones.
 #
 # tlapm 1.6 is only published as the rolling `1.6.0-pre` release (the only one that bundles
-# its provers): if upstream replaces the archive, the checksum fails loudly; pin the new
-# archive's digest after re-running the proof with it.
+# its provers), which upstream replaces on every build. So the archive comes from an
+# unmodified copy attached to a release of this repository. To move to a newer tlapm, run
+# the proofs with it, attach it to a new `tools-tlapm-*` release and pin its digest here.
 #
 # Usage: verification/tla/prove.sh [tlapm args]
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../.." && pwd)
 version=1.6.0-pre
-sha256=0d1b393a1042aa08961bb024c784a80a25009a5874258c0ddbbfd95b92e80fe5
-url=https://github.com/tlaplus/tlapm/releases/download/$version/tlapm-$version-x86_64-linux-gnu.tar.gz
+mirror=tools-tlapm-1.6.0-pre-20261107
+sha256=9ce497d92f96907ea205badb44dee0436260b898a4c415de22eabd52cfc0ec07
+url=https://github.com/dyxushuai/quepaxa/releases/download/$mirror/tlapm-$version-x86_64-linux-gnu.tar.gz
 # The digest in the path: a new pin never reuses an install of another archive.
 tools=$root/target/tlapm-${sha256:0:12}
 work=$root/target/tlaps
@@ -27,7 +29,7 @@ if [[ ! -x $tools/bin/tlapm ]]; then
   mkdir -p "$root/target"
   curl -fsSL -o "$tools.tar.gz.part" "$url"
   [[ $(digest "$tools.tar.gz.part" | cut -d' ' -f1) == "$sha256" ]] || {
-    echo "tlapm archive checksum mismatch (upstream replaced $version?)"; rm -f "$tools.tar.gz.part"; exit 1; }
+    echo "tlapm archive checksum mismatch ($url)"; rm -f "$tools.tar.gz.part"; exit 1; }
   rm -rf "$tools.unpack" && mkdir "$tools.unpack"
   tar xzf "$tools.tar.gz.part" -C "$tools.unpack"
   rm -rf "$tools" && mv "$tools.unpack/tlapm" "$tools"

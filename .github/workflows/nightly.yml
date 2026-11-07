@@ -86,6 +86,11 @@ jobs:
         run: cargo nextest run --release -p quepaxa --no-fail-fast
 
   tla:
+    # Together the parts take over 90 minutes (four 20-minute simulations alone).
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [quepaxa, membership, reads, bugs, traces]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -96,11 +101,11 @@ jobs:
           java-version: "21"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: TLC on the independent models (one slot simulated, membership exhaustive), their seeded bugs, and trace validation
+      - name: TLC on the independent models (one slot simulated, membership exhaustive), their seeded bugs, and trace validation (${{ matrix.part }})
         env:
           TLA_SECONDS: "1200"
           TLA_BUG_SECONDS: "300"
-        run: verification/tla/run.sh
+        run: verification/tla/run.sh ${{ matrix.part }}
 
   tlaps:
     runs-on: ubuntu-24.04
