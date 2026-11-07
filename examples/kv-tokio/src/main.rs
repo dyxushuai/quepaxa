@@ -4,10 +4,13 @@
 //! kv-tokio --id 0 --members 0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102 \
 //!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
 //!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379] [--retransmit-ms 400] [--hedge-max-ms 3000]
+//!          [--placement on]
 //! ```
 //!
 //! `--retransmit-ms` and `--hedge-max-ms` set the replica's `retransmit_interval` and
 //! `hedge_max`; raise them above the longest round trip and commit path on a WAN.
+//! `--placement on` lets the leader move to the replica where writes commit fastest (set it
+//! on every replica). `STATS` ends with `LEADERS <ids>`, the leader order in force.
 //!
 //! `--members` are the configured members; `--peers` are replicas that may join later (a
 //! joining replica runs with the same `--members` and finds its own address in `--peers`).
@@ -79,6 +82,7 @@ struct Args {
     leader_order: Vec<NodeId>,
     retransmit_ms: Option<u64>,
     hedge_max_ms: Option<u64>,
+    placement: bool,
 }
 
 const MILLI: u64 = 1_000_000;
@@ -86,7 +90,7 @@ const MILLI: u64 = 1_000_000;
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
     let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
-    let (mut retransmit_ms, mut hedge_max_ms) = (None, None);
+    let (mut retransmit_ms, mut hedge_max_ms, mut placement) = (None, None, false);
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -120,6 +124,13 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--hedge-max-ms" => {
                 hedge_max_ms = Some(value.parse().map_err(|e| format!("--hedge-max-ms: {e}"))?)
             }
+            "--placement" => {
+                placement = match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err("--placement: expected on or off".to_owned()),
+                }
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -139,6 +150,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         leader_order,
         retransmit_ms,
         hedge_max_ms,
+        placement,
     })
 }
 
@@ -159,6 +171,7 @@ fn config(args: &Args) -> Config {
     if let Some(ms) = args.hedge_max_ms {
         cfg.hedge_max = ms.saturating_mul(MILLI);
     }
+    cfg.placement = args.placement;
     cfg
 }
 
@@ -479,6 +492,8 @@ mod tests {
             (default.retransmit_interval, default.hedge_max)
         );
         let zero = config(&args(&format!("{base} --hedge-max-ms 0")).unwrap());
+        assert!(!wan.placement && config(&args(&format!("{base} --placement on")).unwrap()).placement);
+        assert!(args(&format!("{base} --placement yes")).is_err());
         assert!(Replica::new(zero, [], Timestamp(0)).is_err(), "the replica's own validation refuses it");
         let bad = args(&format!("{base} --retransmit-ms soon")).err().unwrap();
         assert!(bad.starts_with("--retransmit-ms"), "{bad}");

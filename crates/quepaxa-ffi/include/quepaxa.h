@@ -35,7 +35,9 @@
 // 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range;
 // `QPX_METRIC_STEPPED_ASIDE`.
 // 0.9: `QPX_DROP_SUPERSEDED`, `QPX_DROP_UNRESOLVED`.
-#define QPX_ABI_VERSION_MINOR 9
+// 0.10: leader placement: `QPX_CONFIG_PLACEMENT*`, `QPX_METRIC_SUSPICIONS`,
+// `QPX_METRIC_PLACEMENT_MOVES`, `QPX_METRIC_EPOCH`, `QPX_METRIC_LEADER_POSITION`.
+#define QPX_ABI_VERSION_MINOR 10
 
 // Success.
 #define QPX_OK 0
@@ -168,6 +170,18 @@
 // Times this replica stepped aside because a write waited too long on its disk.
 #define QPX_METRIC_STEPPED_ASIDE 11
 
+// Times this replica suspected the member it hands entries to of being silent (ABI 0.10).
+#define QPX_METRIC_SUSPICIONS 12
+
+// Leader-order changes leader placement proposed from this replica (ABI 0.10).
+#define QPX_METRIC_PLACEMENT_MOVES 13
+
+// Gauge: membership epoch in force (ABI 0.10).
+#define QPX_METRIC_EPOCH 14
+
+// Gauge: this replica's position in the leader order in force, 0 when it leads (ABI 0.10).
+#define QPX_METRIC_LEADER_POSITION 15
+
 // Largest batch of entries per slot, bytes (`u32`).
 #define QPX_CONFIG_MAX_BATCH_BYTES 1
 
@@ -188,6 +202,17 @@
 
 // Upper bound of the hedge delay, nanoseconds.
 #define QPX_CONFIG_HEDGE_MAX_NS 7
+
+// Leader placement on this member: 1 on, 0 off (the default). Enable it on every member
+// (ABI 0.10).
+#define QPX_CONFIG_PLACEMENT 8
+
+// How long a member must keep a 20% gain before placement moves the leader to it,
+// nanoseconds (ABI 0.10).
+#define QPX_CONFIG_PLACEMENT_SUSTAIN_NS 9
+
+// How long placement leaves any change of the leader order alone, nanoseconds (ABI 0.10).
+#define QPX_CONFIG_PLACEMENT_HOLD_NS 10
 
 // Replica configuration: create it with `qpx_config_new`, adjust it with `qpx_config_set`
 // and `qpx_config_set_leader_order`, pass it to `qpx_replica_new` (which copies it), and

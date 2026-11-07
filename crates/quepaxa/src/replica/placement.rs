@@ -1,5 +1,5 @@
 //! Leader placement, measurement side: round trips between members and where writes come
-//! from.
+//! from. `ranking.rs` decides from them where the leader goes.
 //!
 //! With `Config::placement`, a member probes every other member of the epoch in force once a
 //! `PROBE_INTERVAL` while writes are being applied: an `RttProbe` carries its clock and its
@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use super::Replica;
 use crate::batch::{Entry, Item, Kind};
 use crate::codec::Body;
-use crate::types::{NodeId, Slot, Timestamp};
+use crate::types::{NodeId, ProposalId, Slot, Timestamp};
 
 /// How often a member probes while writes flow.
 pub(super) const PROBE_INTERVAL: u64 = 1_000_000_000;
@@ -41,15 +41,47 @@ pub(super) struct Placement {
     pub(super) awaiting: BTreeMap<NodeId, Vec<u64>>,
     /// Each member's latest round-trip table, from its probes, and when it arrived.
     pub(super) tables: BTreeMap<NodeId, (Vec<(NodeId, u64)>, Timestamp)>,
-    /// Application entries applied, per origin.
+    /// Application entries applied per origin since the last probe round.
     pub(super) writes: BTreeMap<NodeId, u64>,
+    /// Smoothed writes per probe round, per origin, times eight.
+    pub(super) rates: BTreeMap<NodeId, u64>,
     /// When an application entry was last applied.
     pub(super) last_write: Option<Timestamp>,
     /// When to probe next; none while idle or disabled.
     pub(super) next_probe: Option<Timestamp>,
+    /// The last round this replica evaluated as leader.
+    pub(super) last_round: Option<Timestamp>,
+    /// The member that has kept a gain over the leader in force, and since when.
+    pub(super) target: Option<Target>,
+    /// When the order in force last changed (none: this replica knows of no change).
+    pub(super) changed_at: Option<Timestamp>,
+    /// When the leader in force became leader, as far as this replica saw.
+    pub(super) led_since: Timestamp,
+    /// Members miss-based rotation removed from first place, not to be placed first again
+    /// until `until`.
+    pub(super) excluded: BTreeMap<NodeId, Exclusion>,
+    /// Placement's own order change, from submission until decided, resolved or fenced.
+    pub(super) moving: Option<ProposalId>,
 }
 
-fn fresh(at: Timestamp, now: Timestamp) -> bool {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
+pub(super) struct Target {
+    pub(super) member: NodeId,
+    pub(super) leader: NodeId,
+    pub(super) since: Timestamp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
+pub(super) struct Exclusion {
+    pub(super) until: Timestamp,
+    /// Holds this exclusion lasts: doubled each time the member is demoted again before it
+    /// led for a whole hold.
+    pub(super) factor: u64,
+}
+
+pub(super) fn fresh(at: Timestamp, now: Timestamp) -> bool {
     now.0.saturating_sub(at.0) <= FRESH_FOR
 }
 
@@ -90,6 +122,7 @@ impl Replica {
             return;
         }
         self.placement.next_probe = Some(now.after(PROBE_INTERVAL));
+        self.close_round();
         let members = self.schedule.members(Slot(self.committed)).to_vec();
         // Members of earlier epochs are no longer measured or ranked.
         self.placement.rtt.retain(|n, _| members.contains(n));
@@ -110,6 +143,7 @@ impl Replica {
             let incarnation = self.incarnation;
             self.send(to, Body::RttProbe { incarnation, sent: now.0, table: table.clone() });
         }
+        self.evaluate_placement();
     }
 
     pub(super) fn on_rtt_probe(

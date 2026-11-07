@@ -195,46 +195,30 @@ check_generators() {
   done
 }
 
-# The fast-path decisions a QuePaxa replica's proposers reached, from its STATS line.
-fast_path() {
+# The leader order in force a QuePaxa replica reports in its STATS line: ids, leader first.
+leaders_of() {
   docker run --rm --network "$net" "$image" bash -c \
     "exec 3<>/dev/tcp/$(replica_ip "$1")/7100 && echo STATS >&3 && head -1 <&3" 2>/dev/null |
-    grep -o 'fast_path_decisions: [0-9]*' | grep -o '[0-9]*$' || echo 0
+    grep -o 'LEADERS [0-9,]*' | cut -d' ' -f2
 }
 
-# The region leading now: for QuePaxa the replica whose fast path moves over a second
-# (writes must be flowing), for etcd what it reports.
+# The region leading now: the first replica of the order in force any QuePaxa replica
+# reports, or what etcd reports.
 leader_now() {
   local i
   if [ "$1" = quepaxa ]; then
-    local before=() best_i=- best_d=0 d
-    for i in $(seq 0 $((n - 1))); do before[i]=$(fast_path "$i"); done
-    sleep 1
+    local order
     for i in $(seq 0 $((n - 1))); do
-      d=$(($(fast_path "$i") - before[i]))
-      [ "$d" -gt "$best_d" ] && best_d=$d best_i=$i
+      order=$(leaders_of "$i")
+      [ -n "$order" ] && { echo "${regions[${order%%,*}]}"; return; }
     done
-    [ "$best_i" = - ] && echo none || echo "${regions[$best_i]}"
+    echo none
   else
     local ip
     ip=$(etcd_leader | sed 's|http://||; s|:2379||')
     for i in $(seq 0 $((n - 1))); do [ "$(replica_ip "$i")" = "$ip" ] && { echo "${regions[$i]}"; return; }; done
     echo none
   fi
-}
-
-# leader_now with writes flowing (QuePaxa's leader shows only in its fast path), outside any
-# measurement.
-leader_with_writes() {
-  local now
-  if [ "$1" = quepaxa ]; then
-    docker run -d --rm --name qpx-burst --network "$net" --cpuset-cpus "$gen_cpus" "$image" \
-      benchmark --endpoints="$(endpoints)" put --total 2000 --rate 500 >/dev/null
-    sleep 1
-  fi
-  now=$(leader_now "$1")
-  docker rm -f qpx-burst >/dev/null 2>&1 || true
-  echo "$now"
 }
 
 # Waits for the cluster to take writes, then puts the leader in region <pinned>.
@@ -255,7 +239,7 @@ ready() {
     done
   fi
   local now
-  now=$(leader_with_writes "$system")
+  now=$(leader_now "$system")
   [ "$now" = "${regions[$pinned]}" ] || { echo "$system leads from $now, not ${regions[$pinned]}" >&2; exit 1; }
   echo "  leader: $now"
 }
@@ -328,7 +312,7 @@ run_case() {
   heal "$scenario" "$pinned"
   for i in "${pids[@]}"; do wait "$i"; done
   {
-    echo "leader_after=$(leader_with_writes "$system")"
+    echo "leader_after=$(leader_now "$system")"
     [ "$scenario" = jitter ] && echo "reorders=$(($(reorders) - before))"
   } > "$results/$name-leader.txt"
   case $scenario in slow | jitter) check_links "$pinned" ;; esac

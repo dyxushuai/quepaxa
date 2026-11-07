@@ -174,6 +174,7 @@ impl Replica {
         let target = self.target();
         if target != self.me {
             self.watch.suspects.insert(target, self.now);
+            self.metrics.suspicions += 1;
         }
         self.watch.asked = None;
         for (id, (e, _)) in core::mem::take(&mut self.forwarded).into_iter().rev() {

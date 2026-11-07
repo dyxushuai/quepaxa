@@ -5,10 +5,19 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
-- `quepaxa` (wire): `Config::placement` (off by default) makes a member measure round
-  trips to the other members with two new message kinds, `RttProbe` and `RttReply`, and
-  count applied writes per origin, while writes flow. Peers of older versions reject the
-  new messages.
+- `quepaxa`: `Metrics` gains `suspicions`, `placement_moves` and the `epoch` and
+  `leader_position` gauges; `Replica::members` lists the members in force in leader order
+  with each one's round trip, last reported commit index and last contact. C (ABI 0.10):
+  matching `QPX_METRIC_*` constants and `QPX_CONFIG_PLACEMENT`,
+  `QPX_CONFIG_PLACEMENT_SUSTAIN_NS`, `QPX_CONFIG_PLACEMENT_HOLD_NS`. kv-tokio:
+  `--placement on`, and `STATS` ends with `LEADERS <ids>`.
+- `quepaxa` (wire): leader placement. With `Config::placement` (off by default) on every
+  member, members measure round trips to each other while writes flow (two new message
+  kinds, `RttProbe` and `RttReply`; peers of older versions reject them) and count
+  writes per origin, and the leader moves the lead to the member that gives writers the
+  lowest commit latency once it keeps a 20% gain for `placement_sustain` (3 minutes)
+  and no order change happened within `placement_hold` (10 minutes). With placement on,
+  a membership change without a leader order keeps the order of the staying members.
 - `quepaxa`: `Replica::propose_leader_order` changes only the leader order of the members
   in force; kv-tokio exposes it as `LEADERS <ids>`. In C,
   `qpx_propose_reconfiguration` with the current members and a new order does the same.

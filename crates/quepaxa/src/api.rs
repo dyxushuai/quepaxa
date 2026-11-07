@@ -5,7 +5,7 @@ use bytes::Bytes;
 use core::fmt;
 
 use crate::batch::Entry;
-use crate::types::{NodeId, PersistId, ProposalId, Slot};
+use crate::types::{NodeId, PersistId, ProposalId, Slot, Timestamp};
 
 const MILLI: u64 = 1_000_000;
 
@@ -84,11 +84,19 @@ pub struct Config {
     /// for the life of the cluster's state: a replica refuses to start from, or install, a
     /// snapshot built under another order.
     pub leader_order: Vec<NodeId>,
-    /// Whether this member measures round trips to the others and where writes come from,
-    /// for leader placement. While writes flow it probes every member once a second;
-    /// members with it off neither probe nor answer, so enable it on every member. Off by
-    /// default.
+    /// Whether this member takes part in leader placement: while writes flow it probes
+    /// every member once a second for round trips and counts where writes come from, and
+    /// while it leads it moves the leader to the member that gives writers the lowest
+    /// commit latency, by an ordinary leader-order change. Members with it off neither
+    /// probe nor answer, so enable it on every member. Off by default. See
+    /// [`guide::tuning`](crate::guide::tuning).
     pub placement: bool,
+    /// How long, in nanoseconds, a member must keep a gain of at least 20% over the leader
+    /// before placement moves the leader to it. Default 3 minutes.
+    pub placement_sustain: u64,
+    /// After any change of the leader order, how long, in nanoseconds, placement leaves it
+    /// alone. Default 10 minutes.
+    pub placement_hold: u64,
 }
 
 impl Config {
@@ -112,6 +120,8 @@ impl Config {
             silent_leader_takeover: true,
             leader_order: Vec::new(),
             placement: false,
+            placement_sustain: 180_000 * MILLI,
+            placement_hold: 600_000 * MILLI,
         }
     }
 
@@ -343,6 +353,31 @@ pub struct Metrics {
     pub retained_slots: u64,
     /// Gauge: recorder registers held in memory.
     pub live_registers: u64,
+    /// Times this replica suspected the member it hands entries to of being silent.
+    pub suspicions: u64,
+    /// Leader-order changes leader placement proposed from this replica.
+    pub placement_moves: u64,
+    /// Gauge: the membership epoch in force at the applied prefix (0: the configured members).
+    pub epoch: u64,
+    /// Gauge: this replica's position in the leader order in force at the applied prefix (0:
+    /// it leads); the number of members if it is not one.
+    pub leader_position: u64,
+}
+
+/// One member of the epoch in force as this replica sees it, from
+/// [`crate::Replica::members`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MemberView {
+    /// The member.
+    pub id: NodeId,
+    /// Smoothed round trip from this replica, in nanoseconds, if measured recently (only
+    /// with [`Config::placement`]).
+    pub round_trip: Option<u64>,
+    /// The commit index the member's latest message carried (this replica's own for itself).
+    pub committed: Option<u64>,
+    /// When a message from the member last arrived.
+    pub last_heard: Option<Timestamp>,
 }
 
 /// Why a call was refused. A refused call changes nothing in the replica.

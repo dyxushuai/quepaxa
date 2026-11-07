@@ -269,9 +269,14 @@ fn options_take_effect_and_a_rejected_value_changes_nothing() {
         QPX_CONFIG_RETRANSMIT_INTERVAL_NS,
         QPX_CONFIG_HEDGE_MIN_NS,
         QPX_CONFIG_HEDGE_MAX_NS,
+        QPX_CONFIG_PLACEMENT_SUSTAIN_NS,
+        QPX_CONFIG_PLACEMENT_HOLD_NS,
     ] {
         assert_eq!(unsafe { qpx_config_set(cfg, option, u64::from(u32::MAX)) }, QPX_OK, "option {option}");
     }
+    // A switch takes 0 or 1 only.
+    assert_eq!(unsafe { qpx_config_set(cfg, QPX_CONFIG_PLACEMENT, 1) }, QPX_OK);
+    assert_eq!(unsafe { qpx_config_set(cfg, QPX_CONFIG_PLACEMENT, 2) }, QPX_ERR_INVALID_ARGUMENT);
     unsafe { qpx_config_free(cfg) };
 }
 
@@ -301,8 +306,15 @@ fn metrics_are_readable_over_the_abi() {
     assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_MESSAGES_REJECTED, &mut v) }, QPX_OK);
     assert_eq!(v, 1);
     assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_LIVE_REGISTERS, &mut v) }, QPX_OK);
-    for metric in 1..=QPX_METRIC_STEPPED_ASIDE {
+    for metric in 1..=QPX_METRIC_LEADER_POSITION {
         assert_eq!(unsafe { qpx_metric(h, metric, &mut v) }, QPX_OK, "metric {metric}");
+    }
+    // Replica 0 leads the configured members (epoch 0).
+    for (metric, want) in
+        [(QPX_METRIC_EPOCH, 0), (QPX_METRIC_LEADER_POSITION, 0), (QPX_METRIC_PLACEMENT_MOVES, 0)]
+    {
+        assert_eq!(unsafe { qpx_metric(h, metric, &mut v) }, QPX_OK);
+        assert_eq!(v, want, "metric {metric}");
     }
     assert_eq!(
         unsafe { qpx_metric(h, QPX_METRIC_LIVE_REGISTERS, ptr::null_mut()) },
