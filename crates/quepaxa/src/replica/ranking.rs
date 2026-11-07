@@ -31,54 +31,59 @@ use crate::types::{NodeId, Slot};
 pub(super) const WRITE_FLOOR: u64 = 8;
 
 impl Replica {
-    /// Folds the round's writes into the rates and notes any change of the order in force.
-    /// Runs at every probe round, leader or not, so a new leader starts informed.
+    /// Folds the round's writes into the rates. Runs at every probe round, leader or not, so
+    /// a new leader starts informed.
     pub(super) fn close_round(&mut self) {
+        let members = self.applied_schedule.members(Slot(self.emitted)).to_vec();
         let p = &mut self.placement;
         let writes = core::mem::take(&mut p.writes);
         for origin in writes.keys() {
             p.rates.entry(*origin).or_default();
         }
+        // Rounded up, so a writer that stopped decays to nothing; one that left no longer
+        // counts.
         p.rates.retain(|origin, rate| {
-            *rate = *rate - *rate / 8 + writes.get(origin).copied().unwrap_or(0);
-            *rate > 0
+            *rate = *rate - rate.div_ceil(8) + writes.get(origin).copied().unwrap_or(0);
+            *rate > 0 && members.contains(origin)
         });
-        self.watch_order();
+        // A leader that led for a whole hold starts over.
+        if self.now.0.saturating_sub(p.led_since.0) >= self.cfg.placement_hold {
+            p.excluded.remove(&members[0]);
+        }
+        p.excluded.retain(|n, _| members.contains(n));
     }
 
-    /// Tracks the order in force at the applied prefix: when it last changed, how long its
-    /// leader has led, and which leaders rotation demoted.
-    fn watch_order(&mut self) {
+    /// After slot `applied` is applied: notes whether the order changes from the next slot
+    /// on, which leader that demotes, and whether miss-based rotation (not a decided change)
+    /// did it.
+    pub(super) fn note_applied(&mut self, applied: Slot) {
+        let next = Slot(applied.0 + 1);
+        let (old, new) = (self.applied_schedule.leader(applied), self.applied_schedule.leader(next));
+        if self.applied_schedule.members(applied) == self.applied_schedule.members(next) {
+            return;
+        }
         let now = self.now;
-        let hold = self.cfg.placement_hold;
-        let order = self.applied_schedule.members(Slot(self.emitted)).to_vec();
         let p = &mut self.placement;
-        if p.seen_order.is_empty() {
-            // A replica that knows of no change applies no hold; one restarted after a
-            // change treats it as just made.
-            p.changed_at = (self.applied_schedule.generation() > 0).then_some(now);
-            p.led_since = now;
-        } else if order != p.seen_order {
-            p.changed_at = Some(now);
-            let old = p.seen_order[0];
-            if order[0] != old {
-                p.led_since = now;
-                let rotated = order.len() == p.seen_order.len()
-                    && order[..order.len() - 1] == p.seen_order[1..]
-                    && order[order.len() - 1] == old;
-                if rotated {
-                    let factor = p.excluded.get(&old).map_or(1, |e| e.factor.saturating_mul(2));
-                    let until = now.after(hold.saturating_mul(factor));
-                    p.excluded.insert(old, Exclusion { until, factor });
-                }
-            }
+        p.changed_at = Some(now);
+        if new == old {
+            return;
         }
-        // A leader that led for a whole hold starts over.
-        if now.0.saturating_sub(p.led_since.0) >= hold {
-            p.excluded.remove(&order[0]);
+        p.led_since = now;
+        // A decided change takes effect at its epoch's first slot; any other move of the
+        // leader is a rotation.
+        if self.applied_schedule.epoch().1 != next.0 {
+            let factor = p.excluded.get(&old).map_or(1, |e| e.factor.saturating_mul(2));
+            let until = now.after(self.cfg.placement_hold.saturating_mul(factor));
+            p.excluded.insert(old, Exclusion { until, factor });
         }
-        p.excluded.retain(|n, _| order.contains(n));
-        p.seen_order = order;
+    }
+
+    /// After a restart or a snapshot, whatever changed before is treated as just changed.
+    pub(super) fn restart_hold(&mut self) {
+        if self.applied_schedule.generation() > 0 {
+            self.placement.changed_at = Some(self.now);
+            self.placement.target = None;
+        }
     }
 
     /// Whether this replica may move the lead now: it leads the order in force, has not
@@ -88,7 +93,7 @@ impl Replica {
         self.cfg.placement
             && self.leads_now()
             && !self.watch.aside
-            && self.schedule.epoch().1 <= self.committed
+            && self.schedule.settled(Slot(self.committed))
             && self.placement.moving.is_none()
             && !self.outstanding.values().any(|(_, kind, _)| pending_change(*kind))
             && !self.pending.iter().chain(&self.relayed).any(|i| pending_change(i.kind))

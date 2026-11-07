@@ -53,9 +53,7 @@ pub(super) struct Placement {
     pub(super) last_round: Option<Timestamp>,
     /// The member that has kept a gain over the leader in force, and since when.
     pub(super) target: Option<Target>,
-    /// The order in force when last looked at (empty: not yet), and when it last changed
-    /// (none: not since this replica started, which knows of no change).
-    pub(super) seen_order: Vec<NodeId>,
+    /// When the order in force last changed (none: this replica knows of no change).
     pub(super) changed_at: Option<Timestamp>,
     /// When the leader in force became leader, as far as this replica saw.
     pub(super) led_since: Timestamp,

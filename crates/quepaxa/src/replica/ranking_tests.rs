@@ -221,7 +221,6 @@ fn a_recent_order_change_holds_placement_back() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
     // The order changed five minutes before the gain appears; the hold is ten.
-    r.placement.seen_order = alloc::vec![NodeId(0), NodeId(1), NodeId(2)];
     r.placement.changed_at = Some(Timestamp(PROBE_INTERVAL));
     let t = rounds(&mut r, 300 * PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 10, &rows(&three(50)), &writes);
     assert_eq!(moved(&r), None, "within the hold");
@@ -232,21 +231,34 @@ fn a_recent_order_change_holds_placement_back() {
 
 #[test]
 fn a_rotated_out_leader_is_not_placed_first_and_twice_as_long_the_next_time() {
-    let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
-    round(&mut r, PROBE_INTERVAL, &rows(&three(50)), &writes);
-    // Rotation demotes 1 (then leading) to last.
-    r.placement.seen_order = alloc::vec![NodeId(1), NodeId(2), NodeId(0)];
-    r.placement.led_since = Timestamp(PROBE_INTERVAL);
-    r.applied_schedule = Schedule::with_order(alloc::vec![NodeId(2), NodeId(0), NodeId(1)]);
-    round(&mut r, 2 * PROBE_INTERVAL, &rows(&three(50)), &writes);
-    let e = r.placement.excluded[&NodeId(1)];
-    assert_eq!((e.factor, e.until), (1, Timestamp(2 * PROBE_INTERVAL + HOLD)));
-    // Restored and rotated out again before it led for a whole hold: twice as long.
-    r.placement.seen_order = alloc::vec![NodeId(1), NodeId(2), NodeId(0)];
-    round(&mut r, 3 * PROBE_INTERVAL, &rows(&three(50)), &writes);
-    let e = r.placement.excluded[&NodeId(1)];
-    assert_eq!((e.factor, e.until), (2, Timestamp(3 * PROBE_INTERVAL + 2 * HOLD)));
+    // Slots 0-7 decided by others count a rotation from slot 7 + LAG: 0 is demoted.
+    let mut s = Schedule::with_order(alloc::vec![NodeId(0), NodeId(1), NodeId(2)]);
+    for slot in 0..8 {
+        s.observe(Slot(slot), NodeId(1));
+    }
+    r.applied_schedule = s.clone();
+    r.now = Timestamp(PROBE_INTERVAL);
+    let first = 7 + crate::schedule::LAG;
+    r.note_applied(Slot(first - 1));
+    let e = r.placement.excluded[&NodeId(0)];
+    assert_eq!((e.factor, e.until), (1, Timestamp(PROBE_INTERVAL + HOLD)));
+    assert_eq!(r.placement.changed_at, Some(Timestamp(PROBE_INTERVAL)));
+    // Restored by a change and rotated out again before it led for a whole hold.
+    let back = first;
+    s.reconfigure(Slot(back), s.generation(), alloc::vec![NodeId(0), NodeId(1), NodeId(2)]).unwrap();
+    let from = back + crate::schedule::LAG;
+    for slot in from..from + 8 {
+        s.observe(Slot(slot), NodeId(1));
+    }
+    r.applied_schedule = s;
+    r.now = Timestamp(3 * PROBE_INTERVAL);
+    r.note_applied(Slot(from - 1));
+    assert_eq!(r.placement.excluded[&NodeId(0)].factor, 1, "a decided change is no demotion");
+    r.now = Timestamp(4 * PROBE_INTERVAL);
+    r.note_applied(Slot(from + 7 + crate::schedule::LAG - 1));
+    let e = r.placement.excluded[&NodeId(0)];
+    assert_eq!((e.factor, e.until), (2, Timestamp(4 * PROBE_INTERVAL + 2 * HOLD)));
 }
 
 #[test]
@@ -307,4 +319,73 @@ fn a_membership_change_without_an_order_keeps_the_leader() {
         .unwrap();
     let (_, order) = crate::schedule::decode_change(&item).unwrap();
     assert_eq!(order, [NodeId(2), NodeId(0), NodeId(1), NodeId(3)]);
+}
+
+#[test]
+fn placements_own_move_is_no_demotion() {
+    let mut r = leader(3, &[3, 0, 1, 2, 4]);
+    let mut s = r.applied_schedule.clone();
+    s.reconfigure(Slot(0), 0, alloc::vec![NodeId(0), NodeId(1), NodeId(2), NodeId(4), NodeId(3)]).unwrap();
+    r.applied_schedule = s;
+    r.now = Timestamp(PROBE_INTERVAL);
+    r.note_applied(Slot(crate::schedule::LAG - 1));
+    assert!(r.placement.excluded.is_empty());
+    assert_eq!(r.placement.changed_at, Some(Timestamp(PROBE_INTERVAL)));
+}
+
+#[test]
+fn a_rotation_not_yet_in_force_holds_placement_back() {
+    let writes = [(0, 10), (1, 10)];
+    let mut r = leader(0, &[0, 1, 2]);
+    // A rotation is counted but takes effect only after the move would be due.
+    for slot in 0..8 {
+        r.schedule.observe(Slot(slot), NodeId(1));
+    }
+    rounds(&mut r, PROBE_INTERVAL, 2 * SUSTAIN / PROBE_INTERVAL, &rows(&three(50)), &writes);
+    assert_eq!(r.placement.moving, None);
+}
+
+#[test]
+fn a_writer_that_stopped_decays_to_nothing() {
+    let mut r = leader(0, &[0, 1, 2]);
+    let t = rounds(&mut r, PROBE_INTERVAL, 20, &rows(&three(50)), &[(1, 10), (2, 1)]);
+    assert!(r.placement.rates.contains_key(&NodeId(2)));
+    rounds(&mut r, t, 60, &rows(&three(50)), &[(1, 10)]);
+    assert!(!r.placement.rates.contains_key(&NodeId(2)), "{:?}", r.placement.rates);
+}
+
+#[test]
+fn a_fenced_or_snapshot_resolved_move_is_never_reported() {
+    let writes = [(0, 10), (1, 10)];
+    let mut r = leader(0, &[0, 1, 2]);
+    rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
+    let id = r.placement.moving.expect("a move");
+    r.fence();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    assert!(!out.iter().any(|a| matches!(a, Action::Dropped { id: d, .. } if *d == id)), "{out:?}");
+    assert_eq!(r.placement.moving, None);
+
+    let mut r = leader(0, &[0, 1, 2]);
+    rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
+    let id = r.placement.moving.expect("a move");
+    let mut dedup = crate::dedup::Dedup::default();
+    dedup.first_time(NodeId(0), r.incarnation, id);
+    let members = [NodeId(0), NodeId(1), NodeId(2)];
+    let state = CoreState {
+        next: 10,
+        leaders: members.to_vec(),
+        schedule: Schedule::with_order(members.to_vec()),
+        dedup,
+    }
+    .encode();
+    assert_eq!(r.install_snapshot(r.now, Slot(9), state), Ok(true));
+    r.poll_actions(&mut out);
+    assert!(
+        !out.iter().any(
+            |a| matches!(a, Action::Committed { id: c, .. } | Action::Dropped { id: c, .. } if *c == id)
+        ),
+        "{out:?}"
+    );
+    assert_eq!(r.placement.moving, None);
 }

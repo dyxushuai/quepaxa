@@ -101,6 +101,9 @@ impl Replica {
         }
         self.applied_schedule = state.schedule.clone();
         self.schedule = state.schedule;
+        if self.cfg.placement {
+            self.restart_hold();
+        }
         self.dedup = state.dedup;
         self.emitted = state.next;
         self.committed = state.next;

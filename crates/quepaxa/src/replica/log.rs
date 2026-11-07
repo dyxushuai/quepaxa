@@ -206,6 +206,9 @@ impl Replica {
                 self.batches.remove(&key.seq);
             }
             self.emitted += 1;
+            if self.cfg.placement {
+                self.note_applied(slot);
+            }
         }
     }
 

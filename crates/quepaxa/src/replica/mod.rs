@@ -314,6 +314,9 @@ impl Replica {
             r.seen.entry(slot).or_insert(now);
         }
         r.emit_commits();
+        if r.cfg.placement {
+            r.restart_hold();
+        }
         // After a restart, ask every known replica where the log is: one that was away, even
         // through its own removal, learns what it missed without waiting for someone to write.
         if last_incarnation > 0 {
@@ -430,8 +433,9 @@ impl Replica {
         let order = if !leader_order.is_empty() {
             leader_order
         } else if self.cfg.placement {
-            // Placement owns the order: members that stay keep theirs, new ones go last.
-            let in_force = self.schedule.members(Slot(self.committed));
+            // Placement owns the order: members that stay keep theirs (as last scheduled, a
+            // rotation not yet in force included), new ones go last.
+            let in_force = self.schedule.member_sets_from(Slot(self.committed)).last().unwrap_or_default();
             let staying = in_force.iter().copied().filter(|n| by_id.contains(n));
             let mut order: Vec<NodeId> = staying.collect();
             order.extend(by_id.iter().copied().filter(|n| !in_force.contains(n)));
