@@ -1,12 +1,12 @@
 diff --git a/crates/quepaxa/src/schedule.rs b/crates/quepaxa/src/schedule.rs
 --- a/crates/quepaxa/src/schedule.rs
 +++ b/crates/quepaxa/src/schedule.rs
-@@ -139,7 +139,7 @@
-         if slot.0 < self.epoch_from {
-             return None;
-         }
+@@ -147,7 +147,7 @@ impl Schedule {
+     /// taken effect yet, or because a change or rotation came after the one it was computed
+     /// from. Feed it in slot order, after `observe` for the same slot.
+     pub fn reconfigure(&mut self, slot: Slot, base: u64, order: Vec<NodeId>) -> Option<(u64, u64)> {
 -        let from = slot.0 + LAG;
 +        let from = slot.0 + 1;
-         // A rotation counted in this very slot is superseded.
-         if self.history.last().is_some_and(|(f, _)| *f == from) {
-             self.history.pop();
+         // A rotation counted in this slot advanced the generation after the change was
+         // proposed, so no replica can carry it; refusing keeps the history ascending.
+         let rotated_here = self.history.last().is_some_and(|(f, _)| *f >= from);
