@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/proposing.rs b/crates/quepaxa/src/replica/proposing.rs
+--- a/crates/quepaxa/src/replica/proposing.rs
++++ b/crates/quepaxa/src/replica/proposing.rs
+@@ -261,7 +261,7 @@ impl Replica {
+         let mut s = self.next_alloc.max(self.committed);
+         while s < end {
+             let slot = Slot(s);
+-            if as_leader && self.schedule.leader(slot) != self.me {
++            if false && as_leader && self.schedule.leader(slot) != self.me {
+                 return None;
+             }
+             if !self.log.contains_key(&slot)

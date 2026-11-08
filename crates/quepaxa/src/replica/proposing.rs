@@ -102,8 +102,16 @@ impl Replica {
         };
         let cap =
             self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
-        // Stepped aside, this replica hands them on (`watch.rs`).
-        let queue = if self.leads_now() || self.watch.aside { &mut self.pending } else { &mut self.relayed };
+        // Stepped aside, this replica hands them on (`watch.rs`); so it does for a follower
+        // that has not yet seen this replica stop leading, whose entries belong to the new
+        // leader, not to a deputy.
+        let lagging =
+            self.watch.committed.get(&from).is_some_and(|&c| self.schedule.leader(Slot(c)) == self.me);
+        let queue = if self.leads_now() || self.watch.aside || lagging {
+            &mut self.pending
+        } else {
+            &mut self.relayed
+        };
         if queue.len() + entries.len() > cap {
             return; // the origin hedges
         }
@@ -132,6 +140,9 @@ impl Replica {
             || self.batches.values().any(|b| b.entries.iter().any(|&(o, _, _)| o != self.me));
         let cap = if self.proposes_directly() || deputy { self.window() } else { 1 };
         while (self.proposers.len() as u64) < cap {
+            // A batch is cut only for a slot it can take: one cut and left waiting would be
+            // proposed later in someone else's slots.
+            let Some(slot) = self.free_slot() else { break };
             let seq = match self.batches.iter().find(|(_, b)| b.slot.is_none() && !b.entries.is_empty()) {
                 Some((seq, _)) => *seq,
                 None => match self.cut_batch() {
@@ -139,7 +150,7 @@ impl Replica {
                     None => break,
                 },
             };
-            let Some(slot) = self.alloc_slot() else { break };
+            self.next_alloc = slot.0 + 1;
             self.start(slot, seq);
         }
     }
@@ -166,6 +177,24 @@ impl Replica {
         }
         self.send(leader, Body::Forward { batch: batch::encode(&chunk.take()) });
         self.metrics.forwarded += 1;
+    }
+
+    /// No longer the leader (an order change took effect): the entries of batches not yet in
+    /// a slot go to the new leader, instead of being proposed later in its slots.
+    pub(super) fn hand_on_unstarted(&mut self) {
+        let mut handed = Vec::new();
+        self.batches.retain(|_, b| {
+            if b.slot.is_none() {
+                // Our own encoding: it decodes.
+                handed.extend(batch::decode(&b.value).unwrap_or_default());
+            }
+            b.slot.is_some()
+        });
+        let dedup = &self.dedup;
+        self.pending.extend(handed.into_iter().filter(|e| {
+            let (o, inc, id) = e.key();
+            !dedup.contains(o, inc, id)
+        }));
     }
 
     /// A local batch lost its slot. The leader, or a follower that suspects it (`watch.rs`),
@@ -229,16 +258,24 @@ impl Replica {
         seq
     }
 
-    fn alloc_slot(&mut self) -> Option<Slot> {
+    /// The next slot in the window this replica may start. The leader proposing its own and
+    /// forwarded entries stops at the first slot another member leads (an order change
+    /// taking effect): proposed there, they would decide in the new leader's slots, and
+    /// miss-based rotation would count them against it. Past that slot it is no longer the
+    /// leader and hands the entries on.
+    fn free_slot(&self) -> Option<Slot> {
+        let as_leader = self.leads_now() && !self.watch.aside;
         let end = self.committed + self.window();
         let mut s = self.next_alloc.max(self.committed);
         while s < end {
             let slot = Slot(s);
+            if as_leader && self.schedule.leader(slot) != self.me {
+                return None;
+            }
             if !self.log.contains_key(&slot)
                 && !self.proposers.contains_key(&slot)
                 && !self.registers.contains_key(&slot)
             {
-                self.next_alloc = s + 1;
                 return Some(slot);
             }
             s += 1;
