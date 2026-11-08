@@ -192,3 +192,37 @@ fn replace_a_member(deviations: u32, crashes: u32) {
     assert!(report.served > 0 && report.exhausted, "{report:?}");
     assert!(report.reconfigured > 0, "{report:?}");
 }
+
+/// Only the leader order changes, during a write, with any one deviation: every replica
+/// applies the new order in the same slot and the write commits.
+#[test]
+fn a_leader_order_change_during_a_write_is_agreed() {
+    let cfg = ModelConfig {
+        reconfigure: Some((1, vec![2, 0, 1])),
+        max_depth: depth(200),
+        max_states: budget(2_000_000),
+        ..ModelConfig::new(vec![0], deviations(1), 0)
+    };
+    let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
+    println!("{report:?}");
+    assert!(report.served > 0 && report.exhausted, "{report:?}");
+    assert!(report.reconfigured > 0, "{report:?}");
+}
+
+/// Two replicas each propose a change computed from the same configuration, with a
+/// crash-restart anywhere: whichever is decided second is ignored everywhere, and what is in
+/// force is one of the two (a change built on an outdated configuration never applies).
+#[test]
+fn of_two_rival_changes_only_the_first_decided_applies() {
+    let cfg = ModelConfig {
+        reconfigure: Some((0, vec![1, 0, 2])),
+        rival: Some((2, vec![2, 1, 0])),
+        max_depth: depth(200),
+        max_states: budget(2_000_000),
+        ..ModelConfig::new(vec![], deviations(0), 1)
+    };
+    let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
+    println!("{report:?}");
+    assert!(report.served > 0 && report.exhausted, "{report:?}");
+    assert!(report.reconfigured > 0, "{report:?}");
+}

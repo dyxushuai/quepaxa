@@ -339,7 +339,7 @@ flowchart TB
 - **Dependencies:** U3, U5.
 - **Files:** `crates/quepaxa-sim/src/config.rs`, `crates/quepaxa-sim/src/lib.rs`, `crates/quepaxa-sim/src/model.rs`, `crates/quepaxa-sim/tests/replica_sim.rs`, `crates/quepaxa-sim/tests/model_check.rs`, `crates/quepaxa-sim/tests/placement.rs` (new), `verification/canaries.tsv`, `verification/canaries/*.patch`, `VERIFICATION.md`.
 - **Approach:**
-  1. In the simulator's `reconfigure`, sometimes keep the member set and shuffle the order, and draw the new size from one up to nodes plus spares.
+  1. In the simulator's `reconfigure`, sometimes keep the member set and shuffle the order, and draw the new size from one up to nodes plus spares. (Done for the order; the size stays `nodes`, since the simulator's invariant checks and partitions size quorums by it.)
   2. Add a write-origin weight knob (with a switch time) and a placement-enabled WAN test next to `leader_loss`.
   3. In the model checker, add an order-only change scenario and a stale-change scenario (a change proposed before another takes effect, decided after).
   4. Add canaries: stale change applied (if U2's canary does not cover the simulator), a stale member ranked first, and the hold ignored.
