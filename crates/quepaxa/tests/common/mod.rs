@@ -36,7 +36,7 @@ pub fn settle(r: &mut Replica, durable: &mut Vec<Bytes>) -> Vec<Action> {
                 other => seen.push(other),
             }
         }
-        pending = Vec::new();
+        pending.clear();
         for id in acks {
             r.handle(T0, Input::Persisted(id)).unwrap();
             pending.extend(drain(r));
