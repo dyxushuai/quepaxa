@@ -60,6 +60,8 @@ struct Node {
     /// When the fsync in progress completes, and when the next (grouped) one will.
     disk_busy_until: u64,
     disk_next_group: Option<u64>,
+    /// On a slow machine, until when it is busy with the message it is handling.
+    cpu_busy_until: u64,
     timer_at: Option<u64>,
     /// After a timer left a deadline at or before the time it fired: that time and the
     /// replica's fingerprint, to tell a timer storm from progress.
@@ -127,6 +129,7 @@ impl Sim {
                 pending: Vec::new(),
                 disk_busy_until: 0,
                 disk_next_group: None,
+                cpu_busy_until: 0,
                 timer_at: None,
                 past_deadline: None,
                 next_commit: 0,
@@ -407,6 +410,16 @@ impl Sim {
             Event::Kill { node } => self.crash(node),
             Event::Reorder => self.reorder()?,
             Event::Deliver { to, bytes } => {
+                if let Some(cost) = self.cpu_cost(to) {
+                    let n = &mut self.nodes[to];
+                    if n.cpu_busy_until > self.now {
+                        // Queued behind the message in hand; pushed in arrival order.
+                        let at = n.cpu_busy_until;
+                        self.push(at, Event::Deliver { to, bytes });
+                        return Ok(());
+                    }
+                    n.cpu_busy_until = self.now + cost;
+                }
                 let Some(r) = self.nodes[to].replica.as_mut() else {
                     return Ok(());
                 };

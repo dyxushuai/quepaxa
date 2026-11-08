@@ -62,6 +62,9 @@ pub struct SimConfig {
     pub isolate: Option<(usize, u64, u64)>,
     /// Upper bound on one persist's latency on a slowed disk.
     pub slow_persist_ms: u64,
+    /// These replicas run on a slow machine: they handle one message at a time, each taking
+    /// this many virtual microseconds, and later messages wait their turn.
+    pub slow_cpu: Option<(Vec<usize>, u64)>,
     /// Snapshot and compact every this many applied slots.
     pub compact_every: Option<u64>,
     /// Replica message size limit (small values force multi-page catch-up).
@@ -131,6 +134,7 @@ impl SimConfig {
             disk_slow: None,
             isolate: None,
             slow_persist_ms: 40,
+            slow_cpu: None,
             compact_every: Some(32),
             max_message_bytes: 1 << 20,
             placement: None,
