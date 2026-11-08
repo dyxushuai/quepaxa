@@ -24,7 +24,7 @@ pub fn settle(r: &mut Replica, durable: &mut Vec<Bytes>) -> Vec<Action> {
     let mut pending = drain(r);
     while !pending.is_empty() {
         let mut acks = Vec::new();
-        for a in pending {
+        for a in pending.drain(..) {
             match a {
                 Action::Persist { id, records, replace, .. } => {
                     if replace {
@@ -36,7 +36,6 @@ pub fn settle(r: &mut Replica, durable: &mut Vec<Bytes>) -> Vec<Action> {
                 other => seen.push(other),
             }
         }
-        pending.clear();
         for id in acks {
             r.handle(T0, Input::Persisted(id)).unwrap();
             pending.extend(drain(r));
