@@ -313,7 +313,7 @@ saturates. The benchmark has to make bandwidth matter.
   - 4 KiB and 64 KiB commands: at least 2x saturation throughput at n = 3;
   - fixed-rate p50 no worse than 10%;
   - 17-byte commands: no worse than 5%.
-- **WAN.** The emulated-region harness of `docs/benchmarks.md` ("Across regions": five regions, 200 puts/s per region, medians
+- **WAN.** The emulated-region harness (`examples/kv-tokio/bench/etcd/wan.sh`, "Across regions" in `docs/benchmarks.md`: five regions, 200 puts/s per region, medians
   of three) with references on, at 17 bytes and at 4 KiB. p99, longest gap and errors must be
   within the existing run-to-run range in every fault row, and the fetch count is recorded.
   If it regresses, references stay off for WAN deployments and `tuning.md` says so.
