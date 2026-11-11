@@ -34,3 +34,4 @@ writer-never-wakes-the-event-loop	-	cargo test -p kv-tokio --features shuttle --
 leader-proposes-past-handover	-	cargo nextest run --no-fail-fast -p quepaxa next_leaders	only the slots this replica still leads
 stale-member-ranked-first	-	cargo nextest run --no-fail-fast -p quepaxa ranking_tests	a stale member is never placed first
 placement-ignores-the-hold	-	cargo nextest run --no-fail-fast -p quepaxa ranking_tests	within the hold
+hedge-on-a-shared-disk-stall	-	cargo nextest run --no-fail-fast -p quepaxa watch_tests	not hedged past

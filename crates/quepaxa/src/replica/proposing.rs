@@ -313,7 +313,7 @@ impl Replica {
     pub(super) fn earliest_timer(&self) -> Option<Timestamp> {
         let resend = self.proposers.values().map(|a| a.resend_at);
         let stall = self.stalled().map(|(_, at)| at);
-        let hedge = self.forwarded.values().map(|(_, at)| self.hedge_at(*at)).min();
+        let hedge = self.forwarded.values().filter_map(|(_, at)| self.hedge_at(*at)).min();
         // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
         let behind = self.peer_committed > self.committed + 1
             && self.catch_up.or(self.ahead_peer.map(|p| (p, self.now))).is_some();
@@ -361,7 +361,7 @@ impl Replica {
         let late: Vec<_> = self
             .forwarded
             .iter()
-            .filter(|(_, (_, at))| self.late_at(*at) <= now)
+            .filter(|(_, (_, at))| self.late_at(*at).is_some_and(|t| t <= now))
             .map(|(id, _)| *id)
             .collect();
         for id in late {

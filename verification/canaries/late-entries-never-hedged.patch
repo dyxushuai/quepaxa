@@ -1,13 +1,12 @@
 diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
-index 94a405a..670e6ab 100644
 --- a/crates/quepaxa/src/replica/watch.rs
 +++ b/crates/quepaxa/src/replica/watch.rs
-@@ -272,7 +272,7 @@ impl Replica {
-     pub(super) fn late_at(&self, at: Timestamp) -> Timestamp {
+@@ -291,7 +291,7 @@
+     pub(super) fn late_at(&self, at: Timestamp) -> Option<Timestamp> {
          let d = self.hedge_delay();
          let busy = d.saturating_mul(4).min(self.cfg.hedge_max).max(d);
--        at.after(if self.watch.progressed > at { busy } else { d })
-+        at.after(if self.watch.progressed > at { busy } else { d }).after(u64::MAX)
+-        let late = at.max(self.watch.resumed).after(if self.watch.progressed > at { busy } else { d });
++        let late = at.max(self.watch.resumed).after(if self.watch.progressed > at { busy } else { d }).after(u64::MAX);
+         let held = !self.watch.aside && self.all_stuck_at().is_some_and(|s| s <= late);
+         (!held).then_some(late)
      }
- 
-     /// When an entry forwarded at `at` is acted on: hedged when late, or sooner, with its

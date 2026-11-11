@@ -353,6 +353,10 @@ fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
     )
     .unwrap();
     r.poll_actions(&mut out);
+    // Its disk works: the decision's record is written.
+    let (last, _) = *r.watch.unpersisted.back().expect("the decision is being written");
+    r.handle(Timestamp(5 * MS), Input::Persisted(PersistId(last))).unwrap();
+    r.poll_actions(&mut out);
     assert_eq!(r.next_deadline(), Some(Timestamp(MS + 4 * 80 * MS)), "4δ, not δ");
     r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
     r.poll_actions(&mut out);
@@ -634,6 +638,64 @@ fn a_follower_whose_disk_is_stuck_does_not_step_aside() {
     r.handle_timeout(Timestamp(MS + 200 * MS)).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.metrics.stepped_aside, 0);
+}
+
+/// Follower 1 (δ = 80 ms) recording the leader's request at 1 ms, a write its disk does not
+/// finish, and an entry of its own forwarded at 2 ms.
+fn follower_with_a_stuck_disk() -> (Replica, ProposalId) {
+    let mut r = with_latency(None);
+    let mut out = Vec::new();
+    r.watch.persist = Some(MS);
+    let request = Body::RecordRequest { slot: Slot(0), step: 4, proposal: proposal(1, 0, 0) };
+    r.handle(Timestamp(MS), from_peer(0, 1, request)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(!r.watch.unpersisted.is_empty(), "a write is in flight");
+    let id = r.propose(Timestamp(2 * MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 1);
+    (r, id)
+}
+
+#[test]
+fn a_follower_does_not_hedge_while_every_disk_seems_stuck() {
+    // One shared disk: a hedge cannot be decided before the leader's slots, and once the
+    // disks resume it would contend with them.
+    let (mut r, id) = follower_with_a_stuck_disk();
+    let mut out = Vec::new();
+    // A decision made durable before the disks stopped, arriving before the write was due
+    // (four usual write times), says nothing about them.
+    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 2, 0) };
+    r.handle(Timestamp(3 * MS), from_peer(2, 1, decided)).unwrap();
+    r.poll_actions(&mut out);
+    r.handle_timeout(Timestamp(150 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(r.forwarded.contains_key(&id), "not hedged past δ");
+    assert_eq!(r.metrics.hedged, 0);
+    // The disk catches up: δ counts from then.
+    let (last, _) = *r.watch.unpersisted.back().expect("writes in flight");
+    r.handle(Timestamp(150 * MS), Input::Persisted(PersistId(last))).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(230 * MS)));
+    r.handle_timeout(Timestamp(230 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.metrics.hedged, 1);
+}
+
+#[test]
+fn a_follower_whose_disk_alone_is_stuck_still_hedges() {
+    // Another replica decides a slot after the write was due, before or after δ: other
+    // disks work.
+    for at in [10, 85] {
+        let (mut r, id) = follower_with_a_stuck_disk();
+        let mut out = Vec::new();
+        let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 2, 0) };
+        r.handle(Timestamp(at * MS), from_peer(2, 1, decided)).unwrap();
+        r.poll_actions(&mut out);
+        r.handle_timeout(Timestamp(85 * MS)).unwrap();
+        r.poll_actions(&mut out);
+        assert!(!r.forwarded.contains_key(&id), "decided at {at} ms: hedged after δ");
+        assert_eq!(r.metrics.hedged, 1);
+    }
 }
 
 #[test]

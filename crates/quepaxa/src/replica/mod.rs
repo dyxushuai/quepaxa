@@ -635,6 +635,9 @@ impl Replica {
 
     fn on_persisted(&mut self, id: PersistId) -> Result<(), Error> {
         let effects = self.gate.persisted(id, &mut self.actions)?;
+        if self.all_stuck_at().is_some_and(|s| s <= self.now) {
+            self.watch.resumed = self.now;
+        }
         while let Some(&(p, at)) = self.watch.unpersisted.front()
             && p <= id.0
         {
