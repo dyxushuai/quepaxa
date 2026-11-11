@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/ranking.rs b/crates/quepaxa/src/replica/ranking.rs
+--- a/crates/quepaxa/src/replica/ranking.rs
++++ b/crates/quepaxa/src/replica/ranking.rs
+@@ -118,7 +118,7 @@ impl Replica {
+ 
+     /// Candidate `c`'s cost over `members`, or none if it cannot be ranked.
+     fn cost(&self, c: NodeId, members: &[NodeId]) -> Option<u128> {
+-        let own_table = self.placement.tables.get(&c).is_some_and(|(_, at)| fresh(*at, self.now));
++        let own_table = self.placement.tables.contains_key(&c);
+         if c != self.me && !own_table {
+             return None;
+         }

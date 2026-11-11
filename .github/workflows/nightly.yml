@@ -80,6 +80,10 @@ jobs:
         env:
           QPX_SIM_SEEDS: "100"
         run: cargo nextest run --release -p quepaxa-sim --test leader_loss --test disk_faults --no-fail-fast
+      - name: 10 seeds per leader-placement scenario
+        env:
+          QPX_SIM_SEEDS: "10"
+        run: cargo nextest run --release -p quepaxa-sim --test placement --no-fail-fast
 
   deep:
     runs-on: ubuntu-24.04
