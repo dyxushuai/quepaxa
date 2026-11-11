@@ -1,8 +1,8 @@
 ---------------------------- MODULE ReadsProof ----------------------------
 (***************************************************************************)
-(* TLAPS proof of Reads.tla's ReadSafe with fixed membership (no change), *)
-(* for any number of replicas, slots and reads: a ready read reflects     *)
-(* every slot decided before it was requested.                             *)
+(* TLAPS proof of Reads.tla's ReadSafe with fixed membership (no change  *)
+(* and no rotation), for any number of replicas, slots and reads: a ready  *)
+(* read reflects every slot decided before it was requested.               *)
 (*                                                                         *)
 (* A decided slot was recorded durably by a majority of the members, and  *)
 (* stays covered there (DCov): a register goes only once the decision is  *)
@@ -17,6 +17,7 @@ EXTENDS Reads, MembershipProof, FiniteSetTheorems
 
 ASSUME FixedAssumptions ==
     /\ Changes = {}
+    /\ Rotate = FALSE
     /\ IsFiniteSet(Replicas)
     /\ InitMembers \subseteq Replicas /\ InitMembers # {}
     /\ 0 \notin Replicas
@@ -24,7 +25,7 @@ ASSUME FixedAssumptions ==
 -----------------------------------------------------------------------------
 (* Without changes, every slot's members are the configured ones *)
 
-NoChange(val) == \A t \in Slots : val[t].k # "change"
+NoChange(val) == \A t \in Slots : val[t].k \notin {"change", "miss"}
 
 LEMMA FoldedFixed ==
     ASSUME NEW val, NoChange(val)
@@ -33,10 +34,10 @@ LEMMA FoldedFixed ==
 <1>1. P(0) BY FoldedDef
 <1>2. \A n \in Nat : P(n) => P(n + 1)
   <2> SUFFICES ASSUME NEW n \in Nat, P(n), n + 1 <= N PROVE Folded(val)[n + 1] = Start OBVIOUS
-  <2>1. Folded(val)[n] = Start /\ n \in Slots /\ val[n].k # "change"
+  <2>1. Folded(val)[n] = Start /\ n \in Slots /\ val[n].k \notin {"change", "miss"}
     BY MAssumptions DEF NoChange, Slots, P
   <2>2. Folded(val)[n + 1] = FoldStep(Start, n, val) BY <2>1, FoldedDef
-  <2> QED BY <2>1, <2>2 DEF FoldStep, Start
+  <2> QED BY <2>1, <2>2 DEF FoldStep, Installs, Rotates, Start
 <1> HIDE DEF P
 <1>3. \A n \in Nat : P(n) BY <1>1, <1>2, NatInduction
 <1> QED BY <1>3, MAssumptions DEF P

@@ -8,12 +8,16 @@
 (*                                                                         *)
 (* - A change decided in slot t installs new members from slot t + LAG,   *)
 (*   unless an earlier change has not taken effect yet, or another change *)
-(*   was installed after the generation it was computed from (then it is  *)
-(*   ignored). FreshInstalls: every installed change was computed from    *)
-(*   the generation in force at its slot, so none built on an outdated    *)
-(*   configuration undoes a newer one. A replica drives only slots below  *)
-(*   its commit index + LAG,                                              *)
-(*   computing their members from the log prefix it knows.                *)
+(*   or a rotation came after the generation it was computed from (then   *)
+(*   it is ignored). A change to the members in force only reorders them  *)
+(*   (the order is not modelled): an epoch like any other. With Rotate, a *)
+(*   slot whose value did not come from its leader counts a leader        *)
+(*   rotation, unless an order change is still pending: the members stay *)
+(*   and the generation advances. FreshInstalls: every installed change   *)
+(*   carries the number of order changes (installed changes and           *)
+(*   rotations) before its slot, so none built on an outdated order       *)
+(*   undoes a newer one. A replica drives only slots below its commit     *)
+(*   index + LAG, computing their members from the log prefix it knows.   *)
 (*   ViewAgree: every replica that may drive a slot computes its true     *)
 (*   members, so all its proposers use the same recorders.                *)
 (* - Decisions are known in memory first and made durable later; a crash *)
@@ -37,10 +41,13 @@
 (* down. The guide also lets an operator restart a replica a change adds  *)
 (* back; that is not covered.                                             *)
 (*                                                                         *)
-(* Not modelled: what happens inside a slot (QuePaxa.tla), leader         *)
-(* rotation (it advances the generation like a change; here only changes *)
-(* do), snapshots, liveness. run.sh checks that seeded bugs in each  *)
-(* rule are found; MembershipProof.tla proves the rules.                  *)
+(* Not modelled: what happens inside a slot (QuePaxa.tla), the leader     *)
+(* order itself, ROTATE_AFTER (here one slot not led by its leader counts *)
+(* a rotation, which only allows more of them), a slot that both carries  *)
+(* a change and counts a rotation (the code ignores that change; no       *)
+(* proposer could carry the generation after it anyway), snapshots,       *)
+(* liveness. run.sh checks that seeded bugs in each rule are found;       *)
+(* MembershipProof.tla proves the rules.                                  *)
 (***************************************************************************)
 EXTENDS Integers, FiniteSets
 
@@ -48,14 +55,17 @@ CONSTANTS Replicas,     \* e.g. 1..4
           InitMembers,  \* the configured members, e.g. {1, 2, 3}
           Changes,      \* member sets a change may install
           N,            \* slots 0..N-1
-          LAG           \* slots between deciding a change and its effect
+          LAG,          \* slots between deciding a change and its effect
+          Rotate        \* whether slots may count leader rotations (TRUE or FALSE)
 
 Slots == 0..N-1
-\* A slot's value: nothing decided yet, a write, or a change to members m computed from
-\* generation b (the number of changes installed when it was proposed).
+\* A slot's value: nothing decided yet, a write, a write that did not come from the slot's
+\* leader (a miss), or a change to members m computed from generation b (the number of
+\* order changes, installed changes and rotations, when it was proposed).
 None == [k |-> "none", m |-> {}, b |-> 0]
 Write == [k |-> "write", m |-> {}, b |-> 0]
-Values == {Write} \cup [k : {"change"}, m : Changes, b : 0..N]
+Miss == [k |-> "miss", m |-> {}, b |-> 0]
+Values == {Write} \cup (IF Rotate THEN {Miss} ELSE {}) \cup [k : {"change"}, m : Changes, b : 0..N]
 
 VARIABLES decided,  \* decided[s]: the value of slot s, or None
           log,      \* log[r]: slots r knows decided (memory)
@@ -69,20 +79,42 @@ Maj(S) == {Q \in SUBSET S : 2 * Cardinality(Q) > Cardinality(S)}
 \* Length of the contiguous prefix of slots in L (the commit index).
 Prefix(L) == CHOOSE n \in 0..N : (\A t \in 0..n-1 : t \in L) /\ (n = N \/ n \notin L)
 
-Start == [cur |-> InitMembers, nxt |-> InitMembers, from |-> 0, gen |-> 0]
+\* The schedule: the members in force (cur) and of the latest epoch (nxt, from slot from),
+\* the generation, and the first slot of the latest order scheduled (quiet: no rotation
+\* is counted before it, the code's quiet_until).
+Start == [cur |-> InitMembers, nxt |-> InitMembers, from |-> 0, gen |-> 0, quiet |-> 0]
+
+\* Slot t of val installs its change into schedule st: no change is pending, and it was
+\* computed from the generation in force.
+Installs(st, t, val) == val[t].k = "change" /\ st.from <= t /\ val[t].b = st.gen
+
+\* Slot t of val counts a leader rotation: a miss, with no order change pending.
+Rotates(st, t, val) == val[t].k = "miss" /\ st.quiet <= t
 
 \* Slot t folded into the schedule st, where val[t] is what the slot holds as far as the
-\* folding replica knows (Write if it does not know it).
+\* folding replica knows (Write if it does not know it). A rotation schedules another
+\* order of the same members from LAG slots on.
 FoldStep(st, t, val) ==
-    LET act == IF st.from <= t THEN [st EXCEPT !.cur = st.nxt] ELSE st
-        v == val[t]
-    IN IF v.k = "change" /\ act.from <= t /\ v.b = act.gen
-       THEN [act EXCEPT !.nxt = v.m, !.from = t + LAG, !.gen = @ + 1]
-       ELSE act
+    LET c == IF st.from <= t THEN st.nxt ELSE st.cur
+        rot == Rotates(st, t, val)
+    IN IF Installs(st, t, val)
+       THEN [cur |-> c, nxt |-> val[t].m, from |-> t + LAG, gen |-> st.gen + 1, quiet |-> t + LAG]
+       ELSE [cur |-> c, nxt |-> st.nxt, from |-> st.from,
+             gen |-> IF rot THEN st.gen + 1 ELSE st.gen, quiet |-> IF rot THEN t + LAG ELSE st.quiet]
 
 \* The schedule after folding slots 0..n-1 of val (a recursive function, which TLAPS can
 \* reason about, unlike a recursive operator).
 Folded(val) == LET f[n \in Nat] == IF n = 0 THEN Start ELSE FoldStep(f[n - 1], n - 1, val) IN f
+
+\* Slot t of val schedules a new order: it installs a change or counts a rotation.
+Schedules(st, t, val) == Installs(st, t, val) \/ Rotates(st, t, val)
+
+\* The order changes in slots 0..n-1 of val, counted apart from the generation that is
+\* meant to count them.
+Pushes(val) ==
+    LET f[n \in Nat] ==
+            IF n = 0 THEN 0 ELSE f[n - 1] + (IF Schedules(Folded(val)[n - 1], n - 1, val) THEN 1 ELSE 0)
+    IN f
 
 \* What replica r knows of every slot, and the truth.
 Known(r) == [t \in Slots |-> IF t \in log[r] THEN decided[t] ELSE Write]
@@ -93,7 +125,7 @@ Truth == [t \in Slots |-> IF decided[t] = None THEN Write ELSE decided[t]]
 MembersAt(s, val) ==
     LET st == Folded(val)[s] IN IF st.from <= s THEN st.nxt ELSE st.cur
 
-\* The latest epoch r knows of: its members and first slot.
+\* The latest epoch r knows of: its members and first slot, and the generation.
 Latest(r) == Folded(Known(r))[Prefix(log[r])]
 
 CanDrive(r, s) ==
@@ -176,11 +208,11 @@ ViewAgree ==
     \A r \in Replicas, s \in Slots :
         CanDrive(r, s) => MembersAt(s, Known(r)) = MembersAt(s, Truth)
 
-\* A change installs (its epoch starts LAG slots later) only when computed from the
-\* generation in force at its slot.
+\* A change installs (its epoch starts LAG slots later) only when computed after every
+\* order change before its slot: the changes installed and the rotations counted.
 FreshInstalls ==
     \A t \in Slots : Folded(Truth)[t + 1].from = t + LAG =>
-        Truth[t].k = "change" /\ Truth[t].b = Folded(Truth)[t].gen
+        Truth[t].k = "change" /\ Truth[t].b = Pushes(Truth)[t]
 
 \* The members in force after the last slot, and those of a change still pending.
 Current == Folded(Truth)[N]

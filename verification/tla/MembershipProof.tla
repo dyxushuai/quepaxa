@@ -2,9 +2,10 @@
 (***************************************************************************)
 (* TLAPS proof of Membership.tla's ViewAgree (the window rule): every     *)
 (* replica that may drive a slot computes its true members, for any        *)
-(* number of replicas, slots and members and any LAG >= 1; and of          *)
-(* FreshInstalls: a change installs only when computed from the            *)
-(* generation in force at its slot.                                        *)
+(* number of replicas, slots and members and any LAG >= 1, with or        *)
+(* without rotations; and of FreshInstalls: a change installs only when    *)
+(* computed after every order change (a change or a rotation) before its   *)
+(* slot.                                                                   *)
 (*                                                                         *)
 (* The only state invariant is that logs hold decided slots and decisions  *)
 (* never change; the rest is about the schedule fold alone: views that     *)
@@ -14,17 +15,15 @@
 (***************************************************************************)
 EXTENDS Membership, TLAPS, NaturalsInduction
 
-ASSUME MAssumptions == N \in Nat /\ LAG \in Nat \ {0}
+ASSUME MAssumptions == N \in Nat /\ LAG \in Nat \ {0} /\ Rotate \in BOOLEAN
 
 \* The members of slot s under schedule st (MembersAt is this at the folded schedule).
 Eff(st, s) == IF st.from <= s THEN st.nxt ELSE st.cur
 
+\* A schedule; no rotation is counted while a change is pending (from <= quiet).
 IsSt(st) ==
-    /\ st = [cur |-> st.cur, nxt |-> st.nxt, from |-> st.from, gen |-> st.gen]
-    /\ st.from \in Nat /\ st.gen \in Nat
-
-\* Slot t of val installs a change into schedule st.
-Installs(st, t, val) == val[t].k = "change" /\ st.from <= t /\ val[t].b = st.gen
+    /\ st = [cur |-> st.cur, nxt |-> st.nxt, from |-> st.from, gen |-> st.gen, quiet |-> st.quiet]
+    /\ st.from \in Nat /\ st.gen \in Nat /\ st.quiet \in Nat /\ st.from <= st.quiet
 
 Decided == {t \in Slots : decided[t] # None}
 
@@ -35,10 +34,10 @@ Inv ==
     /\ dlog \in [Replicas -> SUBSET Slots]
     /\ \A r \in Replicas : log[r] \subseteq Decided /\ dlog[r] \subseteq Decided
 
-\* A value is a write or a change.
+\* A value is a write, a miss or a change.
 LEMMA ValueKinds ==
     ASSUME NEW v \in Values
-    PROVE  v = Write \/ (v.k = "change" /\ v.m \in Changes /\ v.b \in 0..N)
+    PROVE  v = Write \/ v = Miss \/ (v.k = "change" /\ v.m \in Changes /\ v.b \in 0..N)
 BY DEF Values
 
 -----------------------------------------------------------------------------
@@ -56,10 +55,37 @@ LEMMA FoldedDef ==
   BY <1>2 DEF NatInductiveDefConclusion
 <1> QED BY <1>3
 
+\* What one step of the fold does to each field.
+LEMMA StepFields ==
+    ASSUME NEW st, IsSt(st), NEW t \in Nat, NEW val
+    PROVE  /\ IsSt(FoldStep(st, t, val))
+           /\ FoldStep(st, t, val).cur = IF st.from <= t THEN st.nxt ELSE st.cur
+           /\ FoldStep(st, t, val).nxt = IF Installs(st, t, val) THEN val[t].m ELSE st.nxt
+           /\ FoldStep(st, t, val).from = IF Installs(st, t, val) THEN t + LAG ELSE st.from
+           /\ FoldStep(st, t, val).gen = IF Schedules(st, t, val) THEN st.gen + 1 ELSE st.gen
+           /\ FoldStep(st, t, val).quiet = IF Schedules(st, t, val) THEN t + LAG ELSE st.quiet
+<1> DEFINE c == IF st.from <= t THEN st.nxt ELSE st.cur
+<1>1. CASE Installs(st, t, val)
+  <2>1. FoldStep(st, t, val)
+          = [cur |-> c, nxt |-> val[t].m, from |-> t + LAG, gen |-> st.gen + 1, quiet |-> t + LAG]
+    BY <1>1 DEF FoldStep
+  <2>2. Schedules(st, t, val) BY <1>1 DEF Schedules
+  <2> QED BY <1>1, <2>1, <2>2, MAssumptions DEF IsSt
+<1>2. CASE ~Installs(st, t, val)
+  <2>1. FoldStep(st, t, val)
+          = [cur |-> c, nxt |-> st.nxt, from |-> st.from,
+             gen |-> IF Rotates(st, t, val) THEN st.gen + 1 ELSE st.gen,
+             quiet |-> IF Rotates(st, t, val) THEN t + LAG ELSE st.quiet]
+    BY <1>2 DEF FoldStep
+  <2>2. Schedules(st, t, val) <=> Rotates(st, t, val) BY <1>2 DEF Schedules
+  <2>3. Rotates(st, t, val) => st.from <= t + LAG BY MAssumptions DEF Rotates, IsSt
+  <2> QED BY <1>2, <2>1, <2>2, <2>3, MAssumptions DEF IsSt
+<1> QED BY <1>1, <1>2
+
 LEMMA StepShape ==
     ASSUME NEW st, IsSt(st), NEW t \in Nat, NEW val
     PROVE  IsSt(FoldStep(st, t, val))
-BY MAssumptions DEF IsSt, FoldStep
+BY StepFields
 
 LEMMA FoldedShape ==
     ASSUME NEW val
@@ -81,7 +107,7 @@ LEMMA PrefixAgree ==
   <2> SUFFICES ASSUME NEW n \in Nat, P(n), n + 1 <= k PROVE Folded(v1)[n + 1] = Folded(v2)[n + 1]
     OBVIOUS
   <2>1. Folded(v1)[n] = Folded(v2)[n] /\ v1[n] = v2[n] OBVIOUS
-  <2> QED BY <2>1, FoldedDef DEF FoldStep
+  <2> QED BY <2>1, FoldedDef DEF FoldStep, Installs, Rotates
 <1> HIDE DEF P
 <1>3. \A n \in Nat : P(n) BY <1>1, <1>2, NatInduction
 <1> QED BY <1>3 DEF P
@@ -90,24 +116,18 @@ LEMMA PrefixAgree ==
 LEMMA StepEff ==
     ASSUME NEW st, IsSt(st), NEW t \in Nat, NEW s \in Nat, t < s, s < t + LAG, NEW val
     PROVE  Eff(FoldStep(st, t, val), s) = Eff(st, s)
-<1>1. CASE st.from <= t
-  <2> DEFINE act == [st EXCEPT !.cur = st.nxt]
-  <2>1. act.from = st.from /\ act.nxt = st.nxt /\ act.cur = st.nxt /\ act.gen = st.gen BY DEF IsSt
-  <2>2. Eff(st, s) = st.nxt BY <1>1 DEF Eff, IsSt
-  <2>3. CASE val[t].k = "change" /\ val[t].b = st.gen
-    <3>1. FoldStep(st, t, val) = [act EXCEPT !.nxt = val[t].m, !.from = t + LAG, !.gen = @ + 1]
-      BY <1>1, <2>1, <2>3 DEF FoldStep
-    <3>2. FoldStep(st, t, val).from = t + LAG /\ FoldStep(st, t, val).cur = st.nxt
-      BY <3>1, <2>1 DEF IsSt
-    <3>3. ~(t + LAG <= s) BY MAssumptions
-    <3> QED BY <3>2, <3>3, <2>2 DEF Eff
-  <2>4. CASE ~(val[t].k = "change" /\ val[t].b = st.gen)
-    <3>1. FoldStep(st, t, val) = act BY <1>1, <2>4, <2>1 DEF FoldStep, IsSt
-    <3> QED BY <3>1, <2>1, <2>2, <1>1 DEF Eff, IsSt
-  <2> QED BY <2>3, <2>4
-<1>2. CASE ~(st.from <= t)
-  <2>1. FoldStep(st, t, val) = st BY <1>2 DEF FoldStep
-  <2> QED BY <2>1
+<1>1. CASE Installs(st, t, val)
+  <2>1. st.from <= t BY <1>1 DEF Installs
+  <2>2. FoldStep(st, t, val).from = t + LAG /\ FoldStep(st, t, val).cur = st.nxt
+    BY <1>1, <2>1, StepFields
+  <2>3. ~(t + LAG <= s) /\ st.from <= s BY <2>1, MAssumptions DEF IsSt
+  <2> QED BY <2>2, <2>3 DEF Eff
+<1>2. CASE ~Installs(st, t, val)
+  <2>1. /\ FoldStep(st, t, val).from = st.from /\ FoldStep(st, t, val).nxt = st.nxt
+        /\ FoldStep(st, t, val).cur = IF st.from <= t THEN st.nxt ELSE st.cur
+    BY <1>2, StepFields
+  <2>2. st.from \in Nat BY DEF IsSt
+  <2> QED BY <2>1, <2>2 DEF Eff
 <1> QED BY <1>1, <1>2
 
 \* Folding the slots k..s-1, all within LAG before s, keeps the members of s.
@@ -139,20 +159,23 @@ LEMMA StepKeeps ==
                   FoldStep(st, t, val).nxt = st.nxt /\ FoldStep(st, t, val).from = st.from
            /\ st.from > t => FoldStep(st, t, val) = st
            /\ FoldStep(st, t, val).from \in {st.from, t + LAG}
-<1> DEFINE act == [st EXCEPT !.cur = st.nxt]
-<1>1. CASE st.from <= t /\ val[t].k = "change" /\ val[t].b = st.gen
-  <2>1. FoldStep(st, t, val) = [act EXCEPT !.nxt = val[t].m, !.from = t + LAG, !.gen = @ + 1]
-    BY <1>1 DEF FoldStep, IsSt
-  <2>2. FoldStep(st, t, val).from = t + LAG BY <2>1 DEF IsSt
-  <2>3. ~(t + LAG <= t) /\ ~(st.from > t) BY <1>1, MAssumptions DEF IsSt
-  <2> QED BY <1>1, <2>2, <2>3
-<1>2. CASE st.from <= t /\ ~(val[t].k = "change" /\ val[t].b = st.gen)
-  <2>1. FoldStep(st, t, val) = act BY <1>2 DEF FoldStep, IsSt
-  <2> QED BY <1>2, <2>1 DEF IsSt
-<1>3. CASE ~(st.from <= t)
-  <2>1. FoldStep(st, t, val) = st BY <1>3 DEF FoldStep
-  <2> QED BY <1>3, <2>1 DEF IsSt
-<1> QED BY <1>1, <1>2, <1>3 DEF IsSt
+<1>1. CASE Installs(st, t, val)
+  <2>1. FoldStep(st, t, val).from = t + LAG BY <1>1, StepFields
+  <2>2. ~(t + LAG <= t) /\ ~(st.from > t) /\ val[t].k = "change"
+    BY <1>1, MAssumptions DEF Installs, IsSt
+  <2> QED BY <2>1, <2>2
+<1>2. CASE ~Installs(st, t, val)
+  <2>1. /\ IsSt(FoldStep(st, t, val))
+        /\ FoldStep(st, t, val).from = st.from /\ FoldStep(st, t, val).nxt = st.nxt
+        /\ FoldStep(st, t, val).cur = IF st.from <= t THEN st.nxt ELSE st.cur
+        /\ FoldStep(st, t, val).gen = IF Schedules(st, t, val) THEN st.gen + 1 ELSE st.gen
+        /\ FoldStep(st, t, val).quiet = IF Schedules(st, t, val) THEN t + LAG ELSE st.quiet
+    BY <1>2, StepFields
+  \* Nothing is counted while a change is pending.
+  <2>2. st.from > t => ~Schedules(st, t, val) BY <1>2 DEF Schedules, Rotates, IsSt
+  <2>3. st.from > t => FoldStep(st, t, val) = st BY <2>1, <2>2 DEF IsSt
+  <2> QED BY <2>1, <2>3
+<1> QED BY <1>1, <1>2
 
 \* An epoch takes effect at most LAG slots after the last slot folded.
 LEMMA FromBound ==
@@ -245,22 +268,15 @@ LEMMA Sources ==
 <1>2. \A j \in Nat : C(j) => C(j + 1)
   <2> SUFFICES ASSUME NEW j \in Nat, C(j) PROVE C(j + 1) OBVIOUS
   <2> DEFINE n == k + j  st == Folded(val)[n]
-             act == IF st.from <= n THEN [st EXCEPT !.cur = st.nxt] ELSE st
   <2>1. Folded(val)[n + 1] = FoldStep(st, n, val) /\ IsSt(st) /\ n \in Nat BY FoldedDef, FoldedShape
   <2>2. S(n) \subseteq S(n + 1) /\ val[n].m \in S(n + 1) OBVIOUS
-  <2>3. act.nxt \in S(n) /\ act.from = st.from /\ (act.from > n => act.cur \in S(n))
-        /\ (st.from <= n => act.cur \in S(n))
-    BY <2>1 DEF IsSt
-  <2>4. act.cur \in S(n) BY <2>3, <2>1 DEF IsSt
-  <2>5. CASE val[n].k = "change" /\ act.from <= n /\ val[n].b = act.gen
-    <3>1. Folded(val)[n + 1] = [act EXCEPT !.nxt = val[n].m, !.from = n + LAG, !.gen = @ + 1]
-      BY <2>1, <2>5 DEF FoldStep
-    <3> QED BY <3>1, <2>2, <2>4, <2>1 DEF IsSt
-  <2>6. CASE ~(val[n].k = "change" /\ act.from <= n /\ val[n].b = act.gen)
-    <3>1. Folded(val)[n + 1] = act BY <2>1, <2>6 DEF FoldStep
-    <3>2. Folded(val)[n + 1].from > n + 1 => st.from > n BY <3>1, <2>3, <2>1 DEF IsSt
-    <3> QED BY <3>1, <3>2, <2>2, <2>3, <2>1 DEF IsSt
-  <2> QED BY <2>5, <2>6
+  <2>3. /\ Folded(val)[n + 1].cur = IF st.from <= n THEN st.nxt ELSE st.cur
+        /\ Folded(val)[n + 1].nxt = IF Installs(st, n, val) THEN val[n].m ELSE st.nxt
+    BY <2>1, StepFields
+  <2>4. st.nxt \in S(n) /\ (st.from > n => st.cur \in S(n)) BY <2>1
+  <2>5. Folded(val)[n + 1].cur \in S(n + 1) /\ Folded(val)[n + 1].nxt \in S(n + 1)
+    BY <2>2, <2>3, <2>4, <2>1 DEF IsSt
+  <2> QED BY <2>5
 <1> HIDE DEF C
 <1>3. \A j \in Nat : C(j) BY <1>1, <1>2, NatInduction
 <1>4. C(u - k) BY <1>3
@@ -281,11 +297,11 @@ LEMMA CurSources ==
     OBVIOUS
   <2>1. Folded(val)[n + 1] = FoldStep(Folded(val)[n], n, val) /\ IsSt(Folded(val)[n])
     BY FoldedDef, FoldedShape
-  <2> QED BY <2>1 DEF FoldStep, IsSt
+  <2> QED BY <2>1, StepFields
 <1>1. C(0)
   <2>1. Folded(val)[k + 1] = FoldStep(Folded(val)[k], k, val) /\ IsSt(Folded(val)[k])
     BY FoldedDef, FoldedShape
-  <2>2. Folded(val)[k + 1].cur = Folded(val)[k].nxt BY <2>1 DEF FoldStep, IsSt
+  <2>2. Folded(val)[k + 1].cur = Folded(val)[k].nxt BY <2>1, StepFields
   <2> QED BY <2>2
 <1>2. \A j \in Nat : C(j) => C(j + 1)
   <2> SUFFICES ASSUME NEW j \in Nat, C(j) PROVE C(j + 1) OBVIOUS
@@ -309,7 +325,7 @@ LEMMA FromMono ==
   <2>1. Folded(val)[n + j + 1] = FoldStep(Folded(val)[n + j], n + j, val) /\ IsSt(Folded(val)[n + j])
     BY FoldedDef, FoldedShape
   <2>2. Folded(val)[n + j].from <= Folded(val)[n + j + 1].from
-    BY <2>1, MAssumptions DEF FoldStep, IsSt
+    BY <2>1, StepFields, MAssumptions DEF Installs, IsSt
   <2> QED BY <2>2, FoldedShape DEF IsSt
 <1> HIDE DEF P
 <1>3. \A j \in Nat : P(j) BY <1>1, <1>2, NatInduction
@@ -448,7 +464,7 @@ LEMMA NextInv == Inv /\ [Next]_vars => Inv'
 <1> SUFFICES ASSUME Inv, [Next]_vars PROVE Inv' OBVIOUS
 <1>0. \A v \in Values : v # None
   <2> SUFFICES ASSUME NEW v \in Values PROVE v.k # "none" BY DEF None
-  <2> QED BY ValueKinds DEF Write
+  <2> QED BY ValueKinds DEF Write, Miss
 <1>1. ASSUME NEW r \in Replicas, NEW s \in Slots, NEW v \in Values, Decide(r, s, v) PROVE Inv'
   <2>1. decided' = [decided EXCEPT ![s] = v] /\ log' = [log EXCEPT ![r] = @ \cup {s}]
         /\ dlog' = dlog /\ decided[s] = None
@@ -475,18 +491,54 @@ LEMMA FreshFold ==
 <1>2. Folded(val)[t].from < t + LAG BY FromBound
 <1>3. CASE Installs(Folded(val)[t], t, val) BY <1>3 DEF Installs, IsSt
 <1>4. CASE ~Installs(Folded(val)[t], t, val)
-  <2>1. Folded(val)[t + 1].from = Folded(val)[t].from BY <1>1, <1>4 DEF FoldStep, Installs, IsSt
+  <2>1. Folded(val)[t + 1].from = Folded(val)[t].from BY <1>1, <1>4, StepFields
   <2> QED BY <2>1, <1>2
 <1> QED BY <1>3, <1>4
+
+LEMMA PushesDef ==
+    ASSUME NEW val
+    PROVE  /\ Pushes(val)[0] = 0
+           /\ \A n \in Nat : Pushes(val)[n + 1] =
+                  Pushes(val)[n] + (IF Schedules(Folded(val)[n], n, val) THEN 1 ELSE 0)
+<1> DEFINE Def(v, i) == v + (IF Schedules(Folded(val)[i - 1], i - 1, val) THEN 1 ELSE 0)
+<1>1. NatInductiveDefHypothesis(Pushes(val), 0, Def)
+  BY DEF Pushes, NatInductiveDefHypothesis
+<1>2. NatInductiveDefConclusion(Pushes(val), 0, Def) BY <1>1, NatInductiveDef
+<1>3. Pushes(val) = [i \in Nat |-> IF i = 0 THEN 0 ELSE Def(Pushes(val)[i - 1], i)]
+  BY <1>2 DEF NatInductiveDefConclusion
+<1> QED BY <1>3
+
+\* The generation counts every order change: each change installed and rotation counted.
+LEMMA GenCounts ==
+    ASSUME NEW val
+    PROVE  \A n \in Nat : Folded(val)[n].gen = Pushes(val)[n]
+<1> DEFINE P(n) == Folded(val)[n].gen = Pushes(val)[n]
+<1>1. P(0) BY FoldedDef, PushesDef DEF Start
+<1>2. \A n \in Nat : P(n) => P(n + 1)
+  <2> SUFFICES ASSUME NEW n \in Nat, P(n) PROVE P(n + 1) OBVIOUS
+  <2>1. Folded(val)[n + 1] = FoldStep(Folded(val)[n], n, val) /\ IsSt(Folded(val)[n])
+    BY FoldedDef, FoldedShape
+  <2>2. Folded(val)[n + 1].gen =
+          IF Schedules(Folded(val)[n], n, val) THEN Folded(val)[n].gen + 1 ELSE Folded(val)[n].gen
+    BY <2>1, StepFields
+  <2>3. Pushes(val)[n + 1] = Pushes(val)[n] + (IF Schedules(Folded(val)[n], n, val) THEN 1 ELSE 0)
+    BY PushesDef
+  <2>4. Folded(val)[n].gen \in Nat BY <2>1 DEF IsSt
+  <2> QED BY <2>2, <2>3, <2>4
+<1> HIDE DEF P
+<1>3. \A n \in Nat : P(n) BY <1>1, <1>2, NatInduction
+<1> QED BY <1>3 DEF P
 
 THEOREM FreshRule == Spec => []FreshInstalls
 <1>1. FreshInstalls
   <2> SUFFICES ASSUME NEW t \in Slots, Folded(Truth)[t + 1].from = t + LAG
-               PROVE  Truth[t].k = "change" /\ Truth[t].b = Folded(Truth)[t].gen
+               PROVE  Truth[t].k = "change" /\ Truth[t].b = Pushes(Truth)[t]
     BY DEF FreshInstalls
   <2>1. PICK tv : tv = Truth OBVIOUS
   <2>2. t \in Nat BY MAssumptions DEF Slots
-  <2> QED BY <2>1, <2>2, FreshFold
+  <2>3. Truth[t].k = "change" /\ Truth[t].b = Folded(Truth)[t].gen BY <2>1, <2>2, FreshFold
+  <2>4. Folded(Truth)[t].gen = Pushes(Truth)[t] BY <2>1, <2>2, GenCounts
+  <2> QED BY <2>3, <2>4
 <1> QED BY <1>1, PTL
 
 THEOREM WindowRule == Spec => []ViewAgree
