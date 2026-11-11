@@ -387,7 +387,12 @@ LEMMA RetireStep ==
 \* Every slot before f is decided: a majority of the new epoch durably holds them.
 <1>6. /\ f \in Nat /\ f < p + LAG /\ f <= N
       /\ \A w \in 0..(f - 1) : decided[w] # None
-  <2>1. f \in Nat /\ f < p + LAG BY <1>2, MAssumptions, FromBound, FoldedShape DEF IsSt
+  \* One fact at a time: with the wider schedule record, the combined step exhausted Zenon.
+  <2>0. p \in Nat BY <1>2, MAssumptions
+  <2>a. IsSt(Folded(kv)[p]) BY <2>0, FoldedShape
+  <2>b. f \in Nat BY <2>a DEF IsSt
+  <2>c. Folded(kv)[p].from < p + LAG BY <2>0, FromBound
+  <2>1. f \in Nat /\ f < p + LAG BY <2>b, <2>c
   <2>2. PICK m \in caught : TRUE BY <1>5
   <2>3. Prefix(dlog[m]) >= f /\ m \in Replicas BY <1>5
   <2>4. Prefix(dlog[m]) \in 0..N /\ \A w \in 0..(Prefix(dlog[m]) - 1) : w \in dlog[m]
