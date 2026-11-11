@@ -58,6 +58,8 @@ pub(super) struct Watch {
     pub(super) persist: Option<u64>,
     /// When another replica last told this one of a slot it decided.
     pub(super) decided_elsewhere: Timestamp,
+    /// When this replica's disk last caught up after being stuck with nobody deciding.
+    pub(super) resumed: Timestamp,
     /// This replica stepped aside (`aside_at`) and handed its batches to the next member.
     pub(super) aside: bool,
     /// When the target last announced a slot it decided.
@@ -120,6 +122,15 @@ impl Replica {
             return None;
         }
         Some(oldest.after(d.saturating_mul(4).min(self.cfg.hedge_max).max(d).max(usual.saturating_mul(4))))
+    }
+
+    /// When every disk seems stuck (one shared disk): this replica's oldest write in flight
+    /// has waited δ (at least four usual write times), and nobody has decided a slot since.
+    pub(super) fn all_stuck_at(&self) -> Option<Timestamp> {
+        let (d, usual) = (self.hedge_delay(), self.watch.persist?);
+        let (_, oldest) = self.watch.unpersisted.front()?;
+        let stuck = oldest.after(d.max(usual.saturating_mul(4)));
+        (self.watch.decided_elsewhere <= stuck).then_some(stuck)
     }
 
     pub(super) fn stepped_aside(&self) -> bool {
@@ -272,17 +283,24 @@ impl Replica {
     /// after 4δ (at most `hedge_max`) if the target has decided a slot itself since (it is
     /// working through a backlog, and hedges would only contend with it; still hedged, in
     /// case the forward was lost). A slot others took over from it does not count.
-    pub(super) fn late_at(&self, at: Timestamp) -> Timestamp {
+    ///
+    /// Not while this replica's disk is stuck with nobody deciding (`all_stuck_at`), and
+    /// counted from when it caught up: no slot can be decided meanwhile, and hedges made then
+    /// would contend with the target's slots the moment the disks resume, pushing them off
+    /// the fast path. Stepped aside, it hands them over again as usual.
+    pub(super) fn late_at(&self, at: Timestamp) -> Option<Timestamp> {
         let d = self.hedge_delay();
         let busy = d.saturating_mul(4).min(self.cfg.hedge_max).max(d);
-        at.after(if self.watch.progressed > at { busy } else { d })
+        let late = at.max(self.watch.resumed).after(if self.watch.progressed > at { busy } else { d });
+        let held = !self.watch.aside && self.all_stuck_at().is_some_and(|s| s <= late);
+        (!held).then_some(late)
     }
 
     /// When an entry forwarded at `at` is acted on: hedged when late, or sooner, with its
     /// target suspected, if the target stays silent.
-    pub(super) fn hedge_at(&self, at: Timestamp) -> Timestamp {
-        let late = self.late_at(at);
-        self.silent_at(at).map_or(late, |s| s.min(late))
+    pub(super) fn hedge_at(&self, at: Timestamp) -> Option<Timestamp> {
+        let (late, silent) = (self.late_at(at), self.silent_at(at));
+        late.into_iter().chain(silent).min()
     }
 
     /// When to take over `slot`, seen at `seen`, from whoever started it.
