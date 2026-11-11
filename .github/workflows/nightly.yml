@@ -43,12 +43,14 @@ jobs:
           if-no-files-found: ignore
 
   simulation:
-    # 100k seeds per scenario take hours on one core: each shard runs every 8th seed on all
+    # 100k seeds per scenario take hours on one core: each shard runs every 16th seed on all
     # of its cores.
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        # Eight shards took 30 to 116 minutes each (the progress-bound scenario alone up to
+        # 116, on slower runners), at the 120-minute limit.
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -58,10 +60,10 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: 100k seeds per simulator scenario (shard ${{ matrix.shard }}/8)
+      - name: 100k seeds per simulator scenario (shard ${{ matrix.shard }}/16)
         env:
           QPX_SIM_SEEDS: "100000"
-          QPX_SIM_SHARD: ${{ matrix.shard }}/8
+          QPX_SIM_SHARD: ${{ matrix.shard }}/16
         run: cargo nextest run --release -p quepaxa-sim --test replica_sim --no-fail-fast
 
   scenarios:
@@ -86,6 +88,18 @@ jobs:
         run: cargo nextest run --release -p quepaxa-sim --test placement --no-fail-fast
 
   deep:
+    # With one more deviation the membership scenarios take 30 to 66 minutes each on one
+    # core, over two core-hours together: each part holds at most four of them, one per core.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: resize
+            filter: test(a_cluster_)
+          - part: replace
+            filter: test(a_member_replaced) | test(leader_write_survives) | test(rival)
+          - part: rest
+            filter: not (test(a_cluster_) | test(a_member_replaced) | test(leader_write_survives) | test(rival))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -95,18 +109,18 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: Model checking with one more deviation per scenario, exhaustively
+      - name: Model checking with one more deviation per scenario, exhaustively (${{ matrix.part }})
         env:
           QPX_MODEL_EXTRA_DEVIATIONS: "1"
           QPX_MODEL_STATES: "200000000"
-        run: cargo nextest run --release -p quepaxa-sim --test model_check --no-fail-fast
+        run: cargo nextest run --release -p quepaxa-sim --test model_check --no-fail-fast -E '${{ matrix.filter }}'
       - name: kv-tokio's handoff with two persists, every interleaving (about 3 minutes)
-        if: success() || failure()
+        if: matrix.part == 'rest' && (success() || failure())
         env:
           QPX_SHUTTLE_PERSISTS: "2"
         run: cargo nextest run -p kv-tokio --features shuttle --bin kv-tokio --no-fail-fast
       - name: Deep property tests
-        if: success() || failure()
+        if: matrix.part == 'rest' && (success() || failure())
         env:
           PROPTEST_CASES: "100000"
         run: cargo nextest run --release -p quepaxa --no-fail-fast
