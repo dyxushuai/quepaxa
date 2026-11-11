@@ -245,7 +245,7 @@ fn placement_under_faults_and_reconfigurations_stays_safe_and_converges() {
 
 #[test]
 fn removed_majority_waits_for_the_new_members() {
-    const SEED: u64 = 1576;
+    const SEED: u64 = 1536;
     // The seed replaces two of the three members with spares; when removed members shut
     // down as soon as they had applied the old epoch themselves, the new members could never
     // learn its last slots. The seed only picks the schedule: re-pick one that still removes

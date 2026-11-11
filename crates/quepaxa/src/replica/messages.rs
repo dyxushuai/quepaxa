@@ -40,8 +40,7 @@ impl Replica {
         // A replica outside the latest epoch it knows (joining, removed, or added back) may
         // have lost every replica it knows to later changes: only members of an epoch it has
         // not learned yet can tell it the log, so it listens to anyone in the cluster.
-        let outside = !self.schedule.members(Slot(self.schedule.epoch().1)).contains(&self.me);
-        let known = outside || self.cfg.members.contains(&from) || self.schedule.knows(from);
+        let known = self.outside() || self.cfg.members.contains(&from) || self.schedule.knows(from);
         // Anyone may read: a joining or removed replica asks members it may not know yet.
         let request = matches!(
             msg.body,
