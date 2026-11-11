@@ -409,6 +409,59 @@ fn a_replica_removed_while_down_learns_it_when_restarted() {
 }
 
 #[test]
+fn a_joiner_learns_from_new_members_once_every_configured_one_left() {
+    // Replica 3 replaces all three configured members, which then shut down. Replica 4 joins
+    // with the original configuration: no replica it knows of is left, so it can only learn
+    // the change naming it from replica 3, without which the new epoch has no majority.
+    let mut rs: Vec<Replica> = (0..4).map(|i| ordered(i, &[])).collect();
+    let tick = |rs: &mut Vec<Replica>, t: u64, down: &[usize]| {
+        let mut seen = run_without(rs, down);
+        for (i, r) in rs.iter_mut().enumerate() {
+            if !down.contains(&i) {
+                r.handle_timeout(Timestamp(t * 100_000_000)).unwrap();
+            }
+        }
+        seen.extend(run_without(rs, down));
+        seen
+    };
+    run_without(&mut rs, &[]);
+    rs[0].propose_reconfiguration(T0, vec![NodeId(3)], vec![]).unwrap();
+    run_without(&mut rs, &[]);
+    let mut t = 1;
+    for k in 0..70u32 {
+        rs[0].propose(T0, Bytes::from(format!("w{k}"))).unwrap();
+        tick(&mut rs, t, &[]);
+        t += 1;
+    }
+    let gone = [0, 1, 2];
+    rs.push(ordered(4, &[]));
+    rs[3].propose_reconfiguration(Timestamp(t * 100_000_000), vec![NodeId(3), NodeId(4)], vec![]).unwrap();
+    let mut seen = run_without(&mut rs, &gone);
+    for k in 0..150u32 {
+        rs[3].propose(Timestamp(t * 100_000_000), Bytes::from(format!("x{k}"))).unwrap();
+        seen.extend(tick(&mut rs, t, &gone));
+        t += 1;
+    }
+    let epoch: Vec<u64> = seen
+        .iter()
+        .filter_map(|(i, a)| match a {
+            Action::Reconfigured { from, members, .. } if *i == 4 && members == &[NodeId(3), NodeId(4)] => {
+                Some(from.0)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(epoch.len(), 1, "the joiner applied the change that names it");
+    assert!(
+        rs[3].commit_index() > epoch[0] + 8,
+        "the new epoch commits: {} vs {}",
+        rs[3].commit_index(),
+        epoch[0]
+    );
+    assert_eq!(rs[4].commit_index(), rs[3].commit_index(), "the joiner caught up");
+}
+
+#[test]
 fn a_change_takes_effect_and_the_cluster_goes_quiet_without_writes() {
     // Nobody writes after the change: the window before it takes effect is filled anyway,
     // the removed replica retires, and then every replica is quiet.
