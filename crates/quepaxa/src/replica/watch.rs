@@ -125,12 +125,14 @@ impl Replica {
     }
 
     /// When every disk seems stuck (one shared disk): this replica's oldest write in flight
-    /// has waited δ (at least four usual write times), and nobody has decided a slot since.
+    /// has waited δ (at least four usual write times), and nobody has decided a slot since it
+    /// was due (four usual write times after it was issued): a decision made durable just
+    /// before every disk stopped may still arrive after the write was issued.
     pub(super) fn all_stuck_at(&self) -> Option<Timestamp> {
         let (d, usual) = (self.hedge_delay(), self.watch.persist?);
         let (_, oldest) = self.watch.unpersisted.front()?;
-        let stuck = oldest.after(d.max(usual.saturating_mul(4)));
-        (self.watch.decided_elsewhere <= stuck).then_some(stuck)
+        let due = oldest.after(usual.saturating_mul(4));
+        (self.watch.decided_elsewhere <= due).then(|| oldest.after(d).max(due))
     }
 
     pub(super) fn stepped_aside(&self) -> bool {

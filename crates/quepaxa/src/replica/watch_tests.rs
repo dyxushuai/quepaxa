@@ -662,6 +662,11 @@ fn a_follower_does_not_hedge_while_every_disk_seems_stuck() {
     // disks resume it would contend with them.
     let (mut r, id) = follower_with_a_stuck_disk();
     let mut out = Vec::new();
+    // A decision made durable before the disks stopped, arriving before the write was due
+    // (four usual write times), says nothing about them.
+    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 2, 0) };
+    r.handle(Timestamp(3 * MS), from_peer(2, 1, decided)).unwrap();
+    r.poll_actions(&mut out);
     r.handle_timeout(Timestamp(150 * MS)).unwrap();
     r.poll_actions(&mut out);
     assert!(r.forwarded.contains_key(&id), "not hedged past δ");
@@ -678,16 +683,19 @@ fn a_follower_does_not_hedge_while_every_disk_seems_stuck() {
 
 #[test]
 fn a_follower_whose_disk_alone_is_stuck_still_hedges() {
-    let (mut r, id) = follower_with_a_stuck_disk();
-    let mut out = Vec::new();
-    // Another replica decides a slot after the write stuck: other disks work.
-    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 2, 0) };
-    r.handle(Timestamp(85 * MS), from_peer(2, 1, decided)).unwrap();
-    r.poll_actions(&mut out);
-    r.handle_timeout(Timestamp(85 * MS)).unwrap();
-    r.poll_actions(&mut out);
-    assert!(!r.forwarded.contains_key(&id), "hedged after δ");
-    assert_eq!(r.metrics.hedged, 1);
+    // Another replica decides a slot after the write was due, before or after δ: other
+    // disks work.
+    for at in [10, 85] {
+        let (mut r, id) = follower_with_a_stuck_disk();
+        let mut out = Vec::new();
+        let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 2, 0) };
+        r.handle(Timestamp(at * MS), from_peer(2, 1, decided)).unwrap();
+        r.poll_actions(&mut out);
+        r.handle_timeout(Timestamp(85 * MS)).unwrap();
+        r.poll_actions(&mut out);
+        assert!(!r.forwarded.contains_key(&id), "decided at {at} ms: hedged after δ");
+        assert_eq!(r.metrics.hedged, 1);
+    }
 }
 
 #[test]
