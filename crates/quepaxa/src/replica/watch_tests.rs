@@ -682,6 +682,35 @@ fn a_follower_does_not_hedge_while_every_disk_seems_stuck() {
 }
 
 #[test]
+fn a_disk_that_keeps_completing_writes_is_slow_not_stuck() {
+    // One shared disk, slow: a write waits for the flush in progress and then its own, so
+    // the oldest one in flight waits δ although the disk keeps completing writes. Holding
+    // hedges there only fired them later, still around the slow leader.
+    let mut r = with_latency(None);
+    let mut out = Vec::new();
+    r.watch.persist = Some(MS);
+    for (slot, at) in [(0, 2), (1, 3)] {
+        let request = Body::RecordRequest { slot: Slot(slot), step: 4, proposal: proposal(1, 0, slot) };
+        r.handle(Timestamp(at * MS / 2), from_peer(0, 1, request)).unwrap();
+        r.poll_actions(&mut out);
+    }
+    assert_eq!(r.watch.unpersisted.len(), 2, "two writes in flight");
+    let id = r.propose(Timestamp(2 * MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 1);
+    // The first write completes, late; the second is still in flight past δ.
+    let (first, _) = *r.watch.unpersisted.front().expect("writes in flight");
+    r.handle(Timestamp(40 * MS), Input::Persisted(PersistId(first))).unwrap();
+    r.poll_actions(&mut out);
+    assert!(!r.watch.unpersisted.is_empty(), "the second write is still in flight");
+    assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(82 * MS)), "not held, δ not restarted");
+    r.handle_timeout(Timestamp(82 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(!r.forwarded.contains_key(&id), "hedged after δ");
+    assert_eq!(r.metrics.hedged, 1);
+}
+
+#[test]
 fn a_follower_whose_disk_alone_is_stuck_still_hedges() {
     // Another replica decides a slot after the write was due, before or after δ: other
     // disks work.
