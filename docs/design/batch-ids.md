@@ -170,7 +170,13 @@ Rules R and P exclude it.
   register or a decided slot at or above the floor, ahead of the records that reference it.
   Data referenced only below the new floor is gone with the slots, and the snapshot covers it.
   A fetch for such data is answered with `Compacted { through }`, so the existing
-  `SnapshotNeeded` path takes over.
+  `SnapshotNeeded` path takes over. That path needs one change: `on_compacted`
+  (`replica/snapshot.rs`) ignores `through < committed`, which was safe while `committed`
+  and `emitted` moved together. A replica blocked on content has `emitted < committed`, and
+  holders may compact past `emitted` before its fetch succeeds, answering with
+  `committed > through >= emitted`. The guard becomes `through < emitted`, the prefix the
+  application actually holds, which is also what `install_snapshot` checks before returning
+  `Ok(false)`. Without the change, commits and reads stay blocked in a quiet cluster.
 - **What may be evicted.** The store may drop any batch that nothing references: no retained
   register, no decided slot at or above the floor, no local proposer's working value, and no
   queued `Ref` (`pending`, `relayed`, `forwarded`, `batches`). Received but unreferenced
@@ -235,7 +241,7 @@ What changes or is new:
 
 | Item | Change |
 |---|---|
-| **G6 content custody** (`crates/quepaxa-sim/src/invariants.rs`) | (a) Every value in a replica's register has all its references in that replica's *durable* data, read from the simulated disk. (b) Every decided slot has its content durable, or covered by the replica's floor, at a majority of its members. Checked after every event in the simulator and the model checker. `Inspection` gains the durable data ids. |
+| **G6 content custody** (`crates/quepaxa-sim/src/invariants.rs`) | Defined over *durable* state only, because the in-memory register changes before its persist completes (both simulators deliver persists as separate events: `actions.rs::on_action`, `model.rs::drain`), so a check against the live register would fail on correct runs. (a) Replaying a replica's simulated disk (`durable: Vec<Bytes>`, in order), every `Recorder` record's references are in `Data` records earlier on that disk. (b) Every decided slot has its content in durable `Data`, or below the durable floor, at a majority of its members. Volatile custody, a reply that reports a value leaving before its content is durable, is the gate's job, and the existing reply oracles plus the `data-after-register` canary cover it. Checked after every event in the simulator and the model checker, by decoding the disk. |
 | Liveness oracles | The existing "every write served once nothing is left to run", the progress bound and convergence after heal now also require `emitted == committed` on every live replica, which covers fetch. |
 | Model-checking scenario (the issue's acceptance) | Three replicas. A follower's `Data` to one recorder is lost (forced deviation). The slot is decided by the other two, then the origin crashes. The third replica must fetch and apply. A variant crashes the requester while a recorder is parked. Both run within the per-PR deviation budget. |
 | Simulator | `inline_batch_bytes` drawn per replica per seed (0, small, `u32::MAX`), so mixed clusters run in every hostile, crash-heavy, membership and placement seed. A large-command workload is added. |
@@ -381,9 +387,11 @@ Each phase is one PR that passes the full per-PR suite and the canaries.
 - **Phase 2, references, off by default.**
   - Code: `Ref` items, the data store with its eviction rules, `Data` and `Fetch`, rules R
     and P, `KIND_DATA` and checkpoint rewrite, content in `Entries`, the held prefix for
-    retirement and progress.
+    retirement and progress, `on_compacted` guarded by `emitted` instead of `committed`.
   - Tests: `would_change` Kani proof and property test; batch, codec and record fuzz targets;
-    restart with a `Recorder` record before its `Data` (`CorruptRecord`); G6; the
+    restart with a `Recorder` record before its `Data` (`CorruptRecord`); a replica blocked
+    on content whose holders compact past its `emitted` asks for a snapshot (unit test, and
+    a model-checking variant with compaction); G6; the
     model-checking scenarios; the randomized simulator option; `Content.tla`, its proof and
     seeded bugs; the six canaries.
   - Docs: `protocol.md` (around the core protocol), `durability.md`, `snapshots.md` and
