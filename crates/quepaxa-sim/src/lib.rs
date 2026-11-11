@@ -433,12 +433,13 @@ impl Sim {
             Event::Kill { node } => self.crash(node),
             Event::Reorder => self.reorder()?,
             Event::Deliver { to, bytes } if self.cpu_cost(to).is_some() => {
-                // Queued behind the messages before it, each handled once in arrival order.
+                // Queued behind the messages before it, each handled once in arrival order;
+                // its effects leave once the machine is done with it.
                 let cost = self.cpu_cost(to).expect("checked by the guard");
                 let n = &mut self.nodes[to];
-                let start = n.cpu_busy_until.max(self.now);
-                n.cpu_busy_until = start + cost;
-                self.push(start, Event::Handle { to, bytes });
+                let done = n.cpu_busy_until.max(self.now) + cost;
+                n.cpu_busy_until = done;
+                self.push(done, Event::Handle { to, bytes });
             }
             Event::Deliver { to, bytes } | Event::Handle { to, bytes } => {
                 let Some(r) = self.nodes[to].replica.as_mut() else {

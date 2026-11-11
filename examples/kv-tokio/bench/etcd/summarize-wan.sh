@@ -27,14 +27,25 @@ run_row() {
     "$(sed -n 's/^last_change_s=//p' "$dir/$name-leader.txt" 2>/dev/null | grep . || echo -)"
 }
 
-# One region's row for one run, from its generator's output.
+# One region's row for one run, from its generator's output; for a leader-policy run, the
+# latency only of requests due once the policy settled (none if the region wrote nothing
+# then), from its samples.
 region_row() {
-  awk '
+  local from latency=""
+  from=$(sed -n 's/^measure_from_s=//p' "${1%-r*.txt}-leader.txt" 2>/dev/null)
+  if [ -n "$from" ]; then
+    latency=$(sort -n <(awk -F, -v from="$from" 'FNR > 1 && $3 == "Ok" && $1 >= from * 1e6 { print $2 - $1 }' "${1%.txt}.csv") | awk '
+      { v[NR] = $1 }
+      function pct(p) { return v[int((NR - 1) * p + 0.5) + 1] / 1000 }
+      END { if (NR) printf "%.1f %.1f %.1f", pct(0.5), pct(0.99), v[NR] / 1000; else printf "- - -" }')
+  fi
+  awk -v latency="$latency" '
     function field(k,   i) { for (i = 1; i <= NF; i++) if (index($i, k "=") == 1) return substr($i, length(k) + 2); return "" }
     function ms(v) { sub(/us$/, "", v); return v / 1000 }
     # A region with no completions has no latency to show.
     /^offered/ {
-      if (field("completed") + 0 == 0) printf "- - -"
+      if (latency != "") printf "%s", latency
+      else if (field("completed") + 0 == 0) printf "- - -"
       else printf "%.1f %.1f %.1f", ms(field("p50")), ms(field("p99")), ms(field("max"))
       printf " %d %d", field("errors"), field("unanswered")
     }
