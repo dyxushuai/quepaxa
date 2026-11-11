@@ -5,7 +5,8 @@
 //! ```text
 //! kv-bench --targets 127.0.0.1:7200,127.0.0.1:7201 --rate 20000 --secs 10 --conns 16 [--gets 0.5]
 //! kv-bench --protocol etcd --targets 127.0.0.1:2379 --rate 5000 --secs 60 \
-//!          [--timeline 100] [--fault-at 20] [--samples out.csv] [--start-at UNIX_MS] [--seed 1]
+//!          [--timeline 100] [--fault-at 20] [--samples out.csv] [--start-at UNIX_MS] [--seed 1] \
+//!          [--rate-at 30:0,60:5000]
 //! ```
 //!
 //! Prints achieved throughput and latency percentiles. Results are measurements of one
@@ -19,6 +20,7 @@
 //! `due_us,done_us,outcome`. `--start-at` starts the run at that wall-clock time (Unix
 //! milliseconds), so a fault injector on the same host can share its time zero. `--seed`
 //! (default 1) seeds arrivals and keys, so generators started together do not send in step.
+//! `--rate-at SECS:RATE,...` changes the rate from those times into the run on (0 pauses).
 
 mod etcd;
 #[path = "../../pb.rs"]
@@ -187,6 +189,26 @@ fn report(
     }
 }
 
+/// `SECS:RATE[,SECS:RATE...]`, in increasing time order.
+fn parse_rate_at(v: &str) -> Result<Vec<(f64, f64)>, String> {
+    let steps = v
+        .split(',')
+        .map(|step| {
+            let (secs, rate) = step.split_once(':').ok_or(format!("{step}: expected SECS:RATE"))?;
+            let secs: f64 = secs.parse().map_err(|e| format!("{step}: {e}"))?;
+            let rate: f64 = rate.parse().map_err(|e| format!("{step}: {e}"))?;
+            if secs < 0.0 || rate < 0.0 {
+                return Err(format!("{step}: negative"));
+            }
+            Ok((secs, rate))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if steps.windows(2).any(|w| w[0].0 >= w[1].0) {
+        return Err(format!("{v}: steps must be in increasing time order"));
+    }
+    Ok(steps)
+}
+
 #[tokio::main]
 async fn main() {
     let mut targets: Vec<SocketAddr> = Vec::new();
@@ -194,6 +216,7 @@ async fn main() {
     let (mut protocol, mut samples_path, mut timeline_ms, mut fault_at, mut start_at) =
         (String::from("lines"), None, None, None, None);
     let mut seed = 1;
+    let mut rate_at = Vec::new();
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let v = it.next().unwrap_or_default();
@@ -214,14 +237,17 @@ async fn main() {
                 start_at = Some(std::time::UNIX_EPOCH + Duration::from_millis(ms));
             }
             "--seed" => seed = v.parse().expect("--seed: integer"),
+            "--rate-at" => rate_at.extend(parse_rate_at(&v).unwrap_or_else(|e| panic!("--rate-at: {e}"))),
             other => panic!("unknown flag {other}"),
         }
     }
     assert!(!targets.is_empty(), "--targets is required");
     match protocol.as_str() {
-        "lines" => assert!(start_at.is_none(), "--start-at needs --protocol etcd"),
+        "lines" => {
+            assert!(start_at.is_none() && rate_at.is_empty(), "--start-at and --rate-at need --protocol etcd")
+        }
         "etcd" => {
-            let load = etcd::Load { targets, rate, secs, conns, gets, start_at, seed };
+            let load = etcd::Load { targets, rate, rate_at, secs, conns, gets, start_at, seed };
             let (samples, end_us) = etcd::run(&load).await;
             report(&samples, end_us, rate, secs, timeline_ms, fault_at, samples_path.as_deref());
             return;
@@ -265,6 +291,23 @@ async fn main() {
         match tokio::time::timeout(GRACE, stats).await {
             Ok(Some(line)) => println!("{addr} {line}"),
             _ => println!("{addr} no STATS within {GRACE:?}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_rate_at;
+
+    #[test]
+    fn rate_steps_parse_in_order() {
+        assert_eq!(parse_rate_at("10:200,40:0"), Ok(vec![(10.0, 200.0), (40.0, 0.0)]));
+    }
+
+    #[test]
+    fn malformed_or_unordered_rate_steps_are_rejected() {
+        for bad in ["10", "x:1", "10:-1", "40:1,10:2", "10:1,10:2"] {
+            assert!(parse_rate_at(bad).is_err(), "{bad}");
         }
     }
 }

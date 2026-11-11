@@ -16,6 +16,9 @@ use crate::{GRACE, SplitMix, word};
 pub struct Load {
     pub targets: Vec<SocketAddr>,
     pub rate: f64,
+    /// Later rates: from each time (seconds into the run) on, that many requests per second
+    /// (0 pauses), in time order.
+    pub rate_at: Vec<(f64, f64)>,
     pub secs: f64,
     pub conns: usize,
     pub gets: f64,
@@ -24,6 +27,14 @@ pub struct Load {
     pub start_at: Option<SystemTime>,
     /// Seeds arrivals and keys: generators running side by side need different seeds.
     pub seed: u64,
+}
+
+impl Load {
+    /// The rate at `at` seconds into the run, and when the next step starts.
+    fn rate_in_force(&self, at: f64) -> (f64, Option<f64>) {
+        let rate = self.rate_at.iter().rev().find(|(from, _)| *from <= at).map_or(self.rate, |s| s.1);
+        (rate, self.rate_at.iter().map(|s| s.0).find(|&from| from > at))
+    }
 }
 
 /// Runs the load; returns every request's sample and the run's end (microseconds from start),
@@ -53,8 +64,18 @@ pub async fn run(load: &Load) -> (Vec<Sample>, u64) {
     let mut next = start;
     let mut handles = Vec::new();
     loop {
-        // Exponential inter-arrival times give a Poisson process (open loop).
-        next += Duration::from_secs_f64(-(1.0 - rng.unit()).ln() / load.rate);
+        // Exponential inter-arrival times give a Poisson process (open loop), at the rate in
+        // force; a paused stretch skips to the next step.
+        let at = (next - start).as_secs_f64();
+        let (rate, step_end) = load.rate_in_force(at);
+        if rate <= 0.0 {
+            match step_end {
+                Some(end) => next = start + Duration::from_secs_f64(end),
+                None => break,
+            }
+            continue;
+        }
+        next += Duration::from_secs_f64(-(1.0 - rng.unit()).ln() / rate);
         if next >= until {
             break;
         }

@@ -78,7 +78,7 @@ fn the_leader_follows_writes_that_shift_for_good() {
         // eu-west (replica 2) and us-east (replica 3).
         // The cost model ranks us-west first for the first writers and us-east for the
         // second, so the leader moves twice: ap-ne -> us-west -> us-east.
-        let weights = Some((vec![10, 10, 0, 0, 0], Some((40_000, vec![0, 0, 10, 10, 0]))));
+        let weights = Some(vec![(0, vec![10, 10, 0, 0, 0]), (40_000, vec![0, 0, 10, 10, 0])]);
         let r = run(seed, 100_000, weights);
         println!("seed {seed}: order {:?}, moves {}", r.final_order, moves(&r));
         assert_eq!(r.final_order.first(), Some(&US_EAST_REPLICA), "seed {seed}: {:?}", r.final_order);

@@ -226,7 +226,7 @@ fn placement_under_faults_and_reconfigurations_stays_safe_and_converges() {
             // partitions alone, so moves happen.
             crash: if changes { hostile.crash } else { 0 },
             placement: Some((300, 600)),
-            write_weights: Some((vec![1, 20, 1, 1, 1], None)),
+            write_weights: Some(vec![(0, vec![1, 20, 1, 1, 1])]),
             fault_phase_ms: 5_000,
             ..hostile
         };
@@ -257,7 +257,6 @@ fn lan(seed: u64) -> SimConfig {
         read: 0,
         max_latency_ms: 1,
         links_ms: Some(vec![vec![0, 1, 1], vec![1, 0, 1], vec![1, 1, 0]]),
-        compact_every: None,
         fault_phase_ms: 1_500,
         propose: 1_000,
         ..SimConfig::hostile(3, seed)

@@ -5,12 +5,19 @@
 # their local replica, and faults hit the leader's region. See README.md.
 #
 # Usage: wan.sh [--smoke] [scenario...]
-#   scenarios: calm crash partition slow jitter (default: all)
+#   scenarios: calm crash partition slow jitter (default: all), and the leader-policy
+#     scenarios (QuePaxa only, never by default): convergence (leader starts far away),
+#     heterogeneous (no WAN delay, the first leader's container on a CPU quota), shift
+#     (writes move from the regions near us-east to those near ap-ne for good), burst (far
+#     regions write five times as much for 10 s)
 #   --smoke    short single runs, to check the harness works
 # Environment: RATE (total writes/s, default 1000), REPEATS (runs per case, default 3),
 #   REPLICA_CPUS ("0-1 2-3 4-5 6-7 8-9"), GEN_CPUS (10-15), SLOW_MS (one-way delay added to
 #   the leader's links, default 100), JITTER_MS (default 50) and LOSS (percent, default 1)
-#   for the jitter scenario.
+#   for the jitter scenario; POLICY (kv-tokio flags of the leader policy under test,
+#   default "--placement on --placement-periods 30000,120000") for the policy scenarios,
+#   and for the others too with POLICY_EVERYWHERE=1; SLOW_CPUS (the heterogeneous
+#   scenario's quota, default 0.5).
 # Needs Docker and jq. Results go to target/bench-etcd/wan-<time>/.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -21,7 +28,7 @@ scenarios=()
 for a in "$@"; do
   case $a in
     --smoke) smoke=1 ;;
-    calm | crash | partition | slow | jitter) scenarios+=("$a") ;;
+    calm | crash | partition | slow | jitter | convergence | heterogeneous | shift | burst) scenarios+=("$a") ;;
     *) echo "unknown argument $a" >&2; exit 2 ;;
   esac
 done
@@ -36,6 +43,16 @@ rate=${RATE:-1000}
 read -r -a replica_cpus <<< "${REPLICA_CPUS:-0-1 2-3 4-5 6-7 8-9}"
 gen_cpus=${GEN_CPUS:-10-15}
 slow_ms=${SLOW_MS:-100}
+policy=${POLICY:---placement on --placement-periods 30000,120000}
+slow_cpus=${SLOW_CPUS:-0.5}
+# The policy scenarios: run length, when the load changes, and the last stretch whose
+# latency is reported (after the policy has settled), in seconds.
+policy_case() { case $1 in convergence | heterogeneous | shift | burst) return 0 ;; esac; return 1; }
+if [ $smoke = 1 ]; then
+  policy_secs=30 change_at=15 change_for=5 settled_from=20
+else
+  policy_secs=300 change_at=150 change_for=10 settled_from=240
+fi
 jitter_ms=${JITTER_MS:-50}
 loss=${LOSS:-1}
 
@@ -87,19 +104,26 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
   for i in $(seq 0 $((n - 1))); do echo "rtt ${regions[$i]}: ${rtt[$i]}"; done
   echo "rate: $rate/s in total, run ${secs}s, fault at ${fault}s, heal at ${heal}s, repeats $repeats, smoke=$smoke"
   echo "slow: +${slow_ms}ms; jitter: ${jitter_ms}ms, ${loss}% loss"
+  echo "policy: $policy (everywhere: ${POLICY_EVERYWHERE:-0}); policy runs ${policy_secs}s, change at ${change_at}s for ${change_for}s, settled from ${settled_from}s; heterogeneous quota $slow_cpus CPUs"
   echo "cpus: replicas ${replica_cpus[*]}, generators $gen_cpus"
   echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms; etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
 } > "$results/env.txt"
 cat "$results/env.txt"
 
+# start_quepaxa <pinned> <scenario>: the pinned region leads first; the policy flags apply
+# to the policy scenarios (and to all with POLICY_EVERYWHERE=1); the heterogeneous
+# scenario puts the first leader's container on a CPU quota.
 start_quepaxa() {
-  local members="" i
+  local members="" i flags=() quota
   for i in $(seq 0 $((n - 1))); do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
+  if policy_case "$2" || [ "${POLICY_EVERYWHERE:-0}" = 1 ]; then read -r -a flags <<< "$policy"; fi
   for i in $(seq 0 $((n - 1))); do
+    quota=()
+    [ "$2" = heterogeneous ] && [ "$i" = "$1" ] && quota=(--cpus "$slow_cpus")
     docker run -d --name "qpx-r$i" --network "$net" --ip "$(replica_ip "$i")" --cpuset-cpus "${replica_cpus[$i]}" \
-      -v "$data/r$i:/data" "$image" \
+      "${quota[@]}" -v "$data/r$i:/data" "$image" \
       kv-tokio --id "$i" --members "$members" --client 0.0.0.0:7100 --etcd 0.0.0.0:2379 --data /data \
-      --leader-order "$(leader_order "$1")" --retransmit-ms 400 --hedge-max-ms 3000 >/dev/null
+      --leader-order "$(leader_order "$1")" --retransmit-ms 400 --hedge-max-ms 3000 "${flags[@]}" >/dev/null
   done
 }
 
@@ -292,28 +316,76 @@ heal() {
   esac
 }
 
+# region_load <scenario> <region>: kv-bench rate flags for that region's generator.
+region_load() {
+  local per=$((rate / n)) region=${regions[$2]}
+  case $1 in
+    shift)
+      # Writes come from the regions near us-east, then from those near ap-ne, for good.
+      case $region in
+        us-east | eu-west | sa-east) echo "--rate $((rate / 3)) --rate-at $change_at:0" ;;
+        *) echo "--rate 0 --rate-at $change_at:$((rate / 2))" ;;
+      esac ;;
+    burst)
+      case $region in
+        ap-ne | sa-east) echo "--rate $per --rate-at $change_at:$((5 * per)),$((change_at + change_for)):$per" ;;
+        *) echo "--rate $per" ;;
+      esac ;;
+    *) echo "--rate $per" ;;
+  esac
+}
+
+# From t0 ($1), every 5 s until the file named by $2 exists, appends to $3 "<seconds since
+# t0> <leading region>".
+sample_leaders() {
+  local t0=$1 stop=$2 out=$3
+  sleep_until "$t0"
+  until [ -e "$stop" ]; do
+    echo "$((($(date +%s%3N) - t0) / 1000)) $(leader_now quepaxa)" >> "$out"
+    sleep 5
+  done
+}
+
 # One run: a generator per region on its local replica, the fault on the leader's region.
 run_case() {
-  local system=$1 scenario=$2 pinned=$3 name=$4 run=$5 i pids=() before
-  # Probes (containers of their own) run before and after the load, never during it.
+  local system=$1 scenario=$2 pinned=$3 name=$4 run=$5 i pids=() before load sampler=""
+  # The policy scenarios report the longest stall after their load changes instead.
+  local run_secs=$secs fault_at=$fault
+  policy_case "$scenario" && run_secs=$policy_secs fault_at=$change_at
+  # Probes (containers of their own) run before and after the load, never during it; only
+  # the policy scenarios sample the leader meanwhile, from the generators' CPUs.
   [ "$scenario" = jitter ] && before=$(reorders)
-  local t0=$(($(date +%s%3N) + 5000)) per=$((rate / n))
+  local t0=$(($(date +%s%3N) + 5000))
   for i in $(seq 0 $((n - 1))); do
+    read -r -a load <<< "$(region_load "$scenario" "$i")"
     docker run --rm --name "qpx-g$i" --network "$net" --ip "$(gen_ip "$i")" --cpuset-cpus "$gen_cpus" \
       -v "$results:/out" "$image" \
-      kv-bench --protocol etcd --targets "$(replica_ip "$i"):2379" --rate "$per" --gets 0 --secs "$secs" \
-      --conns 4 --start-at "$t0" --fault-at "$fault" --timeline 250 --seed $((run * 10 + i + 1)) \
+      kv-bench --protocol etcd --targets "$(replica_ip "$i"):2379" "${load[@]}" --gets 0 --secs "$run_secs" \
+      --conns 4 --start-at "$t0" --fault-at "$fault_at" --timeline 250 --seed $((run * 10 + i + 1)) \
       --samples "/out/$name-r$i.csv" > "$results/$name-r$i.txt" &
     pids+=($!)
   done
-  sleep_until $((t0 + fault * 1000))
-  inject "$scenario" "$pinned"
-  sleep_until $((t0 + heal * 1000))
-  heal "$scenario" "$pinned"
+  if policy_case "$scenario"; then
+    rm -f "$results/$name.stop"
+    sample_leaders "$t0" "$results/$name.stop" "$results/$name-leaders.txt" &
+    sampler=$!
+  else
+    sleep_until $((t0 + fault * 1000))
+    inject "$scenario" "$pinned"
+    sleep_until $((t0 + heal * 1000))
+    heal "$scenario" "$pinned"
+  fi
   for i in "${pids[@]}"; do wait "$i"; done
+  if [ -n "$sampler" ]; then touch "$results/$name.stop"; wait "$sampler"; fi
   {
     echo "leader_after=$(leader_now "$system")"
     [ "$scenario" = jitter ] && echo "reorders=$(($(reorders) - before))"
+    if policy_case "$scenario"; then
+      awk -v from="$settled_from" '
+        $2 != last { if (NR > 1) { changes++; at = $1 } last = $2 }
+        END { printf "leader_changes=%d\nlast_change_s=%d\nmeasure_from_s=%d\n", changes, at, from }' \
+        "$results/$name-leaders.txt"
+    fi
   } > "$results/$name-leader.txt"
   case $scenario in slow | jitter) check_links "$pinned" ;; esac
   awk '/^offered/ { for (i = 1; i <= NF; i++) if ($i ~ /^p99=/) p = p " " $i } END { print "    p99 by region:" p }' \
@@ -327,8 +399,11 @@ stop() {
 
 for system in quepaxa etcd etcd-tuned; do
   for scenario in "${scenarios[@]}"; do
+    policy_case "$scenario" && [ "$system" != quepaxa ] && continue
     placements=(far)
     [ "$scenario" = calm ] && placements+=(best)
+    # The write shift starts where the first writers are best served.
+    [ "$scenario" = shift ] || [ "$scenario" = burst ] && placements=(best)
     for placement in "${placements[@]}"; do
       [ "$placement" = far ] && pinned=$far || pinned=$best
       label=$scenario
@@ -336,12 +411,14 @@ for system in quepaxa etcd etcd-tuned; do
       for run in $(seq 1 "$repeats"); do
         echo "$system: $label, run $run"
         case $system in
-          quepaxa) start_quepaxa "$pinned" ;;
+          quepaxa) start_quepaxa "$pinned" "$scenario" ;;
           etcd) start_etcd 100 1000 ;;
           etcd-tuned) start_etcd "$max_rtt" $((10 * max_rtt)) ;;
         esac
-        shape_links
-        check_links $(seq 0 $((n - 1)))
+        if [ "$scenario" != heterogeneous ]; then
+          shape_links
+          check_links $(seq 0 $((n - 1)))
+        fi
         check_generators
         ready "$system" "$pinned"
         run_case "$system" "$scenario" "$pinned" "$system-$label-$run" "$run"

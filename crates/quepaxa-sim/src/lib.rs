@@ -28,11 +28,31 @@ const MS: u64 = 1_000_000;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Event {
-    Deliver { to: usize, bytes: Vec<u8> },
-    PersistDone { node: usize, generation: u64, id: u64 },
-    Timer { node: usize, generation: u64, at: u64 },
-    Restart { node: usize },
-    Kill { node: usize },
+    Deliver {
+        to: usize,
+        bytes: Vec<u8>,
+    },
+    /// A message a slow machine takes up when it is free: its turn was set on arrival.
+    Handle {
+        to: usize,
+        bytes: Vec<u8>,
+    },
+    PersistDone {
+        node: usize,
+        generation: u64,
+        id: u64,
+    },
+    Timer {
+        node: usize,
+        generation: u64,
+        at: u64,
+    },
+    Restart {
+        node: usize,
+    },
+    Kill {
+        node: usize,
+    },
     Reorder,
     Tick,
 }
@@ -396,6 +416,9 @@ impl Sim {
                 if self.faults_on && self.cfg.reconfigure > 0 && self.chance(self.cfg.reconfigure) {
                     self.reconfigure()?;
                 }
+                if self.faults_on && self.cfg.track_leader {
+                    self.track_leader();
+                }
                 if self.faults_on {
                     self.push(self.now + MS, Event::Tick);
                 }
@@ -409,17 +432,15 @@ impl Sim {
             }
             Event::Kill { node } => self.crash(node),
             Event::Reorder => self.reorder()?,
-            Event::Deliver { to, bytes } => {
-                if let Some(cost) = self.cpu_cost(to) {
-                    let n = &mut self.nodes[to];
-                    if n.cpu_busy_until > self.now {
-                        // Queued behind the message in hand; pushed in arrival order.
-                        let at = n.cpu_busy_until;
-                        self.push(at, Event::Deliver { to, bytes });
-                        return Ok(());
-                    }
-                    n.cpu_busy_until = self.now + cost;
-                }
+            Event::Deliver { to, bytes } if self.cpu_cost(to).is_some() => {
+                // Queued behind the messages before it, each handled once in arrival order.
+                let cost = self.cpu_cost(to).expect("checked by the guard");
+                let n = &mut self.nodes[to];
+                let start = n.cpu_busy_until.max(self.now);
+                n.cpu_busy_until = start + cost;
+                self.push(start, Event::Handle { to, bytes });
+            }
+            Event::Deliver { to, bytes } | Event::Handle { to, bytes } => {
                 let Some(r) = self.nodes[to].replica.as_mut() else {
                     return Ok(());
                 };
@@ -530,12 +551,24 @@ impl Sim {
         self.members[self.rng.below(self.members.len() as u64) as usize]
     }
 
+    fn track_leader(&mut self) {
+        let leader = self
+            .members
+            .iter()
+            .find_map(|&m| self.nodes[m].replica.as_ref())
+            .map(|r| r.members()[0].id.0 as usize);
+        let Some(leader) = leader else { return };
+        if self.report.leader_timeline.last().is_none_or(|&(_, l)| l != leader) {
+            self.report.leader_timeline.push((self.now / MS, leader));
+        }
+    }
+
     /// Where a client writes: a random member, weighted by `write_weights` when set.
     fn writer(&mut self) -> usize {
-        let weights = match &self.cfg.write_weights {
+        let Some(steps) = &self.cfg.write_weights else { return self.member() };
+        let weights = match steps.iter().rev().find(|(at, _)| self.now >= at * MS) {
+            Some((_, w)) => w.clone(),
             None => return self.member(),
-            Some((_, Some((at, later)))) if self.now >= at * MS => later.clone(),
-            Some((weights, _)) => weights.clone(),
         };
         let live: Vec<(usize, u64)> = self
             .members

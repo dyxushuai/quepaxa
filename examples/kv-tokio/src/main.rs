@@ -4,13 +4,14 @@
 //! kv-tokio --id 0 --members 0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102 \
 //!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
 //!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379] [--retransmit-ms 400] [--hedge-max-ms 3000]
-//!          [--placement on]
+//!          [--placement on] [--placement-periods 30000,120000]
 //! ```
 //!
 //! `--retransmit-ms` and `--hedge-max-ms` set the replica's `retransmit_interval` and
 //! `hedge_max`; raise them above the longest round trip and commit path on a WAN.
 //! `--placement on` lets the leader move to the replica where writes commit fastest (set it
-//! on every replica). `STATS` ends with `LEADERS <ids>`, the leader order in force.
+//! on every replica); `--placement-periods` sets its sustained period and hold in ms.
+//! `STATS` ends with `LEADERS <ids>`, the leader order in force.
 //!
 //! `--members` are the configured members; `--peers` are replicas that may join later (a
 //! joining replica runs with the same `--members` and finds its own address in `--peers`).
@@ -83,6 +84,7 @@ struct Args {
     retransmit_ms: Option<u64>,
     hedge_max_ms: Option<u64>,
     placement: bool,
+    placement_periods: Option<(u64, u64)>,
 }
 
 const MILLI: u64 = 1_000_000;
@@ -91,6 +93,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
     let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
     let (mut retransmit_ms, mut hedge_max_ms, mut placement) = (None, None, false);
+    let mut placement_periods = None;
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -131,6 +134,12 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                     _ => return Err("--placement: expected on or off".to_owned()),
                 }
             }
+            "--placement-periods" => {
+                let ms = |v: &str| v.parse::<u64>().map_err(|e| format!("--placement-periods: {e}"));
+                let (sustain, hold) =
+                    value.split_once(',').ok_or("--placement-periods: expected SUSTAIN_MS,HOLD_MS")?;
+                placement_periods = Some((ms(sustain)?, ms(hold)?));
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -151,6 +160,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         retransmit_ms,
         hedge_max_ms,
         placement,
+        placement_periods,
     })
 }
 
@@ -172,6 +182,10 @@ fn config(args: &Args) -> Config {
         cfg.hedge_max = ms.saturating_mul(MILLI);
     }
     cfg.placement = args.placement;
+    if let Some((sustain, hold)) = args.placement_periods {
+        cfg.placement_sustain = sustain.saturating_mul(MILLI);
+        cfg.placement_hold = hold.saturating_mul(MILLI);
+    }
     cfg
 }
 
@@ -494,6 +508,9 @@ mod tests {
         let zero = config(&args(&format!("{base} --hedge-max-ms 0")).unwrap());
         assert!(!wan.placement && config(&args(&format!("{base} --placement on")).unwrap()).placement);
         assert!(args(&format!("{base} --placement yes")).is_err());
+        let periods = config(&args(&format!("{base} --placement-periods 30000,120000")).unwrap());
+        assert_eq!((periods.placement_sustain, periods.placement_hold), (30_000 * MILLI, 120_000 * MILLI));
+        assert!(args(&format!("{base} --placement-periods 30000")).is_err());
         assert!(Replica::new(zero, [], Timestamp(0)).is_err(), "the replica's own validation refuses it");
         let bad = args(&format!("{base} --retransmit-ms soon")).err().unwrap();
         assert!(bad.starts_with("--retransmit-ms"), "{bad}");

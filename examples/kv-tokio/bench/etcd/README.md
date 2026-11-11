@@ -106,3 +106,19 @@ generator reaches its local replica in under 1 ms.
 
 It is still one host: links are emulated, there is no bandwidth limit, and every replica
 shares the same disk and CPU pool.
+
+### Leader-policy scenarios
+
+QuePaxa only, never run by default; they compare leader policies (`POLICY`, the kv-tokio
+flags under test, default `--placement on --placement-periods 30000,120000`). Each runs 300 s
+(30 s with `--smoke`); the summary reports latency only from 240 s on, after the policy has
+settled, plus how often the leading region changed and when it last did (sampled every 5 s).
+
+| Case | Setup |
+|---|---|
+| `convergence` | the leader starts in ap-ne; every region writes equally |
+| `heterogeneous` | no WAN delay; the first leader's container runs on a `SLOW_CPUS` (0.5) CPU quota |
+| `shift` | the leader starts in us-east; us-east, eu-west and sa-east write until 150 s, then only ap-ne and us-west, for good |
+| `burst` | the leader starts in us-east; ap-ne and sa-east write five times as much from 150 s to 160 s |
+
+`POLICY_EVERYWHERE=1` applies the policy flags to the fault cases too.
