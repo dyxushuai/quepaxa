@@ -1,5 +1,25 @@
 //! The knobs of a run and what it reports.
 
+/// Leader tuning on every replica (`quepaxa::Config::tuning`), with its knobs.
+#[derive(Clone, Copy, Debug)]
+pub struct TuningKnobs {
+    /// Slots per epoch (`Config::tuning_epoch_slots`).
+    pub epoch_slots: u32,
+    /// Fewest entries an epoch needs to count (`Config::tuning_min_samples`).
+    pub min_samples: u32,
+    /// Virtual ms between explorations (0: only when the leader falls behind).
+    pub reexplore_ms: u64,
+    /// Hedge tuning too (`Config::hedge_tuning`).
+    pub hedge: bool,
+}
+
+impl Default for TuningKnobs {
+    /// The library's defaults, but explorations every two virtual minutes.
+    fn default() -> Self {
+        Self { epoch_slots: 128, min_samples: 32, reexplore_ms: 120_000, hedge: true }
+    }
+}
+
 /// Write rates per replica, in steps: each applies from its virtual ms until the next.
 pub type WriteWeights = Vec<(u64, Vec<u32>)>;
 
@@ -69,8 +89,9 @@ pub struct SimConfig {
     pub compact_every: Option<u64>,
     /// Replica message size limit (small values force multi-page catch-up).
     pub max_message_bytes: u32,
-    /// Leader placement on every replica, with its sustained period and hold (virtual ms).
-    pub placement: Option<(u64, u64)>,
+    /// Leader tuning on every replica; none: off (unlike the library's default, so that runs
+    /// about other mechanisms keep a fixed leader order).
+    pub tuning: Option<TuningKnobs>,
     /// Relative write rates per replica (by index; others write nothing), changing at the
     /// given virtual times. None: every member writes equally.
     pub write_weights: Option<WriteWeights>,
@@ -139,7 +160,7 @@ impl SimConfig {
             slow_cpu: None,
             compact_every: Some(32),
             max_message_bytes: 1 << 20,
-            placement: None,
+            tuning: None,
             write_weights: None,
             track_leader: false,
         }

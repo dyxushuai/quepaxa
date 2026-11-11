@@ -195,6 +195,9 @@ fn config(n: usize, i: usize, starts: u64) -> Config {
     let members = (0..n as u32).map(NodeId).collect();
     let mut cfg = Config::new(*b"quepaxa-modelchk", NodeId(i as u32), members, seed);
     cfg.max_in_flight_slots = 2;
+    // Tuning only decides which order change to propose; the scenarios that change the
+    // order propose it themselves, so the state space stays that of the change path.
+    cfg.tuning = false;
     cfg
 }
 

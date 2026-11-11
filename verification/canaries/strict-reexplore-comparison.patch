@@ -1,0 +1,11 @@
+--- a/crates/quepaxa/src/replica/tuning.rs
++++ b/crates/quepaxa/src/replica/tuning.rs
+@@ -388,7 +388,7 @@
+         }
+         let (a, b) = (mean(&latest), mean(stored));
+         let se2 = var_of_mean(&latest) + var_of_mean(stored);
+-        a > b && (a - b) * (a - b) > SIGNIFICANCE * SIGNIFICANCE * se2
++        a > b && (a - b) * (a - b) > SIGNIFICANCE * SIGNIFICANCE * se2 * 0
+     }
+ 
+     /// What the last exploration measured for `member`, in nanoseconds.

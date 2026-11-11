@@ -28,14 +28,19 @@ pub const QPX_CONFIG_RETRANSMIT_INTERVAL_NS: u32 = 5;
 pub const QPX_CONFIG_HEDGE_MIN_NS: u32 = 6;
 /// Upper bound of the hedge delay, nanoseconds.
 pub const QPX_CONFIG_HEDGE_MAX_NS: u32 = 7;
-/// Leader placement on this member: 1 on, 0 off (the default). Enable it on every member
+/// Leader tuning on this member: 1 on (the default), 0 off. Enable it on every member
 /// (ABI 0.10).
-pub const QPX_CONFIG_PLACEMENT: u32 = 8;
-/// How long a member must keep a 20% gain before placement moves the leader to it,
-/// nanoseconds (ABI 0.10).
-pub const QPX_CONFIG_PLACEMENT_SUSTAIN_NS: u32 = 9;
-/// How long placement leaves any change of the leader order alone, nanoseconds (ABI 0.10).
-pub const QPX_CONFIG_PLACEMENT_HOLD_NS: u32 = 10;
+pub const QPX_CONFIG_TUNING: u32 = 8;
+/// Hedge-delay tuning on this member, with leader tuning: 1 on (the default), 0 off
+/// (ABI 0.10).
+pub const QPX_CONFIG_HEDGE_TUNING: u32 = 9;
+/// Slots per tuning epoch (`u32`, at least 65) (ABI 0.10).
+pub const QPX_CONFIG_TUNING_EPOCH_SLOTS: u32 = 10;
+/// Fewest entries an epoch needs for its latency to count (`u32`) (ABI 0.10).
+pub const QPX_CONFIG_TUNING_MIN_SAMPLES: u32 = 11;
+/// How often the cluster explores leaders again while writes flow, nanoseconds (0: only
+/// when the leader falls behind) (ABI 0.10).
+pub const QPX_CONFIG_TUNING_REEXPLORE_NS: u32 = 12;
 
 /// Creates a configuration with default settings: `cluster_id` (16 bytes; messages from
 /// other clusters are dropped), this replica's `id`, the `members_len` configured members at
@@ -106,17 +111,19 @@ pub unsafe extern "C" fn qpx_config_set(cfg: *mut qpx_config, option: u32, value
             c.hedge_max = value;
             true
         }
-        QPX_CONFIG_PLACEMENT if value <= 1 => {
-            c.placement = value == 1;
+        QPX_CONFIG_TUNING | QPX_CONFIG_HEDGE_TUNING if value > 1 => false,
+        QPX_CONFIG_TUNING => {
+            c.tuning = value == 1;
             true
         }
-        QPX_CONFIG_PLACEMENT => false,
-        QPX_CONFIG_PLACEMENT_SUSTAIN_NS => {
-            c.placement_sustain = value;
+        QPX_CONFIG_HEDGE_TUNING => {
+            c.hedge_tuning = value == 1;
             true
         }
-        QPX_CONFIG_PLACEMENT_HOLD_NS => {
-            c.placement_hold = value;
+        QPX_CONFIG_TUNING_EPOCH_SLOTS => narrow(&mut c.tuning_epoch_slots, value),
+        QPX_CONFIG_TUNING_MIN_SAMPLES => narrow(&mut c.tuning_min_samples, value),
+        QPX_CONFIG_TUNING_REEXPLORE_NS => {
+            c.tuning_reexplore = value;
             true
         }
         _ => {

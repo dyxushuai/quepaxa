@@ -35,11 +35,13 @@ in log order. If nothing is written meanwhile, slots `s + 1` to `s + 63` are fil
 empty batches like stalled slots (the leader first, the others if it is down), so a change
 takes effect without traffic.
 
-- **Leader placement.** With [`Config::placement`](crate::Config::placement) on every
-  member, the leader moves itself to the member that gives writers the lowest commit
-  latency, by the same kind of change ([tuning](crate::guide::tuning)). An operator's
-  change still goes through; while placement's own change is on its way, a local call
-  gets `ReconfigurationPending`, and one that loses the race reports `Superseded`.
+- **Leader tuning.** With [`Config::tuning`](crate::Config::tuning) (the default) on every
+  member, the leader in force tries every member as leader and then orders them by the
+  commit latency writers saw, by the same kind of change ([tuning](crate::guide::tuning)).
+  An operator's change still goes through and ends any exploration; while tuning's own
+  change is on its way (about half of each epoch during an exploration), a local call
+  gets `ReconfigurationPending` and is retried, and one that loses the race reports
+  `Superseded`.
 - **Changing only the leader.** [`propose_leader_order`](crate::Replica::propose_leader_order)
   takes the members in force in a new order, preferred leader first, and makes the same
   kind of change with the members kept: the new leader leads from 64 slots after the
@@ -114,5 +116,4 @@ reports `Retired` (its `tests/membership.rs` replaces a member end to end).
 change entry and would keep the old majorities. Propose changes only once every replica
 runs 0.3 or later.
 
-Not supported: witnesses (members that vote but keep no log) and automatic, latency-based
-leader tuning.
+Not supported: witnesses (members that vote but keep no log).

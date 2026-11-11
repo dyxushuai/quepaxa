@@ -5,19 +5,25 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
-- `quepaxa`: `Metrics` gains `suspicions`, `placement_moves` and the `epoch` and
-  `leader_position` gauges; `Replica::members` lists the members in force in leader order
-  with each one's round trip, last reported commit index and last contact. C (ABI 0.10):
-  matching `QPX_METRIC_*` constants and `QPX_CONFIG_PLACEMENT`,
-  `QPX_CONFIG_PLACEMENT_SUSTAIN_NS`, `QPX_CONFIG_PLACEMENT_HOLD_NS`. kv-tokio:
-  `--placement on`, and `STATS` ends with `LEADERS <ids>`.
-- `quepaxa` (wire): leader placement. With `Config::placement` (off by default) on every
-  member, members measure round trips to each other while writes flow (two new message
-  kinds, `RttProbe` and `RttReply`; peers of older versions reject them) and count
-  writes per origin, and the leader moves the lead to the member that gives writers the
-  lowest commit latency once it keeps a 20% gain for `placement_sustain` (3 minutes)
-  and no order change happened within `placement_hold` (10 minutes). With placement on,
-  a membership change without a leader order keeps the order of the staying members.
+- `quepaxa`: `Metrics` gains `suspicions`, `tuning_moves` and the `epoch`,
+  `leader_position`, `tuning_phase` and `hedge_multiplier` gauges; `Replica::members`
+  lists the members in force in leader order with the latency writers saw while each
+  led, its last reported commit index and last contact. C (ABI 0.10): matching
+  `QPX_METRIC_*` constants and `QPX_CONFIG_TUNING`, `QPX_CONFIG_HEDGE_TUNING`,
+  `QPX_CONFIG_TUNING_EPOCH_SLOTS`, `QPX_CONFIG_TUNING_MIN_SAMPLES`,
+  `QPX_CONFIG_TUNING_REEXPLORE_NS`. kv-tokio: `--tuning`, `--hedge-tuning` and
+  `--tuning-reexplore-ms`, and `STATS` ends with `LEADERS <ids>`.
+- `quepaxa` (breaking, wire and storage): leader and hedging tuning, the paper's §5.3, on
+  by default (`Config::tuning`, `Config::hedge_tuning`). Every member leads in turn for
+  two epochs of `tuning_epoch_slots` (128) slots; the order then becomes the members
+  sorted by the commit latency writers saw under each, explored again when the leader
+  falls significantly behind the next member or every `tuning_reexplore` (30 minutes).
+  Members report latencies at each epoch's end in a new message kind (`EpochReport`).
+  Once the order is exploited, each replica tries hedge multipliers 1, 2, 4 and 8 of the
+  commit latency and keeps 4 unless another is significantly faster. A membership or
+  leader-order change carries the tuning phase; the wire (2) and record (2) formats
+  change, and peers, logs and snapshots of earlier versions are rejected. With tuning
+  on, a membership change without a leader order keeps the order of the staying members.
 - `quepaxa`: `Replica::propose_leader_order` changes only the leader order of the members
   in force; kv-tokio exposes it as `LEADERS <ids>`. In C,
   `qpx_propose_reconfiguration` with the current members and a new order does the same.

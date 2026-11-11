@@ -8,12 +8,11 @@
 mod gate;
 mod log;
 mod messages;
-mod placement;
 mod proposing;
-mod ranking;
 mod reads;
 mod retire;
 mod snapshot;
+mod tuning;
 mod watch;
 
 use alloc::collections::{BTreeMap, VecDeque};
@@ -127,8 +126,10 @@ pub struct Replica {
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
     /// Whether this replica suspects the leader it hands entries to (`watch.rs`).
     watch: watch::Watch,
-    /// Round trips and write origins for leader placement (`placement.rs`).
-    placement: placement::Placement,
+    /// Leader tuning's measurements and its own change in flight (`tuning.rs`).
+    tuning: tuning::Tuning,
+    /// The tuning phase and epoch grid as of the emitted prefix, carried in `core_state`.
+    applied_tuning: crate::schedule::TuningState,
     /// Own proposals awaiting commit: when they were made, what they are, and whether they
     /// were hedged.
     outstanding: BTreeMap<ProposalId, (Timestamp, Kind, bool)>,
@@ -251,6 +252,7 @@ impl Replica {
             max_message_bytes: cfg.max_message_bytes,
             max_value_bytes: cfg.max_batch_bytes,
         };
+        let epoch_slots = cfg.tuning_epoch_slots;
         let mut r = Self {
             me: cfg.id,
             wire,
@@ -286,7 +288,11 @@ impl Replica {
             relayed: VecDeque::new(),
             forwarded: BTreeMap::new(),
             watch: watch::Watch::default(),
-            placement: placement::Placement::default(),
+            tuning: tuning::Tuning::default(),
+            applied_tuning: snapshot.as_ref().map_or_else(
+                || crate::schedule::TuningState::initial(epoch_slots),
+                |(s, _)| s.tuning.clone(),
+            ),
             outstanding: BTreeMap::new(),
             reads: reads::Reads::default(),
             commit_latency: None,
@@ -314,9 +320,7 @@ impl Replica {
             r.seen.entry(slot).or_insert(now);
         }
         r.emit_commits();
-        if r.cfg.placement {
-            r.restart_hold();
-        }
+        r.restart_tuning();
         // After a restart, ask every known replica where the log is: one that was away, even
         // through its own removal, learns what it missed without waiting for someone to write.
         if last_incarnation > 0 {
@@ -360,7 +364,7 @@ impl Replica {
             .iter()
             .map(|&id| MemberView {
                 id,
-                round_trip: self.fresh_rtt(id),
+                led_latency: self.led_latency(id),
                 committed: if id == self.me {
                     Some(self.committed)
                 } else {
@@ -451,8 +455,8 @@ impl Replica {
         }
         let order = if !leader_order.is_empty() {
             leader_order
-        } else if self.cfg.placement {
-            // Placement owns the order: members that stay keep theirs (as last scheduled, a
+        } else if self.cfg.tuning {
+            // Tuning owns the order: members that stay keep theirs (as last scheduled, a
             // rotation not yet in force included), new ones go last.
             let in_force = self.schedule.member_sets_from(Slot(self.committed)).last().unwrap_or_default();
             let staying = in_force.iter().copied().filter(|n| by_id.contains(n));
@@ -468,7 +472,11 @@ impl Replica {
             return Err(Error::InvalidConfig("leader_order must list every member exactly once"));
         }
         self.check_no_change_pending()?;
-        let change = crate::schedule::encode_change(self.schedule.generation(), &order);
+        let tag = crate::schedule::Tag {
+            phase: crate::schedule::Phase::Monitor,
+            epoch_slots: self.cfg.tuning_epoch_slots,
+        };
+        let change = crate::schedule::encode_change(self.schedule.generation(), &order, tag);
         self.enqueue(now, change, Kind::Reconfigure)
     }
 
@@ -626,6 +634,8 @@ impl Replica {
         let (epoch, from) = self.applied_schedule.epoch();
         self.metrics.epoch = if from <= applied.0 { epoch } else { epoch - 1 };
         self.metrics.leader_position = self.applied_schedule.position(self.me, applied);
+        self.metrics.tuning_phase = self.tuning_phase();
+        self.metrics.hedge_multiplier = self.hedge_multiplier();
         let before = self.gate.issued();
         self.gate.flush(&mut self.actions);
         if self.gate.issued() > before {
@@ -661,7 +671,7 @@ impl Replica {
 
     fn fence(&mut self) {
         self.fenced = true;
-        let internal = [self.retire_barrier.take().map(|(_, id)| id), self.placement.moving.take()];
+        let internal = [self.retire_barrier.take().map(|(_, id)| id), self.tuning.moving.take()];
         for id in mem::take(&mut self.outstanding).into_keys().filter(|id| !internal.contains(&Some(*id))) {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }
@@ -710,10 +720,8 @@ impl Replica {
 }
 
 #[cfg(test)]
-mod placement_tests;
-#[cfg(test)]
-mod ranking_tests;
-#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tuning_tests;
 #[cfg(test)]
 mod watch_tests;

@@ -98,6 +98,7 @@ fn legacy_snapshot_holes_and_high_write_ids_remain_valid_after_recovery_and_inst
         leaders: vec![NodeId(0)],
         schedule: Schedule::with_order(vec![NodeId(0)]),
         dedup,
+        tuning: crate::schedule::TuningState::initial(128),
     }
     .encode();
     let mut disk = vec![

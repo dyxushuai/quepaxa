@@ -53,14 +53,21 @@ fn arb_body() -> impl Strategy<Value = Body> {
         (slot.clone(), proptest::collection::vec(p, 0..3))
             .prop_map(|(first, proposals)| Body::Entries { first, proposals }),
         slot.prop_map(|through| Body::Compacted { through }),
-        (any::<u64>(), proptest::collection::vec((0u32..4, any::<u64>()), 0..4)).prop_map(|(sent, rows)| {
-            Body::RttProbe {
-                incarnation: 1,
-                sent,
-                table: rows.into_iter().map(|(n, rtt)| (NodeId(n), rtt)).collect(),
-            }
-        }),
-        (0u64..3, any::<u64>()).prop_map(|(incarnation, sent)| Body::RttReply { incarnation, sent }),
+        (any::<u64>(), any::<bool>(), proptest::collection::vec((0u32..4, any::<u64>(), any::<u64>()), 0..4))
+            .prop_map(|(first, trying_arm, rows)| Body::EpochReport {
+                first: Slot(first),
+                trial: trying_arm.then_some(first as u16 % 9),
+                trying_arm,
+                stats: rows
+                    .into_iter()
+                    .map(|(n, count, sum)| crate::codec::LatencyStat {
+                        leader: NodeId(n),
+                        count,
+                        sum,
+                        sum_sq: u128::from(sum) * 3,
+                    })
+                    .collect(),
+            }),
     ]
 }
 
@@ -188,6 +195,7 @@ fn snapshots_may_cover_slots_up_to_the_last_valid_one() {
             leaders: members.to_vec(),
             schedule: Schedule::new(&members),
             dedup: Dedup::default(),
+            tuning: crate::schedule::TuningState::initial(128),
         }
         .encode()
     };
@@ -206,6 +214,7 @@ fn requests_below_the_floor_or_beyond_the_window_get_no_vote() {
         leaders: members.to_vec(),
         schedule: Schedule::new(&members),
         dedup: Dedup::default(),
+        tuning: crate::schedule::TuningState::initial(128),
     }
     .encode();
     let replies = |slot: u64| {
@@ -277,7 +286,7 @@ proptest! {
     #[test]
     fn arbitrary_member_messages_are_handled(msgs in proptest::collection::vec((1u32..3, arb_body()), 1..40)) {
         let mut r = replica();
-        r.cfg.placement = true;
+        r.cfg.tuning = true;
         r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
         let mut out = Vec::new();
         r.poll_actions(&mut out);
@@ -510,8 +519,14 @@ fn a_snapshot_resolving_the_retirement_barrier_still_reports_other_proposals() {
         dedup.first_time(NodeId(0), r.incarnation, id);
     }
     let members = [NodeId(0), NodeId(1), NodeId(2)];
-    let state =
-        CoreState { next: 10, leaders: members.to_vec(), schedule: Schedule::new(&members), dedup }.encode();
+    let state = CoreState {
+        next: 10,
+        leaders: members.to_vec(),
+        schedule: Schedule::new(&members),
+        dedup,
+        tuning: crate::schedule::TuningState::initial(128),
+    }
+    .encode();
     assert_eq!(r.install_snapshot(Timestamp(2), Slot(9), state), Ok(true));
     out.clear();
     r.poll_actions(&mut out);
@@ -549,6 +564,7 @@ fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
             payload: crate::schedule::encode_change(
                 base,
                 &members.iter().copied().map(NodeId).collect::<Vec<_>>(),
+                crate::schedule::Tag::monitor(128),
             ),
         },
         kind: Kind::Reconfigure,
@@ -577,7 +593,11 @@ fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
 fn a_change_learned_from_others_blocks_another_until_it_takes_effect() {
     let mut r = replica();
     let mut out = Vec::new();
-    let order = crate::schedule::encode_change(0, &[NodeId(1), NodeId(2), NodeId(3)]);
+    let order = crate::schedule::encode_change(
+        0,
+        &[NodeId(1), NodeId(2), NodeId(3)],
+        crate::schedule::Tag::monitor(128),
+    );
     let change = Item {
         entry: Entry { origin: NodeId(1), incarnation: 1, id: ProposalId(0), payload: order },
         kind: Kind::Reconfigure,
@@ -613,6 +633,7 @@ fn a_local_change_overtaken_by_another_is_dropped_as_superseded() {
             payload: crate::schedule::encode_change(
                 0,
                 &members.iter().copied().map(NodeId).collect::<Vec<_>>(),
+                crate::schedule::Tag::monitor(128),
             ),
         },
         kind: Kind::Reconfigure,
@@ -652,7 +673,11 @@ fn a_local_change_decided_twice_in_one_batch_commits_once() {
             origin: NodeId(0),
             incarnation: r.incarnation,
             id: mine,
-            payload: crate::schedule::encode_change(0, &[NodeId(0), NodeId(1)]),
+            payload: crate::schedule::encode_change(
+                0,
+                &[NodeId(0), NodeId(1)],
+                crate::schedule::Tag::monitor(128),
+            ),
         },
         kind: Kind::Reconfigure,
     };
@@ -682,8 +707,14 @@ fn a_local_change_resolved_by_a_snapshot_is_dropped_as_unresolved() {
     let mut dedup = Dedup::default();
     dedup.first_time(NodeId(0), r.incarnation, mine);
     let members = [NodeId(0), NodeId(1), NodeId(2)];
-    let state =
-        CoreState { next: 10, leaders: members.to_vec(), schedule: Schedule::new(&members), dedup }.encode();
+    let state = CoreState {
+        next: 10,
+        leaders: members.to_vec(),
+        schedule: Schedule::new(&members),
+        dedup,
+        tuning: crate::schedule::TuningState::initial(128),
+    }
+    .encode();
     assert_eq!(r.install_snapshot(Timestamp(2), Slot(9), state), Ok(true));
     out.clear();
     r.poll_actions(&mut out);
@@ -731,8 +762,14 @@ fn a_snapshot_over_a_decided_but_unapplied_local_batch_releases_it() {
     let mut dedup = Dedup::default();
     dedup.first_time(NodeId(0), r.incarnation, id);
     let members = [NodeId(0), NodeId(1), NodeId(2)];
-    let state =
-        CoreState { next: 2, leaders: members.to_vec(), schedule: Schedule::new(&members), dedup }.encode();
+    let state = CoreState {
+        next: 2,
+        leaders: members.to_vec(),
+        schedule: Schedule::new(&members),
+        dedup,
+        tuning: crate::schedule::TuningState::initial(128),
+    }
+    .encode();
     assert_eq!(r.install_snapshot(Timestamp(2), Slot(1), state), Ok(true));
     r.poll_actions(&mut out);
     assert!(r.batches.values().all(|b| b.key != key), "a covered, committed batch is released");
@@ -916,6 +953,7 @@ fn the_mark_survives_register_removal_compaction_and_restart() {
         leaders: members.to_vec(),
         schedule: Schedule::new(&members),
         dedup: Dedup::default(),
+        tuning: crate::schedule::TuningState::initial(128),
     }
     .encode();
     assert_eq!(r.install_snapshot(Timestamp(3), Slot(9), state), Ok(true));
@@ -995,7 +1033,11 @@ fn the_leader_leaves_the_next_leaders_slots_to_it() {
             origin: NodeId(1),
             incarnation: 1,
             id: ProposalId(0),
-            payload: crate::schedule::encode_change(0, &[NodeId(1), NodeId(0), NodeId(2)]),
+            payload: crate::schedule::encode_change(
+                0,
+                &[NodeId(1), NodeId(0), NodeId(2)],
+                crate::schedule::Tag::monitor(128),
+            ),
         },
         kind: Kind::Reconfigure,
     };

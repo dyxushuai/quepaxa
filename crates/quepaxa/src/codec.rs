@@ -11,7 +11,7 @@ use crate::proposal::{Proposal, ValueKey};
 use crate::types::{NodeId, Slot, Step};
 
 pub(crate) const MAGIC: [u8; 2] = *b"QP";
-pub(crate) const WIRE_VERSION: u8 = 1;
+pub(crate) const WIRE_VERSION: u8 = 2;
 
 const KIND_RECORD_REQUEST: u8 = 1;
 const KIND_RECORD_REPLY: u8 = 2;
@@ -23,8 +23,10 @@ const KIND_COMPACTED: u8 = 7;
 const KIND_READ_QUERY: u8 = 8;
 const KIND_READ_REPLY: u8 = 9;
 const KIND_FORWARD_ACK: u8 = 10;
-const KIND_RTT_PROBE: u8 = 11;
-const KIND_RTT_REPLY: u8 = 12;
+const KIND_EPOCH_REPORT: u8 = 11;
+
+/// An `EpochReport` for an epoch that ran no exploration trial.
+const NO_TRIAL: u16 = u16::MAX;
 
 const VALUE_INLINE: u8 = 0;
 
@@ -117,18 +119,44 @@ pub(crate) enum Body {
         round: u64,
         high: Slot,
     },
-    /// Leader placement: the sender's incarnation and clock when sent, and its smoothed
-    /// round trip to each member it has a fresh one for, in nanoseconds.
-    RttProbe {
-        incarnation: u64,
-        sent: u64,
-        table: Vec<(NodeId, u64)>,
+    /// Leader tuning: the commit latencies of the sender's own entries committed in the
+    /// tuning epoch starting at slot `first`, by the leader of their slot, the exploration
+    /// trial that epoch ran (if any), and whether the sender was trying a hedge multiplier
+    /// meanwhile.
+    EpochReport {
+        first: Slot,
+        trial: Option<u16>,
+        trying_arm: bool,
+        stats: Vec<LatencyStat>,
     },
-    /// Echoes an `RttProbe`'s `incarnation` and `sent`.
-    RttReply {
-        incarnation: u64,
-        sent: u64,
-    },
+}
+
+/// Commit latencies (microseconds) of entries committed in slots `leader` led.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
+pub(crate) struct LatencyStat {
+    pub leader: NodeId,
+    pub count: u64,
+    pub sum: u64,
+    pub sum_sq: u128,
+}
+
+impl LatencyStat {
+    pub fn new(leader: NodeId) -> Self {
+        Self { leader, count: 0, sum: 0, sum_sq: 0 }
+    }
+
+    pub fn add(&mut self, us: u64) {
+        self.count += 1;
+        self.sum = self.sum.saturating_add(us);
+        self.sum_sq = self.sum_sq.saturating_add(u128::from(us) * u128::from(us));
+    }
+
+    pub fn merge(&mut self, other: &LatencyStat) {
+        self.count = self.count.saturating_add(other.count);
+        self.sum = self.sum.saturating_add(other.sum);
+        self.sum_sq = self.sum_sq.saturating_add(other.sum_sq);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,8 +177,7 @@ impl Body {
             | Body::Compacted { .. }
             | Body::ReadQuery { .. }
             | Body::ReadReply { .. }
-            | Body::RttProbe { .. }
-            | Body::RttReply { .. }
+            | Body::EpochReport { .. }
             | Body::ForwardAck => 0,
         }
     }
@@ -203,8 +230,7 @@ impl Message {
             Body::ReadQuery { .. } => KIND_READ_QUERY,
             Body::ReadReply { .. } => KIND_READ_REPLY,
             Body::ForwardAck => KIND_FORWARD_ACK,
-            Body::RttProbe { .. } => KIND_RTT_PROBE,
-            Body::RttReply { .. } => KIND_RTT_REPLY,
+            Body::EpochReport { .. } => KIND_EPOCH_REPORT,
         });
         let e = &self.env;
         out.put_slice(&e.cluster_id);
@@ -250,18 +276,17 @@ impl Message {
                 out.put_u64_le(*round);
                 out.put_u64_le(high.0);
             }
-            Body::RttProbe { incarnation, sent, table } => {
-                out.put_u64_le(*incarnation);
-                out.put_u64_le(*sent);
-                out.put_u32_le(table.len() as u32);
-                for (node, rtt) in table {
-                    out.put_u32_le(node.0);
-                    out.put_u64_le(*rtt);
+            Body::EpochReport { first, trial, trying_arm, stats } => {
+                out.put_u64_le(first.0);
+                out.put_u16_le(trial.unwrap_or(NO_TRIAL));
+                out.put_u8(u8::from(*trying_arm));
+                out.put_u32_le(stats.len() as u32);
+                for s in stats {
+                    out.put_u32_le(s.leader.0);
+                    out.put_u64_le(s.count);
+                    out.put_u64_le(s.sum);
+                    out.put_u128_le(s.sum_sq);
                 }
-            }
-            Body::RttReply { incarnation, sent } => {
-                out.put_u64_le(*incarnation);
-                out.put_u64_le(*sent);
             }
         }
         Bytes::from(out)
@@ -276,9 +301,8 @@ impl Message {
             | Body::Compacted { .. }
             | Body::ReadQuery { .. }
             | Body::ReadReply { .. }
-            | Body::RttReply { .. }
             | Body::ForwardAck => 0,
-            Body::RttProbe { table, .. } => 20 + 12 * table.len(),
+            Body::EpochReport { stats, .. } => 15 + 36 * stats.len(),
             Body::Forward { batch } => batch.len(),
             Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len() + 33).sum(),
         }
@@ -344,18 +368,25 @@ impl Message {
             KIND_READ_REPLY => {
                 Body::ReadReply { incarnation: r.u64()?, round: r.u64()?, high: Slot(r.u64()?) }
             }
-            KIND_RTT_PROBE => {
-                let incarnation = r.u64()?;
-                let sent = r.u64()?;
+            KIND_EPOCH_REPORT => {
+                let first = Slot(r.u64()?);
+                let trial = Some(r.u16()?).filter(|t| *t != NO_TRIAL);
+                let trying_arm = match r.u8()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(DecodeError::BadTag),
+                };
                 let n = r.u32()? as usize;
-                // Each row takes 12 bytes, bounding the allocation by input size.
-                let mut table = Vec::with_capacity(n.min(buf.len() / 12));
+                // Each row takes 36 bytes, bounding the allocation by input size.
+                let mut stats = Vec::with_capacity(n.min(buf.len() / 36));
                 for _ in 0..n {
-                    table.push((NodeId(r.u32()?), r.u64()?));
+                    let leader = NodeId(r.u32()?);
+                    let (count, sum) = (r.u64()?, r.u64()?);
+                    let (b, _) = r.take(16)?.as_chunks::<16>();
+                    stats.push(LatencyStat { leader, count, sum, sum_sq: u128::from_le_bytes(b[0]) });
                 }
-                Body::RttProbe { incarnation, sent, table }
+                Body::EpochReport { first, trial, trying_arm, stats }
             }
-            KIND_RTT_REPLY => Body::RttReply { incarnation: r.u64()?, sent: r.u64()? },
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -454,6 +485,11 @@ impl<'a> Reader<'a> {
         Ok(self.take(1)?[0])
     }
 
+    pub fn u16(&mut self) -> Result<u16, DecodeError> {
+        let (b, _) = self.take(2)?.as_chunks::<2>();
+        Ok(u16::from_le_bytes(b[0]))
+    }
+
     pub fn u32(&mut self) -> Result<u32, DecodeError> {
         let (b, _) = self.take(4)?.as_chunks::<4>();
         Ok(u32::from_le_bytes(b[0]))
@@ -517,7 +553,7 @@ mod tests {
     }
 
     const ENVELOPE_HEX: &str =
-        "5150 01 KK abababababababababababababababab 0700000000000000 01000000 02000000 0900000000000000";
+        "5150 02 KK abababababababababababababababab 0700000000000000 01000000 02000000 0900000000000000";
 
     fn golden(kind: &str, body: &str) -> Vec<u8> {
         hex(&ENVELOPE_HEX.replace("KK", kind).replace(' ', "")).into_iter().chain(hex(body)).collect()
@@ -533,13 +569,13 @@ mod tests {
     }
 
     #[test]
-    fn record_request_matches_golden_bytes_v1() {
+    fn record_request_matches_golden_bytes_v2() {
         let body = "0600000000000000 04000000 0201000000000000 03000000 0400000000000000 0500000000000000 00 02000000 6869";
         assert_eq!(request().encode().to_vec(), golden("01", body));
     }
 
     #[test]
-    fn record_reply_matches_golden_bytes_v1() {
+    fn record_reply_matches_golden_bytes_v2() {
         let first = WireProposal {
             priority: 1,
             key: ValueKey { origin: NodeId(3), incarnation: 4, seq: 5 },
@@ -560,37 +596,44 @@ mod tests {
     }
 
     #[test]
-    fn forward_ack_matches_golden_bytes_v1() {
+    fn forward_ack_matches_golden_bytes_v2() {
         let ack = Message { env: env(), body: Body::ForwardAck };
         assert_eq!(ack.encode().to_vec(), golden("0a", ""));
     }
 
-    #[test]
-    fn rtt_messages_match_golden_bytes_v1() {
-        let probe = Message {
+    fn report() -> Message {
+        let stat = LatencyStat { leader: NodeId(3), count: 2, sum: 0x0102, sum_sq: 0x0304 };
+        Message {
             env: env(),
-            body: Body::RttProbe { incarnation: 2, sent: 5, table: alloc::vec![(NodeId(3), 0x0102)] },
-        };
-        let body = "0200000000000000 0500000000000000 01000000 03000000 0201000000000000";
-        assert_eq!(probe.encode().to_vec(), golden("0b", body));
-        let reply = Message { env: env(), body: Body::RttReply { incarnation: 2, sent: 5 } };
-        assert_eq!(reply.encode().to_vec(), golden("0c", "0200000000000000 0500000000000000"));
+            body: Body::EpochReport {
+                first: Slot(0x80),
+                trial: Some(3),
+                trying_arm: true,
+                stats: alloc::vec![stat],
+            },
+        }
     }
 
     #[test]
-    fn an_rtt_table_longer_than_its_bytes_is_rejected() {
-        let probe = Message {
-            env: env(),
-            body: Body::RttProbe { incarnation: 2, sent: 5, table: alloc::vec![(NodeId(3), 1)] },
-        };
-        let mut bytes = probe.encode().to_vec();
-        let n = bytes.len() - 16;
-        bytes[n..n + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    fn epoch_report_matches_golden_bytes_v2() {
+        let body = "8000000000000000 0300 01 01000000 03000000 0200000000000000 0201000000000000 04030000000000000000000000000000";
+        assert_eq!(report().encode().to_vec(), golden("0b", body));
+    }
+
+    #[test]
+    fn an_epoch_report_longer_than_its_bytes_or_with_a_bad_flag_is_rejected() {
+        let mut bytes = report().encode().to_vec();
+        let rows = bytes.len() - 36 - 4;
+        bytes[rows..rows + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         assert_eq!(Message::decode(&Bytes::from(bytes), &CTX), Err(DecodeError::Truncated));
+        let mut bytes = report().encode().to_vec();
+        let flag = bytes.len() - 36 - 4 - 1;
+        bytes[flag] = 2;
+        assert_eq!(Message::decode(&Bytes::from(bytes), &CTX), Err(DecodeError::BadTag));
     }
 
     #[test]
-    fn read_query_and_reply_match_golden_bytes_v1() {
+    fn read_query_and_reply_match_golden_bytes_v2() {
         let query = Message { env: env(), body: Body::ReadQuery { incarnation: 3, round: 7 } };
         assert_eq!(query.encode().to_vec(), golden("08", "0300000000000000 0700000000000000"));
         let reply =
@@ -620,7 +663,7 @@ mod tests {
         other.config_epoch = 8;
         assert_eq!(Message::decode(&bytes, &other), Err(DecodeError::WrongEpoch));
         let mut v = bytes.to_vec();
-        v[2] = 2;
+        v[2] = 3;
         assert_eq!(Message::decode(&Bytes::from(v), &CTX), Err(DecodeError::BadVersion));
     }
 
@@ -726,8 +769,12 @@ mod tests {
                 Body::ReadQuery { incarnation: from, round },
                 Body::ReadReply { incarnation: from, round, high: Slot(from) },
                 Body::ForwardAck,
-                Body::RttProbe { incarnation: 2, sent: from, table: alloc::vec![(NodeId(round as u32), from), (NodeId(2), round)] },
-                Body::RttReply { incarnation: 2, sent: round },
+                Body::EpochReport {
+                    first: Slot(from),
+                    trial: (round % 3 != 0).then_some(round as u16 % 1000),
+                    trying_arm: round % 2 == 0,
+                    stats: alloc::vec![LatencyStat { leader: NodeId(round as u32), count: from, sum: round, sum_sq: u128::from(from) << 64 }],
+                },
             ] {
                 let m = Message { env: env(), body };
                 proptest::prop_assert_eq!(Message::decode(&m.encode(), &CTX).unwrap(), m);

@@ -17,8 +17,11 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `retransmit_interval` | 50 ms | When an unanswered request is sent again. |
 | `hedge_min`, `hedge_max` | 1 ms, 1 s | Bounds of the adaptive hedge delay. |
 | `silent_leader_takeover` | on | Stop waiting for a leader that has said nothing for about a commit latency since a forward. |
-| `placement` | off | Move the leader to the member that gives writers the lowest commit latency. Enable it on every member or on none. |
-| `placement_sustain`, `placement_hold` | 3 min, 10 min | How long a gain must last before a move, and how long any order change is left alone. |
+| `tuning` | on | Try every member as leader, then lead from where writers commit fastest. Enable it on every member or on none. |
+| `hedge_tuning` | on | With `tuning`, try hedge multipliers and keep the fastest. |
+| `tuning_epoch_slots` | 128 | Slots per tuning epoch, at least 65. |
+| `tuning_min_samples` | 32 | Fewest writers' entries for an epoch's latency to count. |
+| `tuning_reexplore` | 30 min | How often the cluster explores again while writes flow (0: only when the leader falls behind). |
 
 ## Throughput
 
@@ -54,22 +57,29 @@ The defaults assume round trips of a few milliseconds.
   than twice that acknowledgement's round trip, than one round trip plus its cooldown, or
   than `hedge_min`, is never counted.
 - **`leader_order`**: put the leader where a majority is closest.
-- **`placement`** (off by default): while writes are being applied, each member probes
-  every other member once a second and keeps a smoothed round trip to each; a round trip
-  not sampled for four seconds counts as unknown. Probing stops four seconds after the
-  last write, so an idle cluster stays quiet. Members with it off neither probe nor
-  answer. The leader in force ranks every member by the commit latency it would give:
-  each writer's round trip to it, weighted by how much that writer writes, plus its round
-  trip to a majority for every write. When another member costs at most 80% of the
-  leader at every round for `placement_sustain`, no order change happened within
-  `placement_hold`, and at least about one write a second flows, the leader proposes an
-  order with that member first (a normal leader-order change, in force 64 slots later).
-  A member any writer cannot reach is never placed first, and a leader that miss-based
-  rotation demoted is not placed first again for a hold (twice as long each time it is
-  demoted again soon). Writes are attributed to the member they were proposed at, so
-  clients should submit to their nearest replica; clients that send everything to the
-  leader make it look best placed. A membership change without a `leader_order` keeps the
+- **`tuning`** (on by default), the paper's leader tuning (§5.3): slots are divided into
+  epochs of `tuning_epoch_slots`. An exploration gives every member, in id order, two
+  epochs as leader, then one more epoch under the last one while the measurements arrive;
+  each member reports, at every epoch's end, the commit latency of its own clients'
+  writes by the leader of their slot. The order then becomes the members sorted by the
+  latency writers saw under each (writers weighted by how much they write), best first.
+  The cluster explores again when the leader's latest epoch is slower than the next
+  member's measurement by more than three standard errors, or every `tuning_reexplore`.
+  Each change is an ordinary leader-order change, in force 64 slots after its decision,
+  so on a WAN an exploration of five members takes about a minute, during which far
+  members lead for a few seconds each. Latency is measured where writes are proposed:
+  clients should submit to their nearest replica. A member whose epochs had fewer than
+  `tuning_min_samples` entries (it was down, or rotated out) is ranked last. An
+  operator's leader-order or membership change ends an exploration and is kept until
+  the next one. Nothing happens without writes: an idle cluster sends no tuning
+  messages. Members with it off neither report nor propose; when one leads, the next
+  member proposes in its place. A membership change without a `leader_order` keeps the
   order of the members that stay, new members last.
+- **`hedge_tuning`** (on by default, with `tuning`): once the order is exploited, each
+  replica tries hedge multipliers 1, 2, 4 and 8 of its commit latency for two epochs
+  each and keeps 4 unless another is faster by more than three standard errors. The
+  multiplier sets when the replica hedges its own entries and takes over slots others
+  started; silence detection and stepping aside keep four times the commit latency.
 
 The repository's simulated five-region benchmark (`docs/benchmarks.md`) shows each effect.
 
@@ -88,9 +98,10 @@ round trip; `retained_slots` that keeps growing means the application is not sna
 
 Where the leader is and why: the `epoch` and `leader_position` gauges give the epoch in
 force and this replica's place in the leader order (0: it leads); `suspicions`,
-`stepped_aside` and `placement_moves` count why the leader moved. The share of slots
+`stepped_aside` and `tuning_moves` count why the leader moved, `tuning_phase` says whether
+tuning is exploring (1) or exploiting (2), and `hedge_multiplier` gives this replica's. The share of slots
 decided on the fast path is `fast_path_decisions` over `slots_decided`.
 [`Replica::members`](crate::Replica::members) lists the members in force in leader order,
-with each one's measured round trip (with `placement`), the commit index its latest
+with the latency writers saw while it led (with `tuning`), the commit index its latest
 message carried, and when it was last heard from. In C the scalars are `QPX_METRIC_*`
 values of `qpx_metric`; the per-member view is Rust only.

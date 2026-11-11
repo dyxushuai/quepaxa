@@ -4,14 +4,16 @@
 //! kv-tokio --id 0 --members 0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102 \
 //!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
 //!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379] [--retransmit-ms 400] [--hedge-max-ms 3000]
-//!          [--placement on] [--placement-periods 30000,120000]
+//!          [--tuning off] [--hedge-tuning off] [--tuning-reexplore-ms 1800000]
 //! ```
 //!
 //! `--retransmit-ms` and `--hedge-max-ms` set the replica's `retransmit_interval` and
 //! `hedge_max`; raise them above the longest round trip and commit path on a WAN.
-//! `--placement on` lets the leader move to the replica where writes commit fastest (set it
-//! on every replica); `--placement-periods` sets its sustained period and hold in ms.
-//! `STATS` ends with `LEADERS <ids>`, the leader order in force.
+//! Leader tuning is on by default: every replica leads in turn, then the leader is the
+//! replica under which writes committed fastest. `--tuning off` keeps the leader order
+//! fixed (set it the same on every replica), `--hedge-tuning off` keeps the hedge delay at
+//! four times the commit latency, `--tuning-reexplore-ms` sets how often tuning explores
+//! again. `STATS` ends with `LEADERS <ids>`, the leader order in force.
 //!
 //! `--members` are the configured members; `--peers` are replicas that may join later (a
 //! joining replica runs with the same `--members` and finds its own address in `--peers`).
@@ -83,8 +85,9 @@ struct Args {
     leader_order: Vec<NodeId>,
     retransmit_ms: Option<u64>,
     hedge_max_ms: Option<u64>,
-    placement: bool,
-    placement_periods: Option<(u64, u64)>,
+    tuning: bool,
+    hedge_tuning: bool,
+    tuning_reexplore_ms: Option<u64>,
 }
 
 const MILLI: u64 = 1_000_000;
@@ -92,8 +95,13 @@ const MILLI: u64 = 1_000_000;
 fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
     let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
-    let (mut retransmit_ms, mut hedge_max_ms, mut placement) = (None, None, false);
-    let mut placement_periods = None;
+    let (mut retransmit_ms, mut hedge_max_ms) = (None, None);
+    let (mut tuning, mut hedge_tuning, mut tuning_reexplore_ms) = (true, true, None);
+    let switch = |flag: &str, value: &str| match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err(format!("{flag}: expected on or off")),
+    };
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -127,18 +135,10 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--hedge-max-ms" => {
                 hedge_max_ms = Some(value.parse().map_err(|e| format!("--hedge-max-ms: {e}"))?)
             }
-            "--placement" => {
-                placement = match value.as_str() {
-                    "on" => true,
-                    "off" => false,
-                    _ => return Err("--placement: expected on or off".to_owned()),
-                }
-            }
-            "--placement-periods" => {
-                let ms = |v: &str| v.parse::<u64>().map_err(|e| format!("--placement-periods: {e}"));
-                let (sustain, hold) =
-                    value.split_once(',').ok_or("--placement-periods: expected SUSTAIN_MS,HOLD_MS")?;
-                placement_periods = Some((ms(sustain)?, ms(hold)?));
+            "--tuning" => tuning = switch("--tuning", &value)?,
+            "--hedge-tuning" => hedge_tuning = switch("--hedge-tuning", &value)?,
+            "--tuning-reexplore-ms" => {
+                tuning_reexplore_ms = Some(value.parse().map_err(|e| format!("--tuning-reexplore-ms: {e}"))?)
             }
             other => return Err(format!("unknown flag {other}")),
         }
@@ -159,8 +159,9 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         leader_order,
         retransmit_ms,
         hedge_max_ms,
-        placement,
-        placement_periods,
+        tuning,
+        hedge_tuning,
+        tuning_reexplore_ms,
     })
 }
 
@@ -181,10 +182,10 @@ fn config(args: &Args) -> Config {
     if let Some(ms) = args.hedge_max_ms {
         cfg.hedge_max = ms.saturating_mul(MILLI);
     }
-    cfg.placement = args.placement;
-    if let Some((sustain, hold)) = args.placement_periods {
-        cfg.placement_sustain = sustain.saturating_mul(MILLI);
-        cfg.placement_hold = hold.saturating_mul(MILLI);
+    cfg.tuning = args.tuning;
+    cfg.hedge_tuning = args.hedge_tuning;
+    if let Some(ms) = args.tuning_reexplore_ms {
+        cfg.tuning_reexplore = ms.saturating_mul(MILLI);
     }
     cfg
 }
@@ -506,11 +507,12 @@ mod tests {
             (default.retransmit_interval, default.hedge_max)
         );
         let zero = config(&args(&format!("{base} --hedge-max-ms 0")).unwrap());
-        assert!(!wan.placement && config(&args(&format!("{base} --placement on")).unwrap()).placement);
-        assert!(args(&format!("{base} --placement yes")).is_err());
-        let periods = config(&args(&format!("{base} --placement-periods 30000,120000")).unwrap());
-        assert_eq!((periods.placement_sustain, periods.placement_hold), (30_000 * MILLI, 120_000 * MILLI));
-        assert!(args(&format!("{base} --placement-periods 30000")).is_err());
+        assert!(wan.tuning && wan.hedge_tuning, "the library's default");
+        let off = config(&args(&format!("{base} --tuning off --hedge-tuning off")).unwrap());
+        assert!(!off.tuning && !off.hedge_tuning);
+        assert!(args(&format!("{base} --tuning yes")).is_err());
+        let period = config(&args(&format!("{base} --tuning-reexplore-ms 60000")).unwrap());
+        assert_eq!(period.tuning_reexplore, 60_000 * MILLI);
         assert!(Replica::new(zero, [], Timestamp(0)).is_err(), "the replica's own validation refuses it");
         let bad = args(&format!("{base} --retransmit-ms soon")).err().unwrap();
         assert!(bad.starts_with("--retransmit-ms"), "{bad}");

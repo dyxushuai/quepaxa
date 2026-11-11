@@ -21,7 +21,7 @@ use quepaxa::{
     Action, Config, Entry, Input, NodeId, Outbound, PersistId, ProposalId, Replica, Slot, Timestamp,
 };
 
-pub use config::{Report, SimConfig, WriteWeights};
+pub use config::{Report, SimConfig, TuningKnobs, WriteWeights};
 pub use rng::SplitMix64;
 
 const MS: u64 = 1_000_000;
@@ -327,10 +327,12 @@ impl Sim {
         cfg.max_in_flight_slots = self.cfg.in_flight_slots;
         cfg.max_batch_bytes = 4096;
         cfg.max_message_bytes = self.cfg.max_message_bytes;
-        if let Some((sustain, hold)) = self.cfg.placement {
-            cfg.placement = true;
-            cfg.placement_sustain = sustain * MS;
-            cfg.placement_hold = hold * MS;
+        cfg.tuning = self.cfg.tuning.is_some();
+        cfg.hedge_tuning = self.cfg.tuning.is_some_and(|t| t.hedge);
+        if let Some(t) = self.cfg.tuning {
+            cfg.tuning_epoch_slots = t.epoch_slots;
+            cfg.tuning_min_samples = t.min_samples;
+            cfg.tuning_reexplore = t.reexplore_ms * MS;
         }
         cfg
     }

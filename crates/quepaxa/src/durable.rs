@@ -12,7 +12,7 @@ use crate::recorder::Register;
 use crate::types::Slot;
 
 const MAGIC: [u8; 2] = *b"QR";
-const FORMAT_VERSION: u8 = 1;
+const FORMAT_VERSION: u8 = 2;
 
 const KIND_INCARNATION: u8 = 1;
 const KIND_RESERVATION: u8 = 3;
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn a_reference_to_an_absent_field_is_rejected() {
-        let mut bad = b"QR\x01\x06".to_vec();
+        let mut bad = b"QR\x02\x06".to_vec();
         bad.extend_from_slice(&9u64.to_le_bytes());
         bad.extend_from_slice(&6u32.to_le_bytes());
         bad.extend_from_slice(&[0, SAME_AS_FIRST, 0]);
@@ -229,8 +229,8 @@ mod tests {
     }
 
     #[test]
-    fn incarnation_matches_golden_bytes_v1() {
-        let mut expected = b"QR\x01\x01".to_vec();
+    fn incarnation_matches_golden_bytes_v2() {
+        let mut expected = b"QR\x02\x01".to_vec();
         expected.extend_from_slice(&3u64.to_le_bytes());
         let crc = crc32c(&expected);
         expected.extend_from_slice(&crc.to_le_bytes());

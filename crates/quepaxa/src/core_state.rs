@@ -6,7 +6,7 @@ use bytes::{BufMut, Bytes};
 
 use crate::codec::{DecodeError, Reader};
 use crate::dedup::Dedup;
-use crate::schedule::Schedule;
+use crate::schedule::{Schedule, TuningState};
 use crate::types::NodeId;
 
 /// Only this version is read; earlier ones are rejected (no compatibility before 1.0).
@@ -21,6 +21,7 @@ pub(crate) struct CoreState {
     pub leaders: Vec<NodeId>,
     pub schedule: Schedule,
     pub dedup: Dedup,
+    pub tuning: TuningState,
 }
 
 impl CoreState {
@@ -34,6 +35,7 @@ impl CoreState {
         }
         self.schedule.encode(&mut out);
         self.dedup.encode(&mut out);
+        self.tuning.encode(&mut out);
         Bytes::from(out)
     }
 
@@ -61,8 +63,9 @@ impl CoreState {
             return Err(DecodeError::BadTag);
         }
         let dedup = Dedup::decode(&mut r)?;
+        let tuning = TuningState::decode(&mut r)?;
         r.finish()?;
-        Ok(Self { next, leaders, schedule, dedup })
+        Ok(Self { next, leaders, schedule, dedup, tuning })
     }
 }
 
@@ -85,8 +88,13 @@ mod tests {
         for id in [0, 1, 5, 9] {
             dedup.first_time(NodeId(1), 3, ProposalId(id));
         }
-        let state =
-            CoreState { next: 20, leaders: alloc::vec![NodeId(2), NodeId(0), NodeId(1)], schedule, dedup };
+        let state = CoreState {
+            next: 20,
+            leaders: alloc::vec![NodeId(2), NodeId(0), NodeId(1)],
+            schedule,
+            dedup,
+            tuning: TuningState::initial(128),
+        };
         assert_eq!(CoreState::decode(&state.encode(), &members()), Ok(state));
     }
 
@@ -101,6 +109,7 @@ mod tests {
             leaders: members(),
             schedule: schedule.clone(),
             dedup: Dedup::default(),
+            tuning: TuningState::initial(128),
         };
         // A rotation counted at slot 7 starts at 7 + LAG: not yet decided by slot 5.
         assert!(CoreState::decode(&state(20).encode(), &members()).is_ok());
@@ -114,6 +123,7 @@ mod tests {
             leaders: members(),
             schedule: Schedule::new(&members()),
             dedup: Dedup::default(),
+            tuning: TuningState::initial(128),
         };
         let others: Vec<NodeId> = (5..8).map(NodeId).collect();
         assert!(CoreState::decode(&state.encode(), &others).is_err());
@@ -133,6 +143,7 @@ mod tests {
             leaders: members(),
             schedule: Schedule::new(&members()),
             dedup: Dedup::default(),
+            tuning: TuningState::initial(128),
         };
         let mut old = state.encode().to_vec();
         old[0] = VERSION - 1;
@@ -142,8 +153,13 @@ mod tests {
     #[test]
     fn a_leader_order_must_be_a_permutation_of_the_members() {
         for leaders in [alloc::vec![NodeId(0), NodeId(0), NodeId(1)], alloc::vec![NodeId(0), NodeId(1)]] {
-            let state =
-                CoreState { next: 1, leaders, schedule: Schedule::new(&members()), dedup: Dedup::default() };
+            let state = CoreState {
+                next: 1,
+                leaders,
+                schedule: Schedule::new(&members()),
+                dedup: Dedup::default(),
+                tuning: TuningState::initial(128),
+            };
             assert!(CoreState::decode(&state.encode(), &members()).is_err());
         }
     }

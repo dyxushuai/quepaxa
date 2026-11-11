@@ -15,8 +15,8 @@
 #   REPLICA_CPUS ("0-1 2-3 4-5 6-7 8-9"), GEN_CPUS (10-15), SLOW_MS (one-way delay added to
 #   the leader's links, default 100), JITTER_MS (default 50) and LOSS (percent, default 1)
 #   for the jitter scenario; POLICY (kv-tokio flags of the leader policy under test,
-#   default "--placement on --placement-periods 30000,120000") for the policy scenarios,
-#   and for the others too with POLICY_EVERYWHERE=1; SLOW_CPUS (the heterogeneous
+#   default "--tuning on") for the policy scenarios, and for the others too with
+#   POLICY_EVERYWHERE=1 (otherwise they run "--tuning off", the leader pinned); SLOW_CPUS (the heterogeneous
 #   scenario's quota, default 0.5); SYSTEMS (default "quepaxa etcd etcd-tuned").
 # Needs Docker and jq. Results go to target/bench-etcd/wan-<time>/.
 set -euo pipefail
@@ -43,7 +43,7 @@ rate=${RATE:-1000}
 read -r -a replica_cpus <<< "${REPLICA_CPUS:-0-1 2-3 4-5 6-7 8-9}"
 gen_cpus=${GEN_CPUS:-10-15}
 slow_ms=${SLOW_MS:-100}
-policy=${POLICY:---placement on --placement-periods 30000,120000}
+policy=${POLICY:---tuning on}
 slow_cpus=${SLOW_CPUS:-0.5}
 # The policy scenarios: run length, when the load changes, and the last stretch whose
 # latency is reported (after the policy has settled), in seconds.
@@ -114,7 +114,7 @@ cat "$results/env.txt"
 # to the policy scenarios (and to all with POLICY_EVERYWHERE=1); the heterogeneous
 # scenario puts the first leader's container on a CPU quota.
 start_quepaxa() {
-  local members="" i flags=() quota
+  local members="" i flags=(--tuning off) quota
   for i in $(seq 0 $((n - 1))); do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
   if policy_case "$2" || [ "${POLICY_EVERYWHERE:-0}" = 1 ]; then read -r -a flags <<< "$policy"; fi
   for i in $(seq 0 $((n - 1))); do

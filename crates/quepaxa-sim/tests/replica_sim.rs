@@ -203,11 +203,10 @@ fn membership_changes_under_faults_stay_safe_and_converge() {
 }
 
 #[test]
-fn placement_under_faults_and_reconfigurations_stays_safe_and_converges() {
-    // Placement with periods short enough to move the leader within a run, under faults.
-    // Half the seeds also change membership about twice a second and crash replicas; every
-    // change and restart starts a hold, so there placement mostly waits, and moves happen in
-    // the other half.
+fn tuning_under_faults_and_reconfigurations_stays_safe() {
+    // Leader tuning exploring every two seconds, under faults. Half the seeds also change
+    // membership about twice a second and crash replicas; each change ends the exploration
+    // in progress, so most tuning changes happen in the other half.
     let env = |name: &str| std::env::var(name).ok().and_then(|s| s.parse::<u64>().ok());
     // Half as many seeds as the membership test: each runs a longer fault phase.
     let seeds = env("QPX_SIM_MEMBERSHIP_SEEDS")
@@ -222,19 +221,18 @@ fn placement_under_faults_and_reconfigurations_stays_safe_and_converges() {
         let cfg = SimConfig {
             spares: 2,
             reconfigure: if changes { 2 } else { 0 },
-            // Without changes, crashes (each restart starts a hold) give way to loss and
-            // partitions alone, so moves happen.
+            // Without changes, crashes give way to loss and partitions alone.
             crash: if changes { hostile.crash } else { 0 },
-            placement: Some((300, 600)),
+            tuning: Some(quepaxa_sim::TuningKnobs { reexplore_ms: 2_000, ..Default::default() }),
             write_weights: Some(vec![(0, vec![1, 20, 1, 1, 1])]),
             fault_phase_ms: 5_000,
             ..hostile
         };
         let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
-        moves.fetch_add(report.metrics.iter().map(|m| m.placement_moves).sum(), Relaxed);
+        moves.fetch_add(report.metrics.iter().map(|m| m.tuning_moves).sum(), Relaxed);
     });
-    println!("placement moves: {}", moves.load(Relaxed));
-    assert!(moves.into_inner() > 0, "placement moved the leader in some run");
+    println!("tuning changes: {}", moves.load(Relaxed));
+    assert!(moves.into_inner() > 0, "tuning changed the order in some run");
 }
 
 #[test]

@@ -35,8 +35,9 @@
 // 0.8: `QPX_ERR_REQUEST_ID_EXHAUSTED`; read ids use a separate range;
 // `QPX_METRIC_STEPPED_ASIDE`.
 // 0.9: `QPX_DROP_SUPERSEDED`, `QPX_DROP_UNRESOLVED`.
-// 0.10: leader placement: `QPX_CONFIG_PLACEMENT*`, `QPX_METRIC_SUSPICIONS`,
-// `QPX_METRIC_PLACEMENT_MOVES`, `QPX_METRIC_EPOCH`, `QPX_METRIC_LEADER_POSITION`.
+// 0.10: leader tuning: `QPX_CONFIG_TUNING*`, `QPX_CONFIG_HEDGE_TUNING`,
+// `QPX_METRIC_SUSPICIONS`, `QPX_METRIC_TUNING_MOVES`, `QPX_METRIC_EPOCH`,
+// `QPX_METRIC_LEADER_POSITION`, `QPX_METRIC_TUNING_PHASE`, `QPX_METRIC_HEDGE_MULTIPLIER`.
 #define QPX_ABI_VERSION_MINOR 10
 
 // Success.
@@ -173,14 +174,21 @@
 // Times this replica suspected the member it hands entries to of being silent (ABI 0.10).
 #define QPX_METRIC_SUSPICIONS 12
 
-// Leader-order changes leader placement proposed from this replica (ABI 0.10).
-#define QPX_METRIC_PLACEMENT_MOVES 13
+// Leader-order changes leader tuning proposed from this replica (ABI 0.10).
+#define QPX_METRIC_TUNING_MOVES 13
 
 // Gauge: membership epoch in force (ABI 0.10).
 #define QPX_METRIC_EPOCH 14
 
 // Gauge: this replica's position in the leader order in force, 0 when it leads (ABI 0.10).
 #define QPX_METRIC_LEADER_POSITION 15
+
+// Gauge: the tuning phase in force: 0 monitoring (or off), 1 exploring, 2 exploiting
+// (ABI 0.10).
+#define QPX_METRIC_TUNING_PHASE 16
+
+// Gauge: this replica's hedge multiplier (ABI 0.10).
+#define QPX_METRIC_HEDGE_MULTIPLIER 17
 
 // Largest batch of entries per slot, bytes (`u32`).
 #define QPX_CONFIG_MAX_BATCH_BYTES 1
@@ -203,16 +211,23 @@
 // Upper bound of the hedge delay, nanoseconds.
 #define QPX_CONFIG_HEDGE_MAX_NS 7
 
-// Leader placement on this member: 1 on, 0 off (the default). Enable it on every member
+// Leader tuning on this member: 1 on (the default), 0 off. Enable it on every member
 // (ABI 0.10).
-#define QPX_CONFIG_PLACEMENT 8
+#define QPX_CONFIG_TUNING 8
 
-// How long a member must keep a 20% gain before placement moves the leader to it,
-// nanoseconds (ABI 0.10).
-#define QPX_CONFIG_PLACEMENT_SUSTAIN_NS 9
+// Hedge-delay tuning on this member, with leader tuning: 1 on (the default), 0 off
+// (ABI 0.10).
+#define QPX_CONFIG_HEDGE_TUNING 9
 
-// How long placement leaves any change of the leader order alone, nanoseconds (ABI 0.10).
-#define QPX_CONFIG_PLACEMENT_HOLD_NS 10
+// Slots per tuning epoch (`u32`, at least 65) (ABI 0.10).
+#define QPX_CONFIG_TUNING_EPOCH_SLOTS 10
+
+// Fewest entries an epoch needs for its latency to count (`u32`) (ABI 0.10).
+#define QPX_CONFIG_TUNING_MIN_SAMPLES 11
+
+// How often the cluster explores leaders again while writes flow, nanoseconds (0: only
+// when the leader falls behind) (ABI 0.10).
+#define QPX_CONFIG_TUNING_REEXPLORE_NS 12
 
 // Replica configuration: create it with `qpx_config_new`, adjust it with `qpx_config_set`
 // and `qpx_config_set_leader_order`, pass it to `qpx_replica_new` (which copies it), and

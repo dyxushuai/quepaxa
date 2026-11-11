@@ -87,10 +87,21 @@ impl Replica {
         self.schedule.leader(Slot(self.committed)) == self.me
     }
 
-    /// The hedge delay δ.
+    /// The hedge delay δ: four times the commit latency, within the hedge bounds. Silence
+    /// detection and stepping aside are timed on it.
     pub(super) fn hedge_delay(&self) -> u64 {
+        self.delay_times(4)
+    }
+
+    /// The hedging schedule's delay, which hedge tuning chooses the multiplier of: when an
+    /// own entry is hedged, and how long before a slot others started is taken over.
+    pub(super) fn tuned_hedge_delay(&self) -> u64 {
+        self.delay_times(self.hedge_multiplier())
+    }
+
+    fn delay_times(&self, multiplier: u64) -> u64 {
         let (lo, hi) = (self.cfg.hedge_min, self.cfg.hedge_max);
-        self.commit_latency.map_or(hi / 4, |l| l.saturating_mul(4)).clamp(lo, hi)
+        self.commit_latency.map_or(hi / 4, |l| l.saturating_mul(multiplier)).clamp(lo, hi)
     }
 
     /// A batch of entries a follower handed to this replica: as the leader, or as the deputy
@@ -328,7 +339,6 @@ impl Replica {
             .chain(self.startup_probe)
             .chain(self.watch.ack_due.values().copied())
             .chain(self.aside_at().filter(|_| !self.watch.aside))
-            .chain(self.placement.next_probe)
             .min()
     }
 
@@ -344,7 +354,6 @@ impl Replica {
         if self.startup_probe.is_some_and(|t| t <= now) {
             self.probe_peers();
         }
-        self.fire_probe();
         let due: Vec<Slot> =
             self.proposers.iter().filter(|(_, a)| a.resend_at <= now).map(|(s, _)| *s).collect();
         for slot in due {

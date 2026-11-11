@@ -110,7 +110,8 @@ shares the same disk and CPU pool.
 ### Leader-policy scenarios
 
 QuePaxa only, never run by default; they compare leader policies (`POLICY`, the kv-tokio
-flags under test, default `--placement on --placement-periods 30000,120000`). Each runs 300 s
+flags under test, default `--tuning on`; the other cases run `--tuning off`, the leader
+pinned). Each runs 300 s
 (30 s with `--smoke`); the summary reports latency only from 240 s on, after the policy has
 settled, plus how often the leading region changed and when it last did (sampled every 5 s).
 

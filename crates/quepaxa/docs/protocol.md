@@ -54,6 +54,17 @@ What the paper leaves open, the crate fixes as follows (the repository's
 - **Leader.** Derived from the decided log, so it needs no election; it rotates after eight
   consecutive slots it did not lead. A restarted leader reserves its top priority durably
   before using it, so it can never use it twice in one slot.
+- **Leader tuning** (the paper's §5.3). The paper explores each replica as leader for two
+  fixed-length epochs and then sorts the schedule by observed epoch completion time. The
+  crate does the same with three choices of its own: the reward is the commit latency
+  writers saw (under open-loop load an epoch's duration measures the arrival rate, and
+  the paper's Fig. 10 reports latency); the cluster explores again when the leader is
+  behind the next member by more than three standard errors (a plain comparison fires on
+  noise between near-tied members) and periodically (its footnote 7); and each order
+  change is an ordinary decided leader-order change carrying the tuning phase, so every
+  replica agrees on it. The paper tunes the hedging delay too but gives no method: each
+  replica tries multipliers 1, 2, 4 and 8 of its commit latency and keeps 4 unless
+  another is significantly faster.
 - **Hedging.** Followers forward entries to the leader and propose them themselves only if
   they are not committed within an adaptive delay; duplicates are filtered when committed.
   A follower whose batch loses its slot forwards the entries to the leader again rather

@@ -1,0 +1,11 @@
+--- a/crates/quepaxa/src/replica/tuning.rs
++++ b/crates/quepaxa/src/replica/tuning.rs
+@@ -333,7 +333,7 @@
+         let proposal = match self.applied_tuning.tag.phase {
+             Phase::Explore(t) => {
+                 let t = usize::from(t);
+-                if t + 1 < 2 * n {
++                if t + 1 < 2 * (n - 1) {
+                     // Trial t is led by the member at t / 2 in id order.
+                     let trial = t + 1;
+                     Some((trial_order(roster[trial / 2]), Phase::Explore(trial as u16)))

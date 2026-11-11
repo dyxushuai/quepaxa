@@ -16,6 +16,9 @@ partitioned or gone. QuePaxa is the algorithm behind Cloudflare Research's
 
 - **No timeout tuning for availability.** A slow or dead leader costs latency, never a
   stall; there are no elections.
+- **The leader finds itself.** As in the paper, the cluster tries each replica as leader
+  and keeps the one under which writes commit fastest, whether the difference is the
+  network or a slow machine, and each replica tunes its own hedging delay.
 - **Sans-IO and `no_std`.** The core never touches the network, a disk or a clock: you
   feed it events and carry out the actions it returns, on any runtime (Tokio, threads,
   an event loop, a simulator).
@@ -172,7 +175,7 @@ Android (emulator) and iOS (simulator); the core builds for `wasm32-unknown-unkn
 
 Pre-1.0. The wire format, durable format and C ABI may change between minor versions until
 1.0; the [changelog](https://github.com/dyxushuai/quepaxa/blob/main/CHANGELOG.md) has upgrade notes. Not supported: Byzantine faults,
-witnesses (vote-only members), automatic latency-based leader tuning. Design record:
+witnesses (vote-only members). Design record:
 [spec](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa-v1/spec.md), [decisions](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa/map.md),
 [ADRs](https://github.com/dyxushuai/quepaxa/tree/main/docs/adr).
 

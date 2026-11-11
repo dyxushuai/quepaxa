@@ -273,7 +273,7 @@ impl Replica {
     /// working through a backlog, and hedges would only contend with it; still hedged, in
     /// case the forward was lost). A slot others took over from it does not count.
     pub(super) fn late_at(&self, at: Timestamp) -> Timestamp {
-        let d = self.hedge_delay();
+        let d = self.tuned_hedge_delay();
         let busy = d.saturating_mul(4).min(self.cfg.hedge_max).max(d);
         at.after(if self.watch.progressed > at { busy } else { d })
     }
@@ -289,7 +289,7 @@ impl Replica {
     pub(super) fn takeover_at(&self, slot: Slot, seen: Timestamp) -> Timestamp {
         let position = self.schedule.position(self.me, slot);
         let leader = self.schedule.leader(slot);
-        let usual = seen.after((position + 1).saturating_mul(self.hedge_delay()));
+        let usual = seen.after((position + 1).saturating_mul(self.tuned_hedge_delay()));
         match self.silence_wait(leader) {
             // Sooner only once the leader has been silent for σ: a leader still talking
             // (busy, its slots queued) keeps pushing this back.

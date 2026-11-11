@@ -1,10 +1,8 @@
-diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
-index 8bde6cb..1360f48 100644
 --- a/crates/quepaxa/src/replica/watch.rs
 +++ b/crates/quepaxa/src/replica/watch.rs
-@@ -176,7 +176,7 @@ impl Replica {
+@@ -275,7 +275,7 @@
      pub(super) fn late_at(&self, at: Timestamp) -> Timestamp {
-         let d = self.hedge_delay();
+         let d = self.tuned_hedge_delay();
          let busy = d.saturating_mul(4).min(self.cfg.hedge_max).max(d);
 -        at.after(if self.watch.progressed > at { busy } else { d })
 +        at.after(if self.watch.progressed > at { busy.min(d) } else { d })

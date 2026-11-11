@@ -75,28 +75,38 @@ pub struct Config {
     /// silent. On by default; off, a follower waits the hedge delay as it always did.
     pub silent_leader_takeover: bool,
     /// Preferred leaders, first to last: every member once. Empty (the default) means by
-    /// id. Put the member with the fastest path to a majority first: on a WAN the
-    /// placement alone can change client latency about 2x. The leader moves down this
-    /// order only when it stops getting its values decided.
+    /// id. On a WAN which member leads can change client latency about 2x: with
+    /// [`tuning`](Self::tuning) (the default) the cluster finds the best one itself,
+    /// starting from this order; without it, put the member with the fastest path to a
+    /// majority first. Besides tuning, the leader moves down the order only when it stops
+    /// getting its values decided.
     ///
     /// Members with different orders would disagree on who leads, so the order is folded
     /// into the cluster identity on the wire: such members ignore each other. It is fixed
     /// for the life of the cluster's state: a replica refuses to start from, or install, a
     /// snapshot built under another order.
     pub leader_order: Vec<NodeId>,
-    /// Whether this member takes part in leader placement: while writes flow it probes
-    /// every member once a second for round trips and counts where writes come from, and
-    /// while it leads it moves the leader to the member that gives writers the lowest
-    /// commit latency, by an ordinary leader-order change. Members with it off neither
-    /// probe nor answer, so enable it on every member. Off by default. See
-    /// [`guide::tuning`](crate::guide::tuning).
-    pub placement: bool,
-    /// How long, in nanoseconds, a member must keep a gain of at least 20% over the leader
-    /// before placement moves the leader to it. Default 3 minutes.
-    pub placement_sustain: u64,
-    /// After any change of the leader order, how long, in nanoseconds, placement leaves it
-    /// alone. Default 10 minutes.
-    pub placement_hold: u64,
+    /// Whether this member takes part in leader tuning (the paper's §5.3): while writes
+    /// flow, every member leads in turn for two epochs, then the order becomes the members
+    /// sorted by the commit latency writers saw under each, and the cluster explores again
+    /// when the leader falls significantly behind the next member or every
+    /// `tuning_reexplore`. Each change is an ordinary leader-order change. A member with it
+    /// off neither reports latencies nor proposes; enable it on every member. On by
+    /// default. See [`guide::tuning`](crate::guide::tuning).
+    pub tuning: bool,
+    /// Whether this member also tunes its own hedging delay by trying each multiplier of
+    /// the commit latency in turn and keeping the best (with `tuning` only). On by default.
+    pub hedge_tuning: bool,
+    /// Slots per tuning epoch, at least `LAG + 1` (65), since a change takes 64 slots to
+    /// take effect. Default 128. Only the value of the member that proposed the change in
+    /// force matters.
+    pub tuning_epoch_slots: u32,
+    /// Fewest of the writers' entries an epoch needs for its latency to count. Default 32.
+    pub tuning_min_samples: u32,
+    /// How often, in nanoseconds, the cluster explores again while writes flow, so a member
+    /// that became faster is found (0: only when the leader falls behind). Default 30
+    /// minutes.
+    pub tuning_reexplore: u64,
 }
 
 impl Config {
@@ -119,9 +129,11 @@ impl Config {
             hedge_max: 1000 * MILLI,
             silent_leader_takeover: true,
             leader_order: Vec::new(),
-            placement: false,
-            placement_sustain: 180_000 * MILLI,
-            placement_hold: 600_000 * MILLI,
+            tuning: true,
+            hedge_tuning: true,
+            tuning_epoch_slots: 2 * crate::schedule::LAG as u32,
+            tuning_min_samples: 32,
+            tuning_reexplore: 1_800_000 * MILLI,
         }
     }
 
@@ -180,6 +192,10 @@ impl Config {
             ),
             (self.max_outstanding_proposals > 0, "max_outstanding_proposals must be positive"),
             (self.retransmit_interval > 0, "retransmit_interval must be positive"),
+            (
+                u64::from(self.tuning_epoch_slots) > crate::schedule::LAG,
+                "tuning_epoch_slots must be at least 65",
+            ),
             (
                 self.leader_order.is_empty() || {
                     let mut order = self.leader_order.clone();
@@ -355,8 +371,14 @@ pub struct Metrics {
     pub live_registers: u64,
     /// Times this replica suspected the member it hands entries to of being silent.
     pub suspicions: u64,
-    /// Leader-order changes leader placement proposed from this replica.
-    pub placement_moves: u64,
+    /// Leader-order changes leader tuning proposed from this replica.
+    pub tuning_moves: u64,
+    /// Gauge: the tuning phase in force at the applied prefix: 0 monitoring (no stored
+    /// latencies, or tuning off), 1 exploring, 2 exploiting.
+    pub tuning_phase: u64,
+    /// Gauge: this replica's hedge multiplier (the hedge delay is this many times the
+    /// smoothed commit latency, within the hedge bounds).
+    pub hedge_multiplier: u64,
     /// Gauge: the membership epoch in force at the applied prefix (0: the configured members).
     pub epoch: u64,
     /// Gauge: this replica's position in the leader order in force at the applied prefix (0:
@@ -371,9 +393,9 @@ pub struct Metrics {
 pub struct MemberView {
     /// The member.
     pub id: NodeId,
-    /// Smoothed round trip from this replica, in nanoseconds, if measured recently (only
-    /// with [`Config::placement`]).
-    pub round_trip: Option<u64>,
+    /// The mean commit latency, in nanoseconds, writers saw while the member led, from the
+    /// latest exploration (only with [`Config::tuning`], once an exploration measured it).
+    pub led_latency: Option<u64>,
     /// The commit index the member's latest message carried (this replica's own for itself).
     pub committed: Option<u64>,
     /// When a message from the member last arrived.

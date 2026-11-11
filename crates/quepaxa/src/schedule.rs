@@ -26,21 +26,120 @@ const ROTATE_AFTER: u32 = 8;
 /// Upper bound on members in one order (keeps decoding allocations bounded).
 pub(crate) const MAX_MEMBERS: usize = 1024;
 
+/// Where leader tuning stands once a change takes effect. The schedule ignores it: only who
+/// leads changes, and every replica reads the same tag from the same decided change.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
+pub(crate) struct Tag {
+    pub phase: Phase,
+    /// Slots per epoch from the change on.
+    pub epoch_slots: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
+pub(crate) enum Phase {
+    /// An operator's or a membership change: nothing measured to compare yet.
+    Monitor,
+    /// Trial `t` of an exploration (every member leads two epochs, then one uncounted).
+    Explore(u16),
+    /// The order sorted by what the last exploration measured.
+    Exploit,
+}
+
+impl Tag {
+    /// An operator's or a membership change on `epoch_slots`-slot epochs.
+    pub(crate) fn monitor(epoch_slots: u32) -> Self {
+        Self { phase: Phase::Monitor, epoch_slots }
+    }
+
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        let (phase, trial) = match self.phase {
+            Phase::Monitor => (0, 0),
+            Phase::Explore(t) => (1, t),
+            Phase::Exploit => (2, 0),
+        };
+        out.put_u8(phase);
+        out.put_u16_le(trial);
+        out.put_u32_le(self.epoch_slots);
+    }
+
+    pub(crate) fn decode(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let (phase, trial) = (r.u8()?, r.u16()?);
+        let phase = match (phase, trial) {
+            (0, 0) => Phase::Monitor,
+            (1, t) => Phase::Explore(t),
+            (2, 0) => Phase::Exploit,
+            _ => return Err(DecodeError::BadTag),
+        };
+        let epoch_slots = r.u32()?;
+        if u64::from(epoch_slots) <= LAG {
+            return Err(DecodeError::BadTag);
+        }
+        Ok(Self { phase, epoch_slots })
+    }
+}
+
+/// The tuning tag in force at the applied prefix, where its epoch grid starts, and the tags
+/// of decided changes not in force yet (with their first slot). Carried in the core state
+/// so a replica restored from a snapshot is in the same phase on the same grid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
+pub(crate) struct TuningState {
+    pub tag: Tag,
+    pub anchor: u64,
+    pub pending: Vec<(u64, Tag)>,
+}
+
+impl TuningState {
+    /// Before any change: nothing measured, on the configured epoch length from slot 0.
+    pub(crate) fn initial(epoch_slots: u32) -> Self {
+        Self { tag: Tag::monitor(epoch_slots), anchor: 0, pending: Vec::new() }
+    }
+
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        self.tag.encode(out);
+        out.put_u64_le(self.anchor);
+        out.put_u32_le(self.pending.len() as u32);
+        for (from, tag) in &self.pending {
+            out.put_u64_le(*from);
+            tag.encode(out);
+        }
+    }
+
+    pub(crate) fn decode(r: &mut Reader<'_>) -> Result<Self, DecodeError> {
+        let tag = Tag::decode(r)?;
+        let anchor = r.u64()?;
+        let n = r.u32()? as usize;
+        // A change takes effect LAG slots after its decision: at most LAG are pending.
+        if n as u64 > LAG {
+            return Err(DecodeError::BadTag);
+        }
+        let mut pending = Vec::with_capacity(n);
+        for _ in 0..n {
+            pending.push((r.u64()?, Tag::decode(r)?));
+        }
+        Ok(Self { tag, anchor, pending })
+    }
+}
+
 /// Encodes a membership change: the generation it was computed from (see
-/// [`Schedule::generation`]) and the new order (members, preferred leaders first).
-pub(crate) fn encode_change(base: u64, order: &[NodeId]) -> bytes::Bytes {
-    let mut out = Vec::with_capacity(12 + 4 * order.len());
+/// [`Schedule::generation`]), the new order (members, preferred leaders first) and the
+/// tuning tag it carries.
+pub(crate) fn encode_change(base: u64, order: &[NodeId], tag: Tag) -> bytes::Bytes {
+    let mut out = Vec::with_capacity(19 + 4 * order.len());
     out.put_u64_le(base);
     out.put_u32_le(order.len() as u32);
     for n in order {
         out.put_u32_le(n.0);
     }
+    tag.encode(&mut out);
     bytes::Bytes::from(out)
 }
 
-/// Decodes a change written by [`encode_change`]: its base generation and an order that is
-/// non-empty and without duplicates.
-pub(crate) fn decode_change(b: &bytes::Bytes) -> Option<(u64, Vec<NodeId>)> {
+/// Decodes a change written by [`encode_change`]: its base generation, an order that is
+/// non-empty and without duplicates, and its tag.
+pub(crate) fn decode_change(b: &bytes::Bytes) -> Option<(u64, Vec<NodeId>, Tag)> {
     let mut r = Reader::new(b);
     let base = r.u64().ok()?;
     let len = r.u32().ok()? as usize;
@@ -55,8 +154,9 @@ pub(crate) fn decode_change(b: &bytes::Bytes) -> Option<(u64, Vec<NodeId>)> {
         }
         order.push(n);
     }
+    let tag = Tag::decode(&mut r).ok()?;
     r.finish().ok()?;
-    Some((base, order))
+    Some((base, order, tag))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -442,9 +542,18 @@ mod tests {
 
     #[test]
     fn changes_decode_only_when_well_formed() {
-        assert_eq!(decode_change(&encode_change(3, &ids(&[2, 0]))), Some((3, ids(&[2, 0]))));
-        assert_eq!(decode_change(&encode_change(0, &[])), None);
-        assert_eq!(decode_change(&encode_change(0, &ids(&[1, 1]))), None);
+        let tag = Tag { phase: Phase::Explore(3), epoch_slots: 200 };
+        assert_eq!(decode_change(&encode_change(3, &ids(&[2, 0]), tag)), Some((3, ids(&[2, 0]), tag)));
+        // An epoch no longer than LAG, or a trial outside Explore, is malformed.
+        let mut short = encode_change(3, &ids(&[2, 0]), tag).to_vec();
+        let n = short.len();
+        short[n - 4..].copy_from_slice(&64u32.to_le_bytes());
+        assert_eq!(decode_change(&bytes::Bytes::from(short)), None);
+        let mut bad = encode_change(3, &ids(&[2, 0]), Tag::monitor(128)).to_vec();
+        bad[n - 6] = 1;
+        assert_eq!(decode_change(&bytes::Bytes::from(bad)), None);
+        assert_eq!(decode_change(&encode_change(0, &[], Tag::monitor(128))), None);
+        assert_eq!(decode_change(&encode_change(0, &ids(&[1, 1]), Tag::monitor(128))), None);
         assert_eq!(decode_change(&bytes::Bytes::from_static(&[0; 8])), None);
         assert_eq!(decode_change(&bytes::Bytes::from_static(&[1, 0, 0, 0, 5, 0, 0, 0])), None);
     }
@@ -452,9 +561,9 @@ mod tests {
     #[test]
     fn changes_are_bounded_in_size() {
         let at_most = (0..MAX_MEMBERS as u32).map(NodeId).collect::<Vec<_>>();
-        assert!(decode_change(&encode_change(0, &at_most)).is_some());
+        assert!(decode_change(&encode_change(0, &at_most, Tag::monitor(128))).is_some());
         let too_many = (0..=MAX_MEMBERS as u32).map(NodeId).collect::<Vec<_>>();
-        assert_eq!(decode_change(&encode_change(0, &too_many)), None);
+        assert_eq!(decode_change(&encode_change(0, &too_many, Tag::monitor(128))), None);
     }
 
     #[test]

@@ -114,7 +114,7 @@ impl Replica {
             let slot = Slot(self.committed);
             self.schedule.observe(slot, d.proposal.key.origin);
             for (_, payload) in batch::changes(&d.proposal.value) {
-                if let Some((base, order)) = crate::schedule::decode_change(&payload) {
+                if let Some((base, order, _)) = crate::schedule::decode_change(&payload) {
                     self.schedule.reconfigure(slot, base, order);
                 }
             }
@@ -156,9 +156,10 @@ impl Replica {
                 }
                 seen.push(key);
                 let (origin, incarnation, id) = key;
-                let Some((base, order)) = crate::schedule::decode_change(&payload) else { continue };
+                let Some((base, order, tag)) = crate::schedule::decode_change(&payload) else { continue };
                 match self.applied_schedule.reconfigure(slot, base, order.clone()) {
                     Some((epoch, from)) => {
+                        self.applied_tuning.pending.push((from, tag));
                         self.actions.push(Action::Reconfigured { epoch, from: Slot(from), members: order });
                     }
                     None if origin == self.me && incarnation == self.incarnation => superseded.push(id),
@@ -170,7 +171,6 @@ impl Replica {
                 Vec::new()
             });
             items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
-            self.count_writes(&items);
             let mine: Vec<ProposalId> = items
                 .iter()
                 .filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)
@@ -185,9 +185,9 @@ impl Replica {
                     self.confirm_retired();
                     continue;
                 }
-                // Placement's own move: applied or ignored, the application never sees it.
-                if self.placement.moving == Some(id) {
-                    self.placement.moving = None;
+                // Tuning's own change: applied or ignored, the application never sees it.
+                if self.tuning.moving == Some(id) {
+                    self.tuning.moving = None;
                     self.outstanding.remove(&id);
                     continue;
                 }
@@ -197,7 +197,10 @@ impl Replica {
                     }
                     continue;
                 }
-                if let Some((at, _, hedged)) = self.outstanding.remove(&id) {
+                if let Some((at, kind, hedged)) = self.outstanding.remove(&id) {
+                    if kind == Kind::App {
+                        self.note_commit(slot, at);
+                    }
                     // A hedged entry waited out the hedge delay itself: learning from it
                     // would stretch the delay further each time the leader is slow.
                     if !hedged {
@@ -210,9 +213,7 @@ impl Replica {
                 self.batches.remove(&key.seq);
             }
             self.emitted += 1;
-            if self.cfg.placement {
-                self.note_applied(slot);
-            }
+            self.tuning_applied(slot);
         }
     }
 

@@ -6,7 +6,7 @@
 //! `cargo nextest run --release -p quepaxa-sim --test evaluation --run-ignored only
 //! --no-capture`; `QPX_SIM_SEEDS` (default 2) sets the seeds per scenario.
 
-use quepaxa_sim::{Report, Sim, SimConfig, WriteWeights};
+use quepaxa_sim::{Report, Sim, SimConfig, TuningKnobs, WriteWeights};
 
 const REGIONS: [&str; 5] = ["us-east", "us-west", "eu-west", "ap-ne", "sa-east"];
 /// Round trips in ms between the regions (`wan_leaders`).
@@ -23,10 +23,10 @@ const EU_WEST: usize = 2;
 const AP_NE: usize = 3;
 const SA_EAST: usize = 4;
 
-/// The leader policy under evaluation, on every replica. Short periods stand in for the
-/// default minutes so a run converges in simulated seconds.
+/// The leader policy under evaluation, on every replica: leader tuning with the library's
+/// defaults, explorations every two simulated minutes instead of thirty.
 fn policy(cfg: SimConfig) -> SimConfig {
-    SimConfig { placement: Some((5_000, 20_000)), ..cfg }
+    SimConfig { tuning: Some(TuningKnobs::default()), ..cfg }
 }
 
 fn seeds() -> u64 {
