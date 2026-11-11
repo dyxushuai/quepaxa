@@ -6,12 +6,14 @@ set -euo pipefail
 dir=$1
 
 # Prints one run's values over the regions given (their generators' files): p50 p99 max
-# (ms, from the merged samples), errors, unanswered, longest gap, degraded (worst region),
-# leader after.
+# (ms, from the merged samples; for the leader-policy scenarios only requests due once the
+# policy settled), errors, unanswered, longest gap, degraded (worst region), leader after,
+# and for the policy scenarios leader changes and when the last one was seen (s).
 run_row() {
-  local name=$1 csvs=() txts=() i
+  local name=$1 csvs=() txts=() i from
   for i in $2; do csvs+=("$dir/$name-r$i.csv"); txts+=("$dir/$name-r$i.txt"); done
-  sort -n <(awk -F, 'FNR > 1 && $3 == "Ok" { print $2 - $1 }' "${csvs[@]}") | awk '
+  from=$(sed -n 's/^measure_from_s=//p' "$dir/$name-leader.txt" 2>/dev/null)
+  sort -n <(awk -F, -v from="${from:-0}" 'FNR > 1 && $3 == "Ok" && $1 >= from * 1e6 { print $2 - $1 }' "${csvs[@]}") | awk '
     { v[NR] = $1 }
     function pct(p) { return NR ? v[int((NR - 1) * p + 0.5) + 1] / 1000 : 0 }
     END { printf "%.1f %.1f %.1f", pct(0.5), pct(0.99), NR ? v[NR] / 1000 : 0 }'
@@ -20,17 +22,30 @@ run_row() {
     /^offered/ { e += field("errors"); u += field("unanswered") }
     /^fault_at/ { g = field("longest_gap") + 0; d = field("degraded") + 0; if (g > mg) mg = g; if (d > md) md = d }
     END { printf " %d %d %d %d", e, u, mg, md }' "${txts[@]}"
-  echo " $(sed -n 's/^leader_after=//p' "$dir/$name-leader.txt" 2>/dev/null || echo -)"
+  echo " $(sed -n 's/^leader_after=//p' "$dir/$name-leader.txt" 2>/dev/null || echo -)" \
+    "$(sed -n 's/^leader_changes=//p' "$dir/$name-leader.txt" 2>/dev/null | grep . || echo -)" \
+    "$(sed -n 's/^last_change_s=//p' "$dir/$name-leader.txt" 2>/dev/null | grep . || echo -)"
 }
 
-# One region's row for one run, from its generator's output.
+# One region's row for one run, from its generator's output; for a leader-policy run, the
+# latency only of requests due once the policy settled (none if the region wrote nothing
+# then), from its samples.
 region_row() {
-  awk '
+  local from latency=""
+  from=$(sed -n 's/^measure_from_s=//p' "${1%-r*.txt}-leader.txt" 2>/dev/null)
+  if [ -n "$from" ]; then
+    latency=$(sort -n <(awk -F, -v from="$from" 'FNR > 1 && $3 == "Ok" && $1 >= from * 1e6 { print $2 - $1 }' "${1%.txt}.csv") | awk '
+      { v[NR] = $1 }
+      function pct(p) { return v[int((NR - 1) * p + 0.5) + 1] / 1000 }
+      END { if (NR) printf "%.1f %.1f %.1f", pct(0.5), pct(0.99), v[NR] / 1000; else printf "- - -" }')
+  fi
+  awk -v latency="$latency" '
     function field(k,   i) { for (i = 1; i <= NF; i++) if (index($i, k "=") == 1) return substr($i, length(k) + 2); return "" }
     function ms(v) { sub(/us$/, "", v); return v / 1000 }
     # A region with no completions has no latency to show.
     /^offered/ {
-      if (field("completed") + 0 == 0) printf "- - -"
+      if (latency != "") printf "%s", latency
+      else if (field("completed") + 0 == 0) printf "- - -"
       else printf "%.1f %.1f %.1f", ms(field("p50")), ms(field("p99")), ms(field("max"))
       printf " %d %d", field("errors"), field("unanswered")
     }
@@ -79,8 +94,8 @@ echo
 echo "With the leader's region crashed or cut off, its own clients cannot write at all; those"
 echo "rows ($far down) cover the other regions."
 echo
-echo "| System | Case | p50 | p99 | max | Errors | Unanswered | Longest gap (ms) | Degraded (ms) | Leader after |"
-echo "|---|---|---|---|---|---|---|---|---|---|"
+echo "| System | Case | p50 | p99 | max | Errors | Unanswered | Longest gap (ms) | Degraded (ms) | Leader after | Leader changes | Last change (s) |"
+echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
 for system in $systems; do
   for c in $cases; do
     case $c in "$system"-*) ;; *) continue ;; esac

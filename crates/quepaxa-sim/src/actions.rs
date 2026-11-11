@@ -69,6 +69,12 @@ impl Sim {
         }
     }
 
+    /// How long `i` takes to handle one message, in virtual ns, if it runs on a slow machine.
+    pub(crate) fn cpu_cost(&self, i: usize) -> Option<u64> {
+        let (nodes, us) = self.cfg.slow_cpu.as_ref()?;
+        nodes.contains(&i).then_some(us * 1_000)
+    }
+
     pub(crate) fn on_action(&mut self, i: usize, a: Action) {
         match a {
             Action::Send(out) => self.net_send(i, out),

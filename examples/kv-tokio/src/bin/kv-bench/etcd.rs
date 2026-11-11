@@ -16,6 +16,9 @@ use crate::{GRACE, SplitMix, word};
 pub struct Load {
     pub targets: Vec<SocketAddr>,
     pub rate: f64,
+    /// Later rates: from each time (seconds into the run) on, that many requests per second
+    /// (0 pauses), in time order.
+    pub rate_at: Vec<(f64, f64)>,
     pub secs: f64,
     pub conns: usize,
     pub gets: f64,
@@ -24,6 +27,29 @@ pub struct Load {
     pub start_at: Option<SystemTime>,
     /// Seeds arrivals and keys: generators running side by side need different seeds.
     pub seed: u64,
+}
+
+impl Load {
+    /// The rate at `at` seconds into the run, and when the next step starts.
+    fn rate_in_force(&self, at: f64) -> (f64, Option<f64>) {
+        let rate = self.rate_at.iter().rev().find(|(from, _)| *from <= at).map_or(self.rate, |s| s.1);
+        (rate, self.rate_at.iter().map(|s| s.0).find(|&from| from > at))
+    }
+
+    /// The arrival after `at` seconds: exponential gaps at the rate in force give a Poisson
+    /// process (open loop). A gap that would cross into the next step is drawn again at that
+    /// step's rate (arrivals are memoryless, so each step stays a Poisson process); a paused
+    /// step skips to the next one. None once paused for good.
+    pub(crate) fn next_arrival(&self, rng: &mut SplitMix, mut at: f64) -> Option<f64> {
+        loop {
+            let (rate, step_end) = self.rate_in_force(at);
+            let due = if rate > 0.0 { at - (1.0 - rng.unit()).ln() / rate } else { f64::INFINITY };
+            match step_end {
+                Some(end) if due > end => at = end,
+                _ => return due.is_finite().then_some(due),
+            }
+        }
+    }
 }
 
 /// Runs the load; returns every request's sample and the run's end (microseconds from start),
@@ -50,11 +76,11 @@ pub async fn run(load: &Load) -> (Vec<Sample>, u64) {
     tokio::time::sleep_until(start.into()).await;
     let until = start + Duration::from_secs_f64(load.secs);
     let mut rng = SplitMix(load.seed);
-    let mut next = start;
     let mut handles = Vec::new();
-    loop {
-        // Exponential inter-arrival times give a Poisson process (open loop).
-        next += Duration::from_secs_f64(-(1.0 - rng.unit()).ln() / load.rate);
+    let mut at = 0.0;
+    while let Some(due) = load.next_arrival(&mut rng, at) {
+        at = due;
+        let next = start + Duration::from_secs_f64(due);
         if next >= until {
             break;
         }
@@ -94,4 +120,37 @@ pub async fn run(load: &Load) -> (Vec<Sample>, u64) {
     let mut samples = std::mem::take(&mut *samples.lock().unwrap());
     samples.extend(unanswered);
     (samples, end_us)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load(rate: f64, rate_at: Vec<(f64, f64)>) -> Load {
+        Load { targets: Vec::new(), rate, rate_at, secs: 2.0, conns: 1, gets: 0.0, start_at: None, seed: 1 }
+    }
+
+    fn arrivals(l: &Load, until: f64) -> Vec<f64> {
+        let (mut rng, mut at, mut out) = (SplitMix(l.seed), 0.0, Vec::new());
+        while let Some(due) = l.next_arrival(&mut rng, at).filter(|d| *d < until) {
+            out.push(due);
+            at = due;
+        }
+        out
+    }
+
+    #[test]
+    fn a_slow_step_does_not_swallow_a_later_fast_one() {
+        let a = arrivals(&load(0.001, vec![(1.0, 1000.0)]), 2.0);
+        let fast = a.iter().filter(|t| **t >= 1.0).count();
+        assert!((900..1100).contains(&fast), "{fast} arrivals at 1000/s over a second");
+    }
+
+    #[test]
+    fn nothing_arrives_while_paused() {
+        let a = arrivals(&load(1000.0, vec![(0.5, 0.0), (1.0, 1000.0)]), 2.0);
+        assert!(a.iter().all(|t| !(0.5..1.0).contains(t)), "an arrival inside the pause");
+        assert!(a.iter().any(|t| *t > 1.0));
+        assert!(arrivals(&load(1000.0, vec![(0.5, 0.0)]), 2.0).iter().all(|t| *t < 0.5));
+    }
 }

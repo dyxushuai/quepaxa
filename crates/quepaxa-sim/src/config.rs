@@ -1,7 +1,7 @@
 //! The knobs of a run and what it reports.
 
-/// Write rates per replica, then (from a virtual ms on) other rates.
-pub type WriteWeights = (Vec<u32>, Option<(u64, Vec<u32>)>);
+/// Write rates per replica, in steps: each applies from its virtual ms until the next.
+pub type WriteWeights = Vec<(u64, Vec<u32>)>;
 
 /// Fault and workload knobs. Rates are per mille.
 #[derive(Clone, Debug)]
@@ -62,15 +62,20 @@ pub struct SimConfig {
     pub isolate: Option<(usize, u64, u64)>,
     /// Upper bound on one persist's latency on a slowed disk.
     pub slow_persist_ms: u64,
+    /// These replicas run on a slow machine: they handle one message at a time, each taking
+    /// this many virtual microseconds, and later messages wait their turn.
+    pub slow_cpu: Option<(Vec<usize>, u64)>,
     /// Snapshot and compact every this many applied slots.
     pub compact_every: Option<u64>,
     /// Replica message size limit (small values force multi-page catch-up).
     pub max_message_bytes: u32,
     /// Leader placement on every replica, with its sustained period and hold (virtual ms).
     pub placement: Option<(u64, u64)>,
-    /// Relative write rates per replica (by index; others write nothing), and from a
-    /// virtual time on, other rates. None: every member writes equally.
+    /// Relative write rates per replica (by index; others write nothing), changing at the
+    /// given virtual times. None: every member writes equally.
     pub write_weights: Option<WriteWeights>,
+    /// Record in the report when the leader in force changes (costs a lookup per tick).
+    pub track_leader: bool,
 }
 
 impl SimConfig {
@@ -131,10 +136,12 @@ impl SimConfig {
             disk_slow: None,
             isolate: None,
             slow_persist_ms: 40,
+            slow_cpu: None,
             compact_every: Some(32),
             max_message_bytes: 1 << 20,
             placement: None,
             write_weights: None,
+            track_leader: false,
         }
     }
 }
@@ -184,4 +191,7 @@ pub struct Report {
     pub held_writes: u64,
     /// The leader order in force at the end, as the first live member sees it.
     pub final_order: Vec<usize>,
+    /// With `SimConfig::track_leader`: from which virtual ms each leader led, as the first
+    /// live member reported it.
+    pub leader_timeline: Vec<(u64, usize)>,
 }

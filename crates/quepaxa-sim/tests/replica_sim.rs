@@ -226,7 +226,7 @@ fn placement_under_faults_and_reconfigurations_stays_safe_and_converges() {
             // partitions alone, so moves happen.
             crash: if changes { hostile.crash } else { 0 },
             placement: Some((300, 600)),
-            write_weights: Some((vec![1, 20, 1, 1, 1], None)),
+            write_weights: Some(vec![(0, vec![1, 20, 1, 1, 1])]),
             fault_phase_ms: 5_000,
             ..hostile
         };
@@ -246,4 +246,43 @@ fn removed_majority_waits_for_the_new_members() {
     let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(3, 1576) };
     let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
     assert!(report.reconfigurations > 0, "{report:?}");
+}
+
+fn lan(seed: u64) -> SimConfig {
+    SimConfig {
+        drop: 0,
+        dup: 0,
+        partition: 0,
+        crash: 0,
+        read: 0,
+        max_latency_ms: 1,
+        links_ms: Some(vec![vec![0, 1, 1], vec![1, 0, 1], vec![1, 1, 0]]),
+        fault_phase_ms: 1_500,
+        propose: 1_000,
+        ..SimConfig::hostile(3, seed)
+    }
+}
+
+fn median(mut v: Vec<u64>) -> u64 {
+    v.sort_unstable();
+    v[v.len() / 2]
+}
+
+#[test]
+fn a_leader_on_a_slow_machine_commits_slower() {
+    let fast = Sim::new(lan(1)).run().unwrap();
+    let slow = Sim::new(SimConfig { slow_cpu: Some((vec![0], 600)), ..lan(1) }).run().unwrap();
+    let (fast, slow) = (median(fast.commit_latencies_us), median(slow.commit_latencies_us));
+    println!("median commit latency: {fast} us fast, {slow} us with a slow leader");
+    assert!(slow * 5 > fast * 6, "{slow} us is not 20% slower than {fast} us");
+}
+
+#[test]
+fn no_slow_machine_leaves_the_schedule_unchanged() {
+    // Hashes recorded before slow machines existed: the default configuration must not
+    // draw from the random stream or reorder events differently.
+    for (n, seed, hash) in [(3, 7, 0xe3c6_f575_7bda_3544_u64), (5, 3, 0x2e06_6063_127e_031b)] {
+        let r = Sim::new(SimConfig::hostile(n, seed)).run().unwrap();
+        assert_eq!(r.trace_hash, hash, "{n} replicas, seed {seed}");
+    }
 }
