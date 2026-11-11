@@ -398,7 +398,11 @@ LEMMA RetireStep ==
   <2>4. Prefix(dlog[m]) \in 0..N /\ \A w \in 0..(Prefix(dlog[m]) - 1) : w \in dlog[m]
     BY <2>3, PrefixProps DEF RInv, Inv
   <2>5. \A w \in 0..(f - 1) : decided[w] # None
-    BY <2>1, <2>3, <2>4, MAssumptions DEF RInv, Inv, Decided
+    <3> SUFFICES ASSUME NEW w \in 0..(f - 1) PROVE decided[w] # None OBVIOUS
+    <3>1. w \in 0..(Prefix(dlog[m]) - 1) BY <2>1, <2>3, <2>4
+    <3>2. w \in dlog[m] BY <3>1, <2>4
+    <3>3. dlog[m] \subseteq Decided BY <2>3 DEF RInv, Inv
+    <3> QED BY <3>2, <3>3 DEF Decided
   <2> QED BY <2>1, <2>3, <2>4, <2>5, MAssumptions
 \* r's exit point: its latest epoch is in force there and no later change names r.
 <1>d. PICK kr : kr = IF f <= p THEN p ELSE f OBVIOUS
