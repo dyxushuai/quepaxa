@@ -17,7 +17,7 @@
 #   for the jitter scenario; POLICY (kv-tokio flags of the leader policy under test,
 #   default "--placement on --placement-periods 30000,120000") for the policy scenarios,
 #   and for the others too with POLICY_EVERYWHERE=1; SLOW_CPUS (the heterogeneous
-#   scenario's quota, default 0.5).
+#   scenario's quota, default 0.5); SYSTEMS (default "quepaxa etcd etcd-tuned").
 # Needs Docker and jq. Results go to target/bench-etcd/wan-<time>/.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -397,7 +397,8 @@ stop() {
   wipe_data
 }
 
-for system in quepaxa etcd etcd-tuned; do
+read -r -a systems <<< "${SYSTEMS:-quepaxa etcd etcd-tuned}"
+for system in "${systems[@]}"; do
   for scenario in "${scenarios[@]}"; do
     policy_case "$scenario" && [ "$system" != quepaxa ] && continue
     placements=(far)
