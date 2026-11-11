@@ -191,15 +191,21 @@ fn membership_changes_under_faults_stay_safe_and_converge() {
     let env = |name: &str| std::env::var(name).ok().and_then(|s| s.parse::<u64>().ok());
     let seeds = env("QPX_SIM_MEMBERSHIP_SEEDS")
         .unwrap_or_else(|| env("QPX_SIM_SEEDS").map_or(120, |s| (s / 50).max(120)));
-    let applied = AtomicU64::new(0);
+    let (applied, shrunk, grown) = (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
     let ran = for_seeds(seeds, |seed| {
         let n = [3, 5][(seed % 2) as usize];
         let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(n, seed) };
         let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
         applied.fetch_add(report.reconfigurations, Relaxed);
+        // Changes draw any size: down to one or two members, up to every replica.
+        let sizes = || report.epochs.iter().map(Vec::len);
+        shrunk.fetch_add(u64::from(sizes().min() <= Some(2)), Relaxed);
+        grown.fetch_add(u64::from(sizes().max() > Some(n)), Relaxed);
     });
-    let applied = applied.into_inner();
+    let (applied, shrunk, grown) = (applied.into_inner(), shrunk.into_inner(), grown.into_inner());
+    println!("{ran} runs: {applied} changes, {shrunk} shrank to one or two members, {grown} grew");
     assert!(applied >= ran, "reconfigurations actually happened: {applied}");
+    assert!(shrunk > 0 && grown > 0, "{shrunk} runs shrank to one or two members, {grown} grew");
 }
 
 #[test]
@@ -239,13 +245,18 @@ fn placement_under_faults_and_reconfigurations_stays_safe_and_converges() {
 
 #[test]
 fn removed_majority_waits_for_the_new_members() {
-    // Seed 1576 replaces members 0 and 1 (two of three) with 3 and 4; when removed members
-    // shut down as soon as they had applied the old epoch themselves, the new members could
-    // never learn its last slots. The seed only picks the schedule: re-pick one that still
-    // removes two of three when timing changes move it.
-    let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(3, 1576) };
+    const SEED: u64 = 1576;
+    // The seed replaces two of the three members with spares; when removed members shut
+    // down as soon as they had applied the old epoch themselves, the new members could never
+    // learn its last slots. The seed only picks the schedule: re-pick one that still removes
+    // two of three for a spare when timing changes move it.
+    let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(3, SEED) };
     let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
-    assert!(report.reconfigurations > 0, "{report:?}");
+    let removes_a_majority = report.epochs.windows(2).any(|w| {
+        let kept = w[1].iter().filter(|m| w[0].contains(m)).count();
+        2 * kept < w[0].len() && kept < w[1].len()
+    });
+    assert!(removes_a_majority, "seed {SEED} no longer removes a majority: {:?}", report.epochs);
 }
 
 fn lan(seed: u64) -> SimConfig {

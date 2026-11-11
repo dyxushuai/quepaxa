@@ -126,8 +126,8 @@ pub struct Sim {
     /// The membership in force (clients, faults and convergence use it) and its epoch.
     members: Vec<usize>,
     epoch: u64,
-    /// Every announced epoch: first slot and members. All replicas must agree on them.
-    epochs: BTreeMap<u64, (u64, Vec<usize>)>,
+    /// Every announced epoch, and so the members (and majority) of every slot.
+    epochs: invariants::Epochs,
     progress: invariants::Progress,
 }
 
@@ -173,15 +173,15 @@ impl Sim {
             cut: BTreeSet::new(),
             faults_on: true,
             ledger: invariants::Ledger::default(),
-            report: Report::default(),
+            report: Report { epochs: vec![initial.clone()], ..Report::default() },
             trace: String::new(),
             last_new_slot_at: 0,
             kv: kv::Kv::new(nodes_len),
             pending_installs: Vec::new(),
             history: invariants::History::default(),
-            members: initial,
+            members: initial.clone(),
             epoch: 0,
-            epochs: BTreeMap::new(),
+            epochs: invariants::Epochs { initial, applied: BTreeMap::new() },
             progress: invariants::Progress::default(),
         };
         if let Some((node, at)) = sim.cfg.kill {
@@ -373,7 +373,7 @@ impl Sim {
         if node.replica.take().is_none() {
             return;
         }
-        self.history.forget(self.cfg.nodes, i);
+        self.history.forget(&self.epochs, i);
         // The write in progress may be torn: a prefix of its records reaches the disk.
         let pending = std::mem::take(&mut node.pending);
         if let Some(first) = pending.into_iter().next() {
@@ -543,7 +543,7 @@ impl Sim {
             .enumerate()
             .filter_map(|(i, n)| n.replica.as_ref().map(|r| (i, r.inspect())))
             .collect();
-        let result = self.history.observe(self.cfg.nodes, &live);
+        let result = self.history.observe(&self.epochs, &live);
         result.map_err(|e| self.fail(&e))
     }
 
@@ -601,8 +601,9 @@ impl Sim {
         live[self.rng.below(live.len() as u64) as usize]
     }
 
-    /// Proposes `nodes` replicas drawn from everyone, at a random member; one time in
-    /// three, only a new leader order for the members in force.
+    /// Proposes replicas drawn from everyone, any number of them from one to all (the
+    /// cluster grows, shrinks or keeps its size), at a random member; one time in three,
+    /// only a new leader order for the members in force.
     fn reconfigure(&mut self) -> Result<(), String> {
         if self.rng.below(3) == 0 {
             return self.shuffle_order();
@@ -611,7 +612,7 @@ impl Sim {
         for k in (1..pool.len()).rev() {
             pool.swap(k, self.rng.below(k as u64 + 1) as usize);
         }
-        pool.truncate(self.cfg.nodes);
+        pool.truncate(1 + self.rng.below(pool.len() as u64) as usize);
         let i = self.member();
         let Some(r) = self.nodes[i].replica.as_mut() else { return Ok(()) };
         let members = pool.iter().map(|&m| NodeId(m as u32)).collect();
@@ -673,13 +674,19 @@ impl Sim {
     }
 
     fn inject_faults(&mut self) {
-        let n = self.cfg.nodes;
+        // The members in force: a change may have grown or shrunk the cluster.
+        let n = self.members.len();
+        let cut_members = self.members.iter().filter(|m| self.cut.contains(m)).count();
         if let Some((x, at, ms)) = self.cfg.isolate {
             let on = (at * MS..(at + ms) * MS).contains(&self.now);
             if on != self.cut.contains(&x) {
                 self.cut = if on { BTreeSet::from([x]) } else { BTreeSet::new() };
                 let _ = writeln!(self.trace, "{} isolate {:?}", self.now, self.cut);
             }
+        } else if cut_members > (n - 1) / 2 {
+            // A change left the partition holding half of the members or more.
+            self.cut.clear();
+            let _ = writeln!(self.trace, "{} heal-partition", self.now);
         } else if self.cut.is_empty() && n > 2 && self.chance(self.cfg.partition) {
             while self.cut.len() < (n - 1) / 2 {
                 let x = self.member();

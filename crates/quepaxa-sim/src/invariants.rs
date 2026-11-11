@@ -4,8 +4,8 @@
 //! - **G1 agreement**: a slot is only ever decided to one value.
 //! - **G3 value lock**: once some proposer decided `v` in round `r`, every value stored at a
 //!   step `≥ 4(r+1)` (and every previous-step aggregate above it) carries `v`.
-//! - **G4 fast-path lock**: once a majority of recorders held the leader's top-priority
-//!   proposal as the first value of step 4, the slot can only decide that value.
+//! - **G4 fast-path lock**: once a majority of the slot's members held the leader's
+//!   top-priority proposal as the first value of step 4, the slot can only decide that value.
 //! - **G5 unique H**: at most one distinct value ever carries the leader priority per slot.
 //!
 //! [`Ledger`] checks what clients see: agreement and validity of committed entries, each
@@ -28,6 +28,31 @@ use quepaxa::{Entry, NodeId, ProposalId};
 
 type Value = (u32, u64, u64, u64);
 
+/// Who the members of every slot are: the configured ones, then each applied epoch's from
+/// its first slot on. Membership changes may grow or shrink the cluster, so a majority is
+/// always that of the slot's own members.
+#[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
+pub struct Epochs {
+    /// The configured members (epoch 0).
+    pub initial: Vec<usize>,
+    /// Every applied epoch: first slot and members. All replicas must agree on them.
+    pub applied: BTreeMap<u64, (u64, Vec<usize>)>,
+}
+
+impl Epochs {
+    /// The members of `slot`.
+    pub fn members(&self, slot: u64) -> &[usize] {
+        // Epochs start in increasing slots.
+        self.applied.values().rev().find(|(from, _)| *from <= slot).map_or(&self.initial, |(_, m)| m)
+    }
+
+    /// Whether `seen` holds a majority of `slot`'s members.
+    fn majority(&self, slot: u64, seen: &BTreeSet<usize>) -> bool {
+        let members = self.members(slot);
+        2 * members.iter().filter(|m| seen.contains(m)).count() > members.len()
+    }
+}
+
 /// Evidence observed so far in one execution.
 #[derive(Clone, Debug, Default, Hash, PartialEq, Eq)]
 pub struct History {
@@ -41,7 +66,7 @@ pub struct History {
 
 impl History {
     /// A replica crashed: evidence only its volatile state showed is gone.
-    pub fn forget(&mut self, n: usize, replica: usize) {
+    pub fn forget(&mut self, epochs: &Epochs, replica: usize) {
         for values in self.leader_values.values_mut() {
             for seen in values.values_mut() {
                 seen.remove(&replica);
@@ -51,11 +76,11 @@ impl History {
         for (_, seen) in self.fast_locked.values_mut() {
             seen.remove(&replica);
         }
-        self.fast_locked.retain(|_, (_, seen)| seen.len() > n / 2);
+        self.fast_locked.retain(|slot, (_, seen)| epochs.majority(*slot, seen));
     }
 
     /// Folds the live replicas' state into the history and checks G1, G3, G4 and G5.
-    pub fn observe(&mut self, n: usize, replicas: &[(usize, Inspection)]) -> Result<(), String> {
+    pub fn observe(&mut self, epochs: &Epochs, replicas: &[(usize, Inspection)]) -> Result<(), String> {
         for (_, ins) in replicas {
             let decided = ins.decided.iter().map(|(s, v)| (*s, v, None));
             let here = ins.decided_here.iter().map(|(s, v, step)| (*s, v, Some(*step)));
@@ -105,7 +130,7 @@ impl History {
         }
         for (slot, holders) in step4_firsts {
             for (v, seen) in holders {
-                if seen.len() > n / 2 {
+                if epochs.majority(slot, &seen) {
                     self.fast_locked.entry(slot).or_insert((v, seen));
                 }
             }

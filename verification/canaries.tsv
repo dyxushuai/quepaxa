@@ -35,3 +35,5 @@ leader-proposes-past-handover	-	cargo nextest run --no-fail-fast -p quepaxa next
 stale-member-ranked-first	-	cargo nextest run --no-fail-fast -p quepaxa ranking_tests	a stale member is never placed first
 placement-ignores-the-hold	-	cargo nextest run --no-fail-fast -p quepaxa ranking_tests	within the hold
 hedge-on-a-shared-disk-stall	-	cargo nextest run --no-fail-fast -p quepaxa watch_tests	not hedged past
+quorum-of-the-configured-size	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership_changes	G[1345] |agreement|did not converge|no progress
+change-keeps-the-cluster-size	-	cargo nextest run --release -p quepaxa-sim --test model_check a_cluster_grown	which no change asked for

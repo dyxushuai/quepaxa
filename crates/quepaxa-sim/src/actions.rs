@@ -147,7 +147,7 @@ impl Sim {
             Action::Reconfigured { epoch, members, from } => {
                 let _ = writeln!(self.trace, "{} n{i} epoch {epoch} from {}: {members:?}", self.now, from.0);
                 let next: Vec<usize> = members.iter().map(|m| m.0 as usize).collect();
-                if let Some(seen) = self.epochs.get(&epoch) {
+                if let Some(seen) = self.epochs.applied.get(&epoch) {
                     assert!(
                         *seen == (from.0, next.clone()),
                         "{}",
@@ -159,7 +159,7 @@ impl Sim {
                 if self.cfg.reorder.is_some() {
                     self.report.reorder_decided_us.get_or_insert(self.now / 1_000);
                 }
-                self.epochs.insert(epoch, (from.0, next.clone()));
+                self.epochs.applied.insert(epoch, (from.0, next.clone()));
                 // Removed replicas serve until they report `Retired`; returning ones start
                 // now so they catch up during the window.
                 for &back in &next {
@@ -175,8 +175,12 @@ impl Sim {
                 let _ = writeln!(self.trace, "{} n{i} retired from epoch {epoch}", self.now);
                 // A replica that has not caught up with a later change adding it back may
                 // still report the older epoch; the operator knows better and keeps it.
-                let back =
-                    self.epochs.range(epoch + 1..).next_back().is_some_and(|(_, (_, m))| m.contains(&i));
+                let back = self
+                    .epochs
+                    .applied
+                    .range(epoch + 1..)
+                    .next_back()
+                    .is_some_and(|(_, (_, m))| m.contains(&i));
                 self.nodes[i].retiring = !back;
             }
             Action::ReadReady { id, .. } => self.kv.read_ready(i, id),
@@ -190,7 +194,7 @@ impl Sim {
     /// Switches clients, faults and convergence to an announced epoch once the agreed log
     /// reaches its first slot.
     pub(crate) fn activate_epochs(&mut self) {
-        while let Some((from, next)) = self.epochs.get(&(self.epoch + 1)).cloned() {
+        while let Some((from, next)) = self.epochs.applied.get(&(self.epoch + 1)).cloned() {
             if (self.ledger.slots() as u64) < from {
                 return;
             }
@@ -204,6 +208,7 @@ impl Sim {
             if self.cfg.reorder.is_some() {
                 self.report.reorder_in_force_us.get_or_insert(self.now / 1_000);
             }
+            self.report.epochs.push(next.clone());
             self.members = next;
         }
     }

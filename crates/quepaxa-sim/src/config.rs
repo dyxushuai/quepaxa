@@ -38,8 +38,8 @@ pub struct SimConfig {
     pub silent_leader_takeover: bool,
     /// Extra replicas that start outside the cluster and may join it by reconfiguration.
     pub spares: usize,
-    /// Probability per tick (per mille) of proposing a new membership of `nodes` replicas
-    /// drawn from members and spares.
+    /// Probability per tick (per mille) of proposing a new membership drawn from members
+    /// and spares, of any size from one replica to all of them, or a new leader order.
     pub reconfigure: u32,
     /// At `.1` virtual ms, replica `.0` proposes the same members with leader order `.2`.
     pub reorder: Option<(usize, u64, Vec<usize>)>,
@@ -182,6 +182,8 @@ pub struct Report {
     pub commits: Vec<(usize, u64, u64)>,
     /// Membership changes applied (by the first replica to apply each).
     pub reconfigurations: u64,
+    /// The members of every epoch put in force, the configured ones first.
+    pub epochs: Vec<Vec<usize>>,
     /// When any replica first reported the configured reorder decided (virtual microseconds).
     pub reorder_decided_us: Option<u64>,
     /// When the agreed log first reached the reorder's first slot: every slot before it is
