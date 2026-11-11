@@ -423,3 +423,69 @@ fn only_the_latest_exploration_s_trials_are_kept() {
     r.on_epoch_report(NodeId(1), Slot(500), Some(7), false, Vec::new());
     assert!(!r.tuning.trials.contains_key(&500));
 }
+
+#[test]
+fn a_reporter_without_writes_under_the_leader_does_not_veto_exploration() {
+    // Member 1 reads only: it is stuck trying a hedge arm, but its report carries nothing.
+    let mut r = exploiting(12, false);
+    r.on_epoch_report(NodeId(1), Slot(800), None, true, Vec::new());
+    r.decide_tuning();
+    assert_eq!(proposed(&r), Some((alloc::vec![0, 1, 2], Phase::Explore(0))));
+}
+
+#[test]
+fn a_replica_that_writes_nothing_does_not_start_hedge_trials() {
+    let mut r = replica(0, &[0, 1, 2], 8);
+    phase(&mut r, Phase::Exploit);
+    r.hedge_epoch_ended(&[]);
+    assert_eq!((r.tuning.hedge.trying, r.tuning.hedge.due), (None, true));
+}
+
+#[test]
+fn an_epoch_is_reported_with_the_arm_it_ran() {
+    let mut r = replica(0, &[0, 1, 2], 8);
+    r.tuning.live = true;
+    phase(&mut r, Phase::Exploit);
+    // The last arm's last counted epoch ends here: it is still reported as a trial.
+    r.tuning.hedge.stats = super::tuning::ARMS.iter().map(|_| spread(0, 64, 5, 1)).collect();
+    r.tuning.hedge.trying = Some((3, 1));
+    r.tuning.hedge.due = false;
+    r.tuning.epoch_first = 0;
+    r.tuning.current = alloc::vec![spread(0, 64, 5, 1)];
+    r.start_epoch(u64::from(E));
+    assert_eq!(r.tuning.hedge.trying, None, "the trials settled");
+    assert!(r.tuning.reports[&0][&NodeId(0)].0, "its epoch was a trial");
+    // The next epoch is not.
+    r.tuning.current = alloc::vec![spread(0, 64, 5, 1)];
+    r.start_epoch(2 * u64::from(E));
+    assert!(!r.tuning.reports[&u64::from(E)][&NodeId(0)].0);
+}
+
+#[test]
+fn a_late_report_of_a_finished_exploration_does_not_pin_the_history() {
+    let mut r = replica(0, &[0, 1, 2], 1);
+    r.enter_phase(Phase::Exploit, 2_000);
+    r.on_epoch_report(NodeId(1), Slot(1_900), Some(6), false, alloc::vec![stat(0, 4, 4)]);
+    assert!(r.tuning.trials.is_empty());
+    for k in 0..10u64 {
+        r.on_epoch_report(NodeId(1), Slot(2_000 + k * u64::from(E)), None, false, Vec::new());
+    }
+    assert!(r.tuning.reports.len() <= 5, "{} epochs kept", r.tuning.reports.len());
+}
+
+#[test]
+fn nothing_is_proposed_while_a_change_applied_later_is_still_being_applied() {
+    let mut r = replica(0, &[0, 1, 2], 1);
+    // The committed prefix holds a rotation, in force by now, that the applied prefix has
+    // not reached.
+    let applied = r.schedule.clone();
+    for slot in 0..8 {
+        r.schedule.observe(Slot(slot), NodeId(1));
+    }
+    r.committed = 200;
+    r.applied_schedule = applied;
+    assert!(r.schedule.settled(Slot(r.committed)));
+    assert_ne!(r.schedule.generation(), r.applied_schedule.generation());
+    r.decide_tuning();
+    assert_eq!(proposed(&r), None);
+}

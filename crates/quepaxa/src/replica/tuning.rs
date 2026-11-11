@@ -54,6 +54,9 @@ pub(super) struct Tuning {
     pub(super) moving: Option<ProposalId>,
     /// Off while the replica replays its log on start: no reports, no proposals.
     pub(super) live: bool,
+    /// Where the last exploration ended (its order taking effect, or an operator's): a
+    /// report naming a trial of an epoch before it belongs to that exploration.
+    pub(super) trials_from: u64,
     /// This replica's hedge multiplier and its trials.
     pub(super) hedge: Hedge,
 }
@@ -187,12 +190,13 @@ impl Replica {
     }
 
     /// Ends the epoch being measured (reporting it) and starts one at `first`.
-    fn start_epoch(&mut self, first: u64) {
+    pub(super) fn start_epoch(&mut self, first: u64) {
         if self.cfg.tuning && self.tuning.live && first > self.tuning.epoch_first {
             let stats = core::mem::take(&mut self.tuning.current);
+            // The flag describes the epoch being reported, before the arms move on.
+            let trying_arm = self.trying_arm();
             self.hedge_epoch_ended(&stats);
             let epoch = Slot(self.tuning.epoch_first);
-            let trying_arm = self.trying_arm();
             let trial = self.tuning.trials.get(&epoch.0).copied();
             let me = self.me;
             let members: Vec<NodeId> = self.applied_schedule.members(Slot(first)).to_vec();
@@ -217,6 +221,7 @@ impl Replica {
                 self.tuning.trials.clear();
                 self.tuning.rewards.clear();
                 self.tuning.period_from = Some(self.now);
+                self.tuning.trials_from = first;
             }
             Phase::Explore(0) => {
                 self.tuning.trials.clear();
@@ -233,6 +238,7 @@ impl Replica {
             Phase::Exploit => {
                 self.tuning.rewards = self.measured();
                 self.tuning.trials.clear();
+                self.tuning.trials_from = first;
             }
         }
     }
@@ -262,7 +268,8 @@ impl Replica {
         let members = self.applied_schedule.members(Slot(self.emitted));
         stats.retain(|s| members.contains(&s.leader));
         // Trials run 0..=2n; anything else is not one of this membership's.
-        if let Some(t) = trial.filter(|t| usize::from(*t) <= 2 * members.len()) {
+        let current = first >= self.tuning.trials_from;
+        if let Some(t) = trial.filter(|t| current && usize::from(*t) <= 2 * members.len()) {
             self.tuning.trials.entry(first).or_insert(t);
             // Only the latest exploration counts: it starts at its last trial-0 epoch.
             let start = self.tuning.trials.iter().filter(|(_, t)| **t == 0).map(|(f, _)| *f).max();
@@ -290,8 +297,9 @@ impl Replica {
         let mut total = LatencyStat::new(leader);
         let mut arm = false;
         for (trying, stats) in self.tuning.reports.get(&first).into_iter().flat_map(BTreeMap::values) {
-            arm |= *trying;
-            for s in stats.iter().filter(|s| s.leader == leader) {
+            // A reporter without entries under this leader did not move its latency.
+            for s in stats.iter().filter(|s| s.leader == leader && s.count > 0) {
+                arm |= *trying;
                 total.merge(s);
             }
         }
@@ -331,7 +339,10 @@ impl Replica {
     /// has not stepped aside, and no order change is pending or on its way.
     fn may_tune(&self) -> bool {
         let pending_change = |kind: Kind| kind == Kind::Reconfigure;
-        !self.watch.aside
+        // The phase is that of the applied prefix: proposing from it with the committed
+        // prefix's generation would override a change applied meanwhile.
+        self.applied_schedule.generation() == self.schedule.generation()
+            && !self.watch.aside
             && self.schedule.settled(Slot(self.committed))
             && self.tuning.moving.is_none()
             && !self.outstanding.values().any(|(_, kind, _)| pending_change(*kind))
@@ -456,8 +467,10 @@ impl Replica {
         let exploiting = self.applied_tuning.tag.phase == Phase::Exploit;
         let min = u64::from(self.cfg.tuning_min_samples.max(1));
         let hedge = &mut self.tuning.hedge;
+        let wrote = epoch.iter().map(|s| s.count).sum::<u64>() >= min;
         match hedge.trying {
-            None if hedge.due && exploiting => {
+            // Trials need this replica's own writes: one that writes nothing stays put.
+            None if hedge.due && exploiting && wrote => {
                 hedge.due = false;
                 hedge.stats = ARMS.iter().map(|_| LatencyStat::new(self.me)).collect();
                 hedge.trying = Some((0, 0));
@@ -508,14 +521,17 @@ impl Replica {
                 self.tuning.trials.entry(first).or_insert(t);
             }
             // The exploration ended in the slots skipped.
-            Phase::Exploit if !self.tuning.trials.is_empty() => {
-                self.tuning.rewards = self.measured();
-                self.tuning.trials.clear();
+            Phase::Exploit => {
+                if !self.tuning.trials.is_empty() {
+                    self.tuning.rewards = self.measured();
+                    self.tuning.trials.clear();
+                }
+                self.tuning.trials_from = anchor;
             }
-            Phase::Exploit => {}
             Phase::Monitor => {
                 self.tuning.trials.clear();
                 self.tuning.rewards.clear();
+                self.tuning.trials_from = anchor;
             }
         }
     }
