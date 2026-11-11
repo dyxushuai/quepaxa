@@ -462,3 +462,16 @@ fn the_member_view_reports_what_each_peer_said_last() {
     assert_eq!(view[1].round_trip, Some(100 * MS));
     assert_eq!(view[2].committed, None);
 }
+
+#[test]
+fn a_member_whose_table_went_stale_is_not_placed_first() {
+    // us-east reported once, then went silent: its table ages out, so us-west is placed.
+    let mut r = leader(3, &[3, 0, 1, 2, 4]);
+    let all = [(0, 10), (1, 10), (2, 10), (3, 10), (4, 10)];
+    let t = rounds(&mut r, PROBE_INTERVAL, 2, &wan(), &all);
+    let mut silent = WAN;
+    silent[0] = [0, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN];
+    let silent: Vec<&[u64]> = silent.iter().map(|r| &r[..]).collect();
+    rounds(&mut r, t, SUSTAIN / PROBE_INTERVAL + 10, &silent, &all);
+    assert_eq!(moved(&r).map(|o| o[0]), Some(1), "a stale member is never placed first");
+}

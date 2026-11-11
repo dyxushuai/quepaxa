@@ -1,5 +1,8 @@
 //! The knobs of a run and what it reports.
 
+/// Write rates per replica, then (from a virtual ms on) other rates.
+pub type WriteWeights = (Vec<u32>, Option<(u64, Vec<u32>)>);
+
 /// Fault and workload knobs. Rates are per mille.
 #[derive(Clone, Debug)]
 pub struct SimConfig {
@@ -63,6 +66,11 @@ pub struct SimConfig {
     pub compact_every: Option<u64>,
     /// Replica message size limit (small values force multi-page catch-up).
     pub max_message_bytes: u32,
+    /// Leader placement on every replica, with its sustained period and hold (virtual ms).
+    pub placement: Option<(u64, u64)>,
+    /// Relative write rates per replica (by index; others write nothing), and from a
+    /// virtual time on, other rates. None: every member writes equally.
+    pub write_weights: Option<WriteWeights>,
 }
 
 impl SimConfig {
@@ -125,6 +133,8 @@ impl SimConfig {
             slow_persist_ms: 40,
             compact_every: Some(32),
             max_message_bytes: 1 << 20,
+            placement: None,
+            write_weights: None,
         }
     }
 }
@@ -172,4 +182,6 @@ pub struct Report {
     pub reorder_in_force_us: Option<u64>,
     /// Writes acknowledged while their replica was in a connected majority (R4).
     pub held_writes: u64,
+    /// The leader order in force at the end, as the first live member sees it.
+    pub final_order: Vec<usize>,
 }
