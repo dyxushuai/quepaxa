@@ -641,6 +641,48 @@ fn a_local_change_overtaken_by_another_is_dropped_as_superseded() {
 }
 
 #[test]
+fn a_peers_superseded_change_does_not_drop_a_local_entry_with_the_same_id() {
+    // Ids are per origin: a peer's change, overtaken by another, may share its id with an
+    // application entry of this replica's own decided in the same batch.
+    let mut r = replica();
+    let mut out = Vec::new();
+    let mine = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    let inc = r.incarnation;
+    let change = |origin: u32, id: ProposalId, members: &[u32]| Item {
+        entry: Entry {
+            origin: NodeId(origin),
+            incarnation: inc,
+            id,
+            payload: crate::schedule::encode_change(
+                0,
+                &members.iter().copied().map(NodeId).collect::<Vec<_>>(),
+            ),
+        },
+        kind: Kind::Reconfigure,
+    };
+    let own = Item {
+        entry: Entry { origin: NodeId(0), incarnation: inc, id: mine, payload: Bytes::from_static(b"x") },
+        kind: Kind::App,
+    };
+    let decided = |seq: u64, items: &[Item]| Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(1), incarnation: 1, seq },
+        value: batch::encode(items),
+    };
+    let proposals = alloc::vec![
+        decided(0, &[change(1, ProposalId(0), &[0, 1])]),
+        decided(1, &[change(2, mine, &[0, 2]), own]),
+    ];
+    r.handle(Timestamp(2), from_peer(1, 0, Body::Entries { first: Slot(0), proposals })).unwrap();
+    out.clear();
+    r.poll_actions(&mut out);
+    assert_eq!(r.schedule.epoch(), (1, 64), "only the first change applies");
+    assert!(out.contains(&Action::Committed { id: mine, slot: Slot(1) }), "{out:?}");
+    assert!(!out.iter().any(|a| matches!(a, Action::Dropped { .. })), "{out:?}");
+}
+
+#[test]
 fn a_local_change_decided_twice_in_one_batch_commits_once() {
     let mut r = replica();
     let mut out = Vec::new();
