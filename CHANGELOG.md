@@ -3,7 +3,10 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
-## Unreleased
+## 0.7.0 — 2026-11-13
+
+Leader placement by latency and write load, the paper's §5.3 leader tuning where round
+trips cannot decide, and hedging that holds back on a shared disk stall.
 
 - `quepaxa`: `Metrics` gains `suspicions`, `placement_moves` and the `epoch` and
   `leader_position` gauges; `Replica::members` lists the members in force in leader order
@@ -35,6 +38,20 @@ All notable changes to this project are documented here. The project follows
   `Dropped { reason: Superseded }` (C: `QPX_DROP_SUPERSEDED`, ABI 0.9) instead of
   `Committed`; one resolved by a snapshot gets `Unresolved` (`QPX_DROP_UNRESOLVED`).
   Snapshots no longer keep every change's id; older snapshots are rejected.
+- `quepaxa`: hedging around a shared disk stall. While every disk seems stuck (this
+  replica's disk has completed no write for δ while one is in flight, and nobody has
+  decided a slot since), a follower holds its hedges instead of contending with the
+  leader once the disks resume; a disk that keeps completing writes is slow, not stuck.
+  A follower that lost a slot to the leader's own value hands its entries back to the
+  leader when the leader has decided since, instead of proposing them against it. In the
+  simulator a shared slowdown's slowest write stays under 260 ms (was up to 537 ms).
+- `quepaxa`: at a leader handover the old leader stops at the first slot the new leader
+  leads and hands its waiting entries on, instead of proposing them in the new leader's
+  slots, where miss-based rotation counted them against it.
+- `quepaxa`: the commit path is within 3% (one member) and 6% (three members) of 0.6.0's,
+  measured on the same machine, after placement and handover had made it 17-22% slower: a
+  replica no longer searches the window for a free slot on every input when nothing waits
+  to be proposed.
 
 ## 0.6.0 — 2026-11-06
 
