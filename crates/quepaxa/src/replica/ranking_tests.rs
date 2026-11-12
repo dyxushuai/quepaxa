@@ -647,6 +647,20 @@ fn a_measured_member_is_skipped_until_its_measurement_goes_stale() {
 }
 
 #[test]
+fn a_tenure_that_began_idle_explores_only_once_its_writes_span_the_period() {
+    // Leading since time zero, but writes (and samples) began ten seconds ago.
+    let t = 2 * SUSTAIN;
+    let mut r = leader(0, &[0, 1, 2]);
+    let mut l = Led::default();
+    for k in 0..20 {
+        l.add(5_000, Timestamp(t - 10 * PROBE_INTERVAL + k * PROBE_INTERVAL / 2));
+    }
+    r.placement.led.insert(NodeId(0), l);
+    round(&mut r, t, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), None);
+}
+
+#[test]
 fn a_tenure_cut_short_is_not_a_measurement() {
     // 1 led for ten seconds only, and looked fast; 2 is measured. 1 is explored, not
     // exploited.

@@ -36,7 +36,7 @@
 use alloc::vec::Vec;
 
 use super::Replica;
-use super::placement::{Exclusion, PROBE_INTERVAL, Target, fresh};
+use super::placement::{Exclusion, Led, PROBE_INTERVAL, Target, fresh};
 use crate::batch::{self, Kind};
 use crate::types::{NodeId, Slot};
 
@@ -117,9 +117,17 @@ impl Replica {
         let now = self.now;
         let p = &self.placement;
         let hold = self.cfg.placement_hold;
-        let Some(mine) = p.led.get(&self.me).copied() else { return };
+        let sustain = self.cfg.placement_sustain;
+        // Measured: samples over a whole sustained period (sampling starts two rounds into a
+        // tenure), as every explored tenure has. A tenure cut short, say a slow leader the
+        // round trips moved off at startup, saw only its first seconds, before its queue grew;
+        // one that began idle saw only the writes since.
+        let whole = |l: &Led| {
+            l.count >= MIN_ROUNDS && l.at.0.saturating_sub(l.since.0) + 2 * PROBE_INTERVAL >= sustain
+        };
+        let Some(mine) = p.led.get(&self.me).copied().filter(whole) else { return };
         let Some(current) = costs[0] else { return };
-        if mine.count < MIN_ROUNDS || now.0.saturating_sub(p.led_since.0) < self.cfg.placement_sustain {
+        if now.0.saturating_sub(p.led_since.0) < sustain {
             return;
         }
         let writes: u128 = p.rates.values().map(|&r| u128::from(r)).sum();
@@ -129,16 +137,11 @@ impl Replica {
         // describe it.
         let demoted =
             |n: NodeId| p.excluded.get(&n).is_some_and(|e| e.until.after(hold.saturating_mul(4)) > now);
-        // Measured: samples over a whole sustained period (sampling starts two rounds into a
-        // tenure), as every explored tenure has. A tenure cut short, say a slow leader the
-        // round trips moved off at startup, saw only its first seconds, before its queue grew.
-        let sustain = self.cfg.placement_sustain;
         let measured = |n: NodeId| {
-            p.led.get(&n).copied().filter(|l| {
-                l.count >= MIN_ROUNDS
-                    && l.at.0.saturating_sub(l.since.0) + 2 * PROBE_INTERVAL >= sustain
-                    && now.0.saturating_sub(l.at.0) < hold.saturating_mul(STALE_HOLDS)
-            })
+            p.led
+                .get(&n)
+                .copied()
+                .filter(|l| whole(l) && now.0.saturating_sub(l.at.0) < hold.saturating_mul(STALE_HOLDS))
         };
         let tied: Vec<usize> =
             (1..order.len()).filter(|&i| costs[i].is_some_and(alike) && !demoted(order[i])).collect();
