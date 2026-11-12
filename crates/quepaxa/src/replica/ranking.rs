@@ -202,6 +202,8 @@ impl Replica {
 
     /// After a restart or a snapshot, whatever changed before is treated as just changed.
     pub(super) fn restart_hold(&mut self) {
+        // A tenure is measured from when this replica saw it start, not from the clock's epoch.
+        self.placement.led_since = self.now;
         if self.applied_schedule.generation() > 0 {
             self.placement.changed_at = Some(self.now);
             self.placement.target = None;

@@ -25,7 +25,8 @@ use crate::types::{NodeId, ProposalId, Slot, Timestamp};
 pub(super) const PROBE_INTERVAL: u64 = 1_000_000_000;
 /// A round trip or table older than this is unknown.
 pub(super) const FRESH_FOR: u64 = 4 * PROBE_INTERVAL;
-/// Own commit latencies kept per probe round for its percentile.
+/// Own commit latencies kept per probe round for its percentile: past this, every other one
+/// is dropped and half as many are kept from then on, so the samples span the whole round.
 const LATENCY_SAMPLES: usize = 1024;
 
 /// Probing stops this long after the last write is applied.
@@ -44,9 +45,12 @@ pub(super) struct Placement {
     pub(super) awaiting: BTreeMap<NodeId, Vec<u64>>,
     /// Each member's latest round-trip table, from its probes, and when it arrived.
     pub(super) tables: BTreeMap<NodeId, (Vec<(NodeId, u64)>, Timestamp)>,
-    /// Commit latencies of this replica's own entries since the last probe round, at most
-    /// `LATENCY_SAMPLES` of them.
+    /// Commit latencies of this replica's own entries since the last probe round: one in
+    /// `latency_stride` of them, at most `LATENCY_SAMPLES`.
     pub(super) latencies: Vec<u64>,
+    /// Own commits this round, and how many of them make one sample.
+    pub(super) latency_seen: u64,
+    pub(super) latency_stride: u64,
     /// Each member's 90th-percentile commit latency of its own entries over its last probe
     /// round, from its probes, and when it arrived.
     pub(super) observed: BTreeMap<NodeId, (u64, Timestamp)>,
@@ -156,8 +160,23 @@ impl Replica {
 
     /// Keeps an own entry's commit latency for this round's percentile.
     pub(super) fn note_commit_latency(&mut self, ns: u64) {
-        if self.cfg.placement && self.placement.latencies.len() < LATENCY_SAMPLES {
-            self.placement.latencies.push(ns);
+        if !self.cfg.placement {
+            return;
+        }
+        let p = &mut self.placement;
+        let stride = p.latency_stride.max(1);
+        p.latency_seen += 1;
+        if !(p.latency_seen - 1).is_multiple_of(stride) {
+            return;
+        }
+        p.latencies.push(ns);
+        if p.latencies.len() >= LATENCY_SAMPLES {
+            let mut i = 0;
+            p.latencies.retain(|_| {
+                i += 1;
+                i % 2 == 1
+            });
+            p.latency_stride = stride * 2;
         }
     }
 
@@ -181,10 +200,13 @@ impl Replica {
         // The tail, not the average: a leader starved of CPU commits most entries quickly
         // and stalls the rest for a scheduler period.
         let mut l = core::mem::take(&mut self.placement.latencies);
-        if !l.is_empty() {
+        (self.placement.latency_seen, self.placement.latency_stride) = (0, 1);
+        // A round without own commits measures nothing: an older tail would be reported, and
+        // counted under whoever leads now, as if fresh.
+        self.placement.tail = (!l.is_empty()).then(|| {
             l.sort_unstable();
-            self.placement.tail = Some(l[(l.len() - 1) * 9 / 10]);
-        }
+            l[(l.len() - 1) * 9 / 10]
+        });
         self.close_round();
         let members = self.schedule.members(Slot(self.committed)).to_vec();
         // Members of earlier epochs are no longer measured or ranked.

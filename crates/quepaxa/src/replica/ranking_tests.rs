@@ -709,7 +709,7 @@ fn round_trips_within_a_datacenter_never_move_the_leader() {
 #[test]
 fn the_writers_tail_is_sampled_under_the_leader_in_force() {
     let mut r = leader(1, &[0, 1, 2]);
-    r.placement.tail = Some(4 * MS);
+    r.note_commit_latency(4 * MS);
     r.placement.observed.insert(NodeId(0), (6 * MS, Timestamp(3 * PROBE_INTERVAL)));
     r.placement.observed.insert(NodeId(2), (8 * MS, Timestamp(3 * PROBE_INTERVAL)));
     round(&mut r, 3 * PROBE_INTERVAL, &rows(&LAN), &ALL);

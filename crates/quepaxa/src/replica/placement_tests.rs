@@ -296,3 +296,44 @@ fn a_reply_to_another_incarnations_probe_is_ignored() {
     assert_eq!(r.fresh_rtt(NodeId(1)), None);
     assert_eq!(r.placement.awaiting[&NodeId(1)], [MS], "the probe still awaits its own reply");
 }
+
+/// One probe round at `t` after `latencies` own commits (ns); the tail it reports.
+fn round_with(r: &mut Replica, t: u64, latencies: &[u64]) -> Option<u64> {
+    for &ns in latencies {
+        r.note_commit_latency(ns);
+    }
+    r.now = Timestamp(t);
+    r.placement.last_write = Some(r.now);
+    r.placement.next_probe = Some(r.now);
+    r.fire_probe();
+    r.placement.tail
+}
+
+#[test]
+fn a_round_without_own_commits_reports_no_tail() {
+    let mut r = placed(0);
+    assert_eq!(round_with(&mut r, PROBE_INTERVAL, &[2 * MS; 10]), Some(2 * MS));
+    assert_eq!(round_with(&mut r, 2 * PROBE_INTERVAL, &[]), None, "an older tail is not fresh");
+}
+
+#[test]
+fn the_tail_spans_the_whole_round_however_many_commits() {
+    // 1,024 fast commits, then 2,000 slow ones: most of the round was slow.
+    let mut r = placed(0);
+    let mut l = alloc::vec![MS; 1024];
+    l.extend(core::iter::repeat_n(10 * MS, 2000));
+    assert_eq!(round_with(&mut r, PROBE_INTERVAL, &l), Some(10 * MS));
+    assert!(
+        r.placement.latencies.is_empty() && r.placement.latency_stride == 1,
+        "the next round starts over"
+    );
+}
+
+#[test]
+fn a_tenure_starts_when_the_replica_starts_not_at_the_clocks_epoch() {
+    let mut cfg = Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    cfg.placement = true;
+    let start = Timestamp(1_000 * PROBE_INTERVAL);
+    let r = Replica::new(cfg, [], start).unwrap();
+    assert_eq!(r.placement.led_since, start);
+}
