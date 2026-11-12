@@ -89,7 +89,7 @@ impl Replica {
         if let Some(a) = self.proposers.remove(&slot)
             && self.batches.get(&a.batch).is_some_and(|b| b.key != proposal.key)
         {
-            self.lost_slot(a.batch);
+            self.lost_slot(a.batch, proposal.key.origin, a.started);
         }
         if broadcast {
             // Everyone in the current or a pending epoch: joining replicas catch up early.

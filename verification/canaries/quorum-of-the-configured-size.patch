@@ -1,7 +1,7 @@
 diff --git a/crates/quepaxa/src/proposer.rs b/crates/quepaxa/src/proposer.rs
 --- a/crates/quepaxa/src/proposer.rs
 +++ b/crates/quepaxa/src/proposer.rs
-@@ -67,6 +67,11 @@
+@@ -68,6 +68,11 @@
          s
      }
 
@@ -16,13 +16,13 @@ diff --git a/crates/quepaxa/src/proposer.rs b/crates/quepaxa/src/proposer.rs
 diff --git a/crates/quepaxa/src/replica/proposing.rs b/crates/quepaxa/src/replica/proposing.rs
 --- a/crates/quepaxa/src/replica/proposing.rs
 +++ b/crates/quepaxa/src/replica/proposing.rs
-@@ -296,7 +296,8 @@
+@@ -301,7 +301,8 @@
          }
          // The slot's epoch is fixed: it was decided at least `LAG` slots before any slot we drive.
          let recorders = self.schedule.members(slot).to_vec();
 -        let prop = SlotProposer::new(recorders, leader, proposal, &mut self.rng);
 +        let prop = SlotProposer::new(recorders, leader, proposal, &mut self.rng)
 +            .with_quorum(self.cfg.members.len() / 2 + 1);
-         self.proposers.insert(slot, Active { prop, batch: seq, resend_at: self.now });
+         self.proposers.insert(slot, Active { prop, batch: seq, resend_at: self.now, started: self.now });
          self.send_requests(slot, false);
      }

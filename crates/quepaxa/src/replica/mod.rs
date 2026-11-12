@@ -46,6 +46,8 @@ struct Active {
     prop: SlotProposer,
     batch: u64,
     resend_at: Timestamp,
+    /// When this replica started proposing in the slot.
+    started: Timestamp,
 }
 
 /// A batch this replica proposes, in at most one slot at a time until it is decided.
@@ -644,6 +646,7 @@ impl Replica {
         if self.all_stuck_at().is_some_and(|s| s <= self.now) {
             self.watch.resumed = self.now;
         }
+        self.watch.wrote = self.now;
         while let Some(&(p, at)) = self.watch.unpersisted.front()
             && p <= id.0
         {

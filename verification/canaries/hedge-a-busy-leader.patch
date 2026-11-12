@@ -1,12 +1,12 @@
 diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
 --- a/crates/quepaxa/src/replica/watch.rs
 +++ b/crates/quepaxa/src/replica/watch.rs
-@@ -291,7 +291,7 @@
+@@ -306,7 +306,7 @@
      pub(super) fn late_at(&self, at: Timestamp) -> Option<Timestamp> {
          let d = self.hedge_delay();
          let busy = d.saturating_mul(4).min(self.cfg.hedge_max).max(d);
 -        let late = at.max(self.watch.resumed).after(if self.watch.progressed > at { busy } else { d });
 +        let late = at.max(self.watch.resumed).after(if self.watch.progressed > at { busy.min(d) } else { d });
-         let held = !self.watch.aside && self.all_stuck_at().is_some_and(|s| s <= late);
+         let held = !self.watch.aside && self.all_stuck_at().is_some_and(|s| s <= late.min(self.now));
          (!held).then_some(late)
      }

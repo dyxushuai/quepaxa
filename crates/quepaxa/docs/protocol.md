@@ -65,11 +65,15 @@ What the paper leaves open, the crate fixes as follows (the repository's
   and the leader's unfinished slots are taken over as soon. Hearing from it ends the
   suspicion. A leader whose own disk is stuck (a write waiting four hedge delays, while
   others still decide slots) steps aside the same way: it hands its entries to the next
-  member and stops acknowledging forwards until its disk catches up. A follower whose own
-  disk is stuck while nobody decides (a write waiting a hedge delay: every disk may be
-  stuck, one shared disk) does not hedge, and counts the delay again from when its disk
-  catches up: a hedge could not be decided sooner, and would contend with the leader's
-  slots, off its fast path, the moment the disks resume.
+  member and stops acknowledging forwards until its disk catches up; once it decides
+  slots of its own again, the next member hands back what it was given rather than lose
+  slot after slot to it. A follower whose own
+  disk is stuck while nobody decides (a write in flight and none completed for a hedge
+  delay: every disk may be stuck, one shared disk) does not hedge, and counts the delay
+  again from when its disk catches up: a hedge could not be decided sooner, and would
+  contend with the leader's slots, off its fast path, the moment the disks resume. A disk
+  that keeps completing writes is slow, not stuck, and does not hold hedges; nor does
+  one that would be stuck by the time a hedge is due, until it is.
 - **Durability.** Recorder state is written before any reply that reports it leaves.
 - **Snapshots, catch-up, membership.** See the other chapters.
 

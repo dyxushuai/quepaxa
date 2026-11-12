@@ -290,9 +290,10 @@ fn a_leader_on_a_slow_machine_commits_slower() {
 
 #[test]
 fn no_slow_machine_leaves_the_schedule_unchanged() {
-    // Hashes recorded before slow machines existed: the default configuration must not
-    // draw from the random stream or reorder events differently.
-    for (n, seed, hash) in [(3, 7, 0xe3c6_f575_7bda_3544_u64), (5, 3, 0x2e06_6063_127e_031b)] {
+    // The default configuration must not draw from the random stream or reorder events
+    // differently because slow machines exist. A change to how replicas behave changes these
+    // hashes too: re-record them then, from a run without slow machines.
+    for (n, seed, hash) in [(3, 7, 0xe90c_51e0_831c_92d5_u64), (5, 3, 0x474b_4c55_d031_41e8)] {
         let r = Sim::new(SimConfig::hostile(n, seed)).run().unwrap();
         assert_eq!(r.trace_hash, hash, "{n} replicas, seed {seed}");
     }
