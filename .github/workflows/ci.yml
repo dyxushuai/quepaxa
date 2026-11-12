@@ -210,9 +210,12 @@ jobs:
         run: cargo ndk -t arm64-v8a -t x86_64 --platform 24 build --release -p quepaxa-ffi
       - name: Build the FFI test binary and the C smoke test for the emulator
         run: |
-          cargo ndk -t x86_64 --platform 24 test -p quepaxa-ffi --test c_abi --no-run
-          find target/x86_64-linux-android/debug/deps -maxdepth 1 -type f -executable -name 'c_abi-*' | head -1 > test-binary.txt
-          test -s test-binary.txt && cat test-binary.txt
+          # The path cargo reports, not a guess at its directory layout (which changes).
+          cargo ndk -t x86_64 --platform 24 test -p quepaxa-ffi --test c_abi --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "c_abi" and .executable != null) | .executable' \
+            > test-binary.txt
+          test -s test-binary.txt
+          cat test-binary.txt
           cc="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang"
           "$cc" -std=c11 -Wall -Wextra -Werror -I crates/quepaxa-ffi/include crates/quepaxa-ffi/examples/smoke.c \
             target/x86_64-linux-android/release/libquepaxa_ffi.a -lm -ldl -o smoke-android
