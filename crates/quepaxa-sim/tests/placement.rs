@@ -108,12 +108,15 @@ fn a_leader_with_a_slow_disk_is_moved_back_at_most_once() {
             placement: Some((SUSTAIN_MS, HOLD_MS)),
             disk_slow: Some((vec![US_EAST_REPLICA], 30_000, 90_000)),
             slow_persist_ms: 3_000,
+            track_leader: true,
             ..SimConfig::hostile(5, seed)
         };
         let r = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
         let aside: u64 = r.metrics.iter().map(|m| m.stepped_aside).sum();
         println!("seed {seed}: order {:?}, moves {}, stepped aside {aside}", r.final_order, moves(&r));
-        assert!(aside > 0, "seed {seed}: the slow disk made the leader step aside");
+        // Stepping aside or miss-based rotation, whichever comes first, takes the lead off it.
+        let demoted = r.leader_timeline.iter().any(|&(at, l)| at > 30_000 && l != US_EAST_REPLICA);
+        assert!(demoted, "seed {seed}: the slow disk cost us-east the lead: {:?}", r.leader_timeline);
         assert!(moves(&r) <= 2, "seed {seed}: placed once, restored at most once: {}", moves(&r));
     }
 }
