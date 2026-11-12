@@ -213,7 +213,9 @@ jobs:
           cargo ndk -t x86_64 --platform 24 test -p quepaxa-ffi --test c_abi --no-run
           # Anywhere under the profile directory: cargo moved test binaries from deps/ to
           # build/<crate>/<hash>/out/ (cargo-ndk does not pass --message-format through).
-          find target/x86_64-linux-android/debug -type f -executable -name 'c_abi-*' | head -1 > test-binary.txt
+          # The newest: a restored cache may hold older builds.
+          find target/x86_64-linux-android/debug -type f -executable -name 'c_abi-*' -printf '%T@ %p\n' \
+            | sort -n | tail -1 | cut -d' ' -f2- > test-binary.txt
           test -s test-binary.txt
           cat test-binary.txt
           cc="$ANDROID_NDK_LATEST_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android24-clang"
