@@ -6,7 +6,7 @@ use super::*;
 const MS: u64 = 1_000_000;
 
 /// Entries `r` handed to `leader` among `out`.
-fn forwards_to(out: &[Action], leader: u32) -> usize {
+pub(super) fn forwards_to(out: &[Action], leader: u32) -> usize {
     out.iter()
         .filter(|a| match a {
             Action::Send(o) => {

@@ -723,6 +723,8 @@ impl Replica {
 #[cfg(test)]
 mod placement_tests;
 #[cfg(test)]
+mod proposing_tests;
+#[cfg(test)]
 mod ranking_tests;
 #[cfg(test)]
 mod tests;

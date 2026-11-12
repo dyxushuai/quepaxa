@@ -36,7 +36,6 @@ crates/quepaxa/src/replica/messages.rs: replace + with * in Replica::pump
 crates/quepaxa/src/replica/proposing.rs: replace / with * in Replica::hedge_delay
 crates/quepaxa/src/replica/proposing.rs: replace < with <= in Replica::drive
 crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::forward_pending
-crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::cut_batch
 crates/quepaxa/src/replica/proposing.rs: replace < with <= in Replica::alloc_slot
 crates/quepaxa/src/replica/proposing.rs: replace + with * in Replica::alloc_slot
 crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::start
@@ -52,19 +51,15 @@ crates/quepaxa/src/replica/snapshot.rs: replace > with >= in Replica::install_sn
 
 # Leader-side flow control: bounds memory under a flood of forwards; a larger or smaller
 # cap changes only when followers hedge instead.
-crates/quepaxa/src/replica/proposing.rs: replace * with + in Replica::on_forward
-crates/quepaxa/src/replica/proposing.rs: replace * with / in Replica::on_forward
 crates/quepaxa/src/replica/proposing.rs: replace || with && in Replica::on_forward
-crates/quepaxa/src/replica/proposing.rs: replace + with * in Replica::on_forward
-crates/quepaxa/src/replica/proposing.rs: replace > with == in Replica::on_forward
-crates/quepaxa/src/replica/proposing.rs: replace > with >= in Replica::on_forward
 
-# Counters for observability on rare paths (a split forward, a reply that fails to resolve,
-# what counts as a fast-path decision).
-crates/quepaxa/src/replica/proposing.rs: replace += with -= in Replica::forward_pending
-crates/quepaxa/src/replica/proposing.rs: replace += with *= in Replica::forward_pending
-crates/quepaxa/src/replica/proposing.rs: replace += with *= in Replica::on_reply
-crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::on_reply
+# Equivalent: drive forwards every pending entry before it cuts a batch unless it proposes
+# directly, so a follower finds `pending` empty (the early break and cut_batch's own-entries
+# test); a started slot stays in `proposers` until decided, so free_slot skips it whether
+# next_alloc points at it or past it.
+crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::drive
+crates/quepaxa/src/replica/proposing.rs: replace + with * in Replica::drive
+crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::cut_batch
 
 # Asking a member that already reported exactly the epoch's first slot again only sends one
 # more probe; retirement waits for the same majority either way.
