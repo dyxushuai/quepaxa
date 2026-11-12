@@ -126,7 +126,9 @@ impl Replica {
             return;
         }
         self.check_aside();
-        if !self.proposes_directly() {
+        // Fixed for this call: starting slots changes neither suspicions nor the disk.
+        let direct = self.proposes_directly();
+        if !direct {
             self.forward_pending();
         }
         // Batches whose entries all committed elsewhere are dead weight.
@@ -136,16 +138,25 @@ impl Replica {
         // Hedging around a target that still talks: one slot at a time, or the hedges contend
         // with its slots and stretch a slowdown they were meant to cover. Entries other
         // followers handed here (as their deputy) are not hedges.
-        let deputy = self.relayed.iter().any(|i| i.entry.origin != self.me)
-            || self.batches.values().any(|b| b.entries.iter().any(|&(o, _, _)| o != self.me));
-        let cap = if self.proposes_directly() || deputy { self.window() } else { 1 };
+        let deputy = || {
+            self.relayed.iter().any(|i| i.entry.origin != self.me)
+                || self.batches.values().any(|b| b.entries.iter().any(|&(o, _, _)| o != self.me))
+        };
+        let cap = if direct || deputy() { self.window() } else { 1 };
         while (self.proposers.len() as u64) < cap {
+            let waiting = self.batches.iter().find(|(_, b)| b.slot.is_none() && !b.entries.is_empty());
+            // Nothing to propose: skip the search for a slot, which probes the log per slot
+            // and ran on every input.
+            if waiting.is_none() && self.relayed.is_empty() && !(direct && !self.pending.is_empty()) {
+                break;
+            }
+            let waiting = waiting.map(|(seq, _)| *seq);
             // A batch is cut only for a slot it can take: one cut and left waiting would be
             // proposed later in someone else's slots.
             let Some(slot) = self.free_slot() else { break };
-            let seq = match self.batches.iter().find(|(_, b)| b.slot.is_none() && !b.entries.is_empty()) {
-                Some((seq, _)) => *seq,
-                None => match self.cut_batch() {
+            let seq = match waiting {
+                Some(seq) => seq,
+                None => match self.cut_batch(direct) {
                     Some(seq) => seq,
                     None => break,
                 },
@@ -228,8 +239,7 @@ impl Replica {
 
     /// Cuts the next batch: relayed entries always, own pending ones only when proposing them
     /// directly.
-    fn cut_batch(&mut self) -> Option<u64> {
-        let lead = self.proposes_directly();
+    fn cut_batch(&mut self, lead: bool) -> Option<u64> {
         let mut entries = batch::Builder::new(self.cfg.max_batch_bytes as usize);
         loop {
             let queue = if !self.relayed.is_empty() {
