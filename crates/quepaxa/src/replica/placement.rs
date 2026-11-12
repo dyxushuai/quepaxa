@@ -82,18 +82,23 @@ pub(super) struct Placement {
     pub(super) moving: Option<ProposalId>,
 }
 
-/// Per-round samples (microseconds): count, sum, sum of squares, and the latest round.
+/// Per-round samples (microseconds): count, sum, sum of squares, and the first and latest
+/// rounds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "model", derive(Hash))]
 pub(super) struct Led {
     pub(super) count: u64,
     pub(super) sum: u128,
     pub(super) sum_sq: u128,
+    pub(super) since: Timestamp,
     pub(super) at: Timestamp,
 }
 
 impl Led {
     pub(super) fn add(&mut self, us: u64, at: Timestamp) {
+        if self.count == 0 {
+            self.since = at;
+        }
         self.count += 1;
         self.sum = self.sum.saturating_add(u128::from(us));
         self.sum_sq = self.sum_sq.saturating_add(u128::from(us) * u128::from(us));

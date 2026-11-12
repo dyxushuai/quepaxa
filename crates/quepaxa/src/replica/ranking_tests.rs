@@ -569,9 +569,11 @@ fn the_hold_ends_exactly_a_hold_after_the_last_order_change() {
 const LAN: [[u64; 3]; 3] = [[0, 2, 2], [2, 0, 2], [2, 2, 0]];
 const ALL: [(u32, u64); 3] = [(0, 10), (1, 10), (2, 10)];
 
-/// `rounds` samples of the writers' tail around `ms` (±1 ms) under `member`, latest at `at`.
+/// `rounds` samples of the writers' tail around `ms` (±1 ms) under `member`, over the
+/// sustained period up to `at`.
 fn led(r: &mut Replica, member: u32, ms: u64, rounds: u64, at: u64) {
     let mut l = Led::default();
+    l.add(ms * 1_000, Timestamp(at.saturating_sub(SUSTAIN)));
     for k in 0..rounds {
         l.add(ms * 1_000 + if k % 2 == 0 { 1_000 } else { 0 }, Timestamp(at));
     }
@@ -638,10 +640,25 @@ fn a_measured_member_is_skipped_until_its_measurement_goes_stale() {
     let t = 9 * HOLD;
     let mut r = leader(0, &[0, 1, 2]);
     led(&mut r, 0, 5, 20, t);
-    led(&mut r, 1, 5, 20, 0);
+    led(&mut r, 1, 5, 20, SUSTAIN);
     led(&mut r, 2, 5, 20, t);
     round(&mut r, t, &rows(&LAN), &ALL);
     assert_eq!(first(&r), Some(1));
+}
+
+#[test]
+fn a_tenure_cut_short_is_not_a_measurement() {
+    // 1 led for ten seconds only, and looked fast; 2 is measured. 1 is explored, not
+    // exploited.
+    let mut r = explored(9, &[(2, 7, SUSTAIN)]);
+    let mut l = Led::default();
+    for k in 0..20 {
+        l.add(1_000, Timestamp(SUSTAIN - 10 * PROBE_INTERVAL + k * PROBE_INTERVAL / 2));
+    }
+    r.placement.led.insert(NodeId(1), l);
+    r.placement.changed_at = Some(Timestamp(SUSTAIN));
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), Some(1), "explored, though within a hold");
 }
 
 #[test]

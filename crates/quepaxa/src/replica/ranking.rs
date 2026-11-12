@@ -129,9 +129,15 @@ impl Replica {
         // describe it.
         let demoted =
             |n: NodeId| p.excluded.get(&n).is_some_and(|e| e.until.after(hold.saturating_mul(4)) > now);
+        // Measured: samples over a whole sustained period (sampling starts two rounds into a
+        // tenure), as every explored tenure has. A tenure cut short, say a slow leader the
+        // round trips moved off at startup, saw only its first seconds, before its queue grew.
+        let sustain = self.cfg.placement_sustain;
         let measured = |n: NodeId| {
             p.led.get(&n).copied().filter(|l| {
-                l.count >= MIN_ROUNDS && now.0.saturating_sub(l.at.0) < hold.saturating_mul(STALE_HOLDS)
+                l.count >= MIN_ROUNDS
+                    && l.at.0.saturating_sub(l.since.0) + 2 * PROBE_INTERVAL >= sustain
+                    && now.0.saturating_sub(l.at.0) < hold.saturating_mul(STALE_HOLDS)
             })
         };
         let tied: Vec<usize> =
