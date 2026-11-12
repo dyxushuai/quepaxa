@@ -830,3 +830,22 @@ fn each_suspicion_is_counted_once() {
     let (r, _) = suspecting();
     assert_eq!(r.metrics().suspicions, 1);
 }
+
+#[test]
+fn the_usual_persist_latency_moves_by_an_eighth_of_each_sample() {
+    let mut r = replica_as(0);
+    let mut out = Vec::new();
+    r.watch.persist = Some(16 * MS);
+    r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    let last = out
+        .iter()
+        .filter_map(|a| match a {
+            Action::Persist { id, .. } => Some(*id),
+            _ => None,
+        })
+        .max()
+        .expect("the write is persisted");
+    r.handle(Timestamp(9 * MS), Input::Persisted(last)).unwrap();
+    assert_eq!(r.watch.persist, Some(16 * MS - 2 * MS + MS), "an 8 ms write");
+}

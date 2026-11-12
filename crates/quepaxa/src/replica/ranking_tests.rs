@@ -475,3 +475,87 @@ fn a_member_whose_table_went_stale_is_not_placed_first() {
     rounds(&mut r, t, SUSTAIN / PROBE_INTERVAL + 10, &silent, &all);
     assert_eq!(moved(&r).map(|o| o[0]), Some(1), "a stale member is never placed first");
 }
+
+#[test]
+fn a_leader_that_led_for_exactly_a_whole_hold_is_no_longer_excluded() {
+    let mut r = leader(0, &[0, 1, 2]);
+    r.placement.led_since = Timestamp(PROBE_INTERVAL);
+    let until = Timestamp(10 * HOLD);
+    r.placement.excluded.insert(NodeId(0), placement::Exclusion { until, factor: 4 });
+    r.now = Timestamp(PROBE_INTERVAL + HOLD - 1);
+    r.close_round();
+    assert!(r.placement.excluded.contains_key(&NodeId(0)), "not yet a whole hold");
+    r.now = Timestamp(PROBE_INTERVAL + HOLD);
+    r.close_round();
+    assert!(!r.placement.excluded.contains_key(&NodeId(0)));
+}
+
+#[test]
+fn a_snapshot_after_an_order_change_restarts_the_hold() {
+    let members = [NodeId(0), NodeId(1), NodeId(2)];
+    let target = placement::Target { member: NodeId(1), leader: NodeId(0), since: Timestamp(1) };
+    let install = |schedule: Schedule| {
+        let mut r = leader(0, &[0, 1, 2]);
+        r.placement.target = Some(target);
+        let state = CoreState { next: 10, leaders: members.to_vec(), schedule, dedup: Default::default() };
+        assert_eq!(r.install_snapshot(Timestamp(PROBE_INTERVAL), Slot(9), state.encode()), Ok(true));
+        (r.placement.changed_at, r.placement.target)
+    };
+    let mut changed = Schedule::with_order(members.to_vec());
+    changed.reconfigure(Slot(0), 0, alloc::vec![NodeId(1), NodeId(0), NodeId(2)]).unwrap();
+    assert_eq!(install(changed), (Some(Timestamp(PROBE_INTERVAL)), None));
+    assert_eq!(install(Schedule::with_order(members.to_vec())), (None, Some(target)), "nothing changed");
+}
+
+#[test]
+fn round_trips_to_just_a_majority_rank_a_candidate() {
+    // Member 1 knows no round trip to 2: with itself and 0 it still has a majority.
+    let mut r = leader(0, &[0, 1, 2]);
+    let m = [[0, 100, 100], [100, 0, UNKNOWN], [100, UNKNOWN, 0]];
+    rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&m), &[(1, 10)]);
+    assert_eq!(moved(&r), Some(alloc::vec![1, 0, 2]));
+}
+
+#[test]
+fn rounds_two_probe_intervals_apart_still_add_up() {
+    let writes = [(0, 10), (1, 10)];
+    let mut r = leader(0, &[0, 1, 2]);
+    let mut t = PROBE_INTERVAL;
+    for _ in 0..=SUSTAIN / (2 * PROBE_INTERVAL) {
+        round(&mut r, t, &rows(&three(50)), &writes);
+        t += 2 * PROBE_INTERVAL;
+    }
+    assert_eq!(moved(&r).map(|o| o[0]), Some(1));
+}
+
+#[test]
+fn writes_exactly_at_the_floor_move_the_leader() {
+    // One write a round converges to a rate of exactly the floor.
+    let mut r = leader(0, &[0, 1, 2]);
+    rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 20, &rows(&three(50)), &[(1, 1)]);
+    assert_eq!(r.placement.rates.values().sum::<u64>(), 8);
+    assert_eq!(moved(&r).map(|o| o[0]), Some(1));
+}
+
+#[test]
+fn an_exclusion_ends_at_its_deadline() {
+    // Member 1 is excluded until the first round only: the period starts with it.
+    let writes = [(0, 10), (1, 10)];
+    let mut r = leader(0, &[0, 1, 2]);
+    let until = Timestamp(PROBE_INTERVAL);
+    r.placement.excluded.insert(NodeId(1), placement::Exclusion { until, factor: 1 });
+    rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
+    assert_eq!(moved(&r).map(|o| o[0]), Some(1));
+}
+
+#[test]
+fn the_hold_ends_exactly_a_hold_after_the_last_order_change() {
+    let writes = [(0, 10), (1, 10)];
+    let mut r = leader(0, &[0, 1, 2]);
+    r.placement.changed_at = Some(Timestamp(PROBE_INTERVAL));
+    let t = rounds(&mut r, PROBE_INTERVAL, HOLD / PROBE_INTERVAL, &rows(&three(50)), &writes);
+    assert_eq!(moved(&r), None, "within the hold");
+    assert_eq!(t, PROBE_INTERVAL + HOLD);
+    round(&mut r, t, &rows(&three(50)), &writes);
+    assert_eq!(moved(&r).map(|o| o[0]), Some(1));
+}
