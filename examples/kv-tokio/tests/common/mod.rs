@@ -2,28 +2,51 @@
 
 #![allow(dead_code)] // each test uses a different part
 
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
-/// `n` distinct free ports: all are held at once, so none repeats, then released for the
-/// children to bind.
-fn free_ports(n: usize) -> Vec<u16> {
-    let held: Vec<TcpListener> = (0..n).map(|_| TcpListener::bind("127.0.0.1:0").unwrap()).collect();
-    held.iter().map(|l| l.local_addr().unwrap().port()).collect()
+/// Ports handed to replicas come from below the OS ephemeral range (Linux 32768–60999,
+/// macOS 49152–65535), so no outgoing connection, here or in a parallel test, is given one
+/// as its local port while a replica is starting or down.
+const PORTS: std::ops::Range<u16> = 20_000..32_768;
+
+/// `n` ports that no other cluster, in this or a parallel test process, will use while the
+/// returned locks are held. A port's lock file is held for the cluster's lifetime, so a
+/// killed replica can restart on the same port; the OS drops it if the test process dies.
+fn reserve_ports(n: usize) -> (Vec<u16>, Vec<File>) {
+    let dir = std::env::temp_dir().join("kv-tokio-ports");
+    std::fs::create_dir_all(&dir).unwrap();
+    let span = PORTS.end - PORTS.start;
+    let first = (std::process::id() % u32::from(span)) as u16;
+    let (mut ports, mut locks) = (Vec::new(), Vec::new());
+    for k in 0..span {
+        let port = PORTS.start + (first + k) % span;
+        let lock = File::create(dir.join(port.to_string())).unwrap();
+        // The bind skips a port some unrelated process is using.
+        if lock.try_lock().is_ok() && TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            ports.push(port);
+            locks.push(lock);
+            if ports.len() == n {
+                return (ports, locks);
+            }
+        }
+    }
+    panic!("fewer than {n} ports free in {PORTS:?}");
 }
 
 pub struct Cluster {
     peers: Vec<u16>,
     clients: Vec<u16>,
     /// Where each replica serves etcd's v3 KV gRPC API; empty unless asked for
-    /// ([`Cluster::with_etcd`]), since every extra port is another chance that a parallel
-    /// test takes it between `free_ports` and the child's bind.
+    /// ([`Cluster::with_etcd`]).
     pub etcd: Vec<u16>,
     /// The first `members` replicas are configured; the others may join later.
     members: usize,
     dir: std::path::PathBuf,
+    _ports: Vec<File>,
     nodes: Vec<Option<Child>>,
 }
 
@@ -47,11 +70,12 @@ impl Cluster {
     fn build(n: usize, members: usize, etcd: bool) -> Self {
         let dir = std::env::temp_dir().join(format!("kv-tokio-cluster-{}-{n}-{members}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let mut ports = free_ports(if etcd { 3 * n } else { 2 * n });
+        let (mut ports, locks) = reserve_ports(if etcd { 3 * n } else { 2 * n });
         let etcd = ports.split_off(2 * n);
         let clients = ports.split_off(n);
         let peers = ports;
-        let mut c = Self { peers, clients, etcd, members, dir, nodes: (0..n).map(|_| None).collect() };
+        let mut c =
+            Self { peers, clients, etcd, members, dir, _ports: locks, nodes: (0..n).map(|_| None).collect() };
         for i in 0..n {
             c.start(i);
         }
