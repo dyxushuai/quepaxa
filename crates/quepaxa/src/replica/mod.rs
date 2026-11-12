@@ -454,13 +454,12 @@ impl Replica {
         let order = if !leader_order.is_empty() {
             leader_order
         } else if self.cfg.placement {
-            // Placement owns the order: members that stay keep theirs (as last scheduled, a
-            // rotation not yet in force included), new ones go last.
+            // Placement owns the order: members that stay are ranked by cost (as last
+            // scheduled for ties and for those without one, a rotation not yet in force
+            // included), so the change itself puts the best-placed member first; new ones,
+            // never measured, go last.
             let in_force = self.schedule.member_sets_from(Slot(self.committed)).last().unwrap_or_default();
-            let staying = in_force.iter().copied().filter(|n| by_id.contains(n));
-            let mut order: Vec<NodeId> = staying.collect();
-            order.extend(by_id.iter().copied().filter(|n| !in_force.contains(n)));
-            order
+            self.placed_order(in_force, &by_id)
         } else {
             by_id.clone()
         };

@@ -1,8 +1,9 @@
 diff --git a/crates/quepaxa/src/replica/ranking.rs b/crates/quepaxa/src/replica/ranking.rs
+index 040bcd4..94bcc61 100644
 --- a/crates/quepaxa/src/replica/ranking.rs
 +++ b/crates/quepaxa/src/replica/ranking.rs
-@@ -169,7 +169,7 @@ impl Replica {
-         let Some(target) = target else { return };
+@@ -311,7 +311,7 @@ impl Replica {
+         };
          let held =
              self.placement.changed_at.is_some_and(|t| now.0.saturating_sub(t.0) < self.cfg.placement_hold);
 -        if now.0.saturating_sub(target.since.0) < self.cfg.placement_sustain || held {

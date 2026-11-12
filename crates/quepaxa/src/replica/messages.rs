@@ -175,8 +175,8 @@ impl Replica {
                     Body::ReadReply { incarnation, round, high } => {
                         self.on_read_reply(from, incarnation, round, high)
                     }
-                    Body::RttProbe { incarnation, sent, table } => {
-                        self.on_rtt_probe(from, incarnation, sent, table)
+                    Body::RttProbe { incarnation, sent, commit, table } => {
+                        self.on_rtt_probe(from, incarnation, sent, commit, table)
                     }
                     Body::RttReply { incarnation, sent } => self.on_rtt_reply(from, incarnation, sent),
                 }

@@ -57,6 +57,7 @@ fn arb_body() -> impl Strategy<Value = Body> {
             Body::RttProbe {
                 incarnation: 1,
                 sent,
+                commit: sent / 3,
                 table: rows.into_iter().map(|(n, rtt)| (NodeId(n), rtt)).collect(),
             }
         }),

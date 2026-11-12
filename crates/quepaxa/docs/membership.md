@@ -114,5 +114,4 @@ reports `Retired` (its `tests/membership.rs` replaces a member end to end).
 change entry and would keep the old majorities. Propose changes only once every replica
 runs 0.3 or later.
 
-Not supported: witnesses (members that vote but keep no log) and automatic, latency-based
-leader tuning.
+Not supported: witnesses (members that vote but keep no log).
