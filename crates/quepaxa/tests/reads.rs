@@ -57,24 +57,30 @@ impl Net {
     }
 
     fn deliver(&mut self, down: &[usize]) {
+        self.deliver_unless(|_, to| down.contains(&to));
+    }
+
+    /// Delivers until quiet, losing the messages `lost(from, to)` names.
+    fn deliver_unless(&mut self, lost: impl Fn(usize, usize) -> bool) {
         let mut queue = std::collections::VecDeque::new();
         loop {
             for (i, r) in self.rs.iter_mut().enumerate() {
                 for a in drain(r) {
                     match a {
-                        Action::Send(o) => queue.push_back((o.to.0 as usize, Input::Message(o.bytes))),
+                        Action::Send(o) => queue.push_back((i, o.to.0 as usize, Input::Message(o.bytes))),
                         Action::Persist { id, then, .. } => {
                             self.persists += 1;
-                            queue
-                                .extend(then.into_iter().map(|o| (o.to.0 as usize, Input::Message(o.bytes))));
-                            queue.push_back((i, Input::Persisted(id)));
+                            queue.extend(
+                                then.into_iter().map(|o| (i, o.to.0 as usize, Input::Message(o.bytes))),
+                            );
+                            queue.push_back((i, i, Input::Persisted(id)));
                         }
                         other => self.seen.push((i, other)),
                     }
                 }
             }
-            let Some((to, input)) = queue.pop_front() else { return };
-            if down.contains(&to) && !matches!(input, Input::Persisted(_)) {
+            let Some((from, to, input)) = queue.pop_front() else { return };
+            if lost(from, to) && !matches!(input, Input::Persisted(_)) {
                 continue;
             }
             self.rs[to].handle(self.now, input).unwrap();
@@ -229,4 +235,31 @@ fn a_read_spanning_a_pending_change_needs_a_majority_of_both_member_sets() {
     assert_eq!(net.ready(0, read), None);
     net.run(&[1]);
     assert!(net.ready(0, read).is_some());
+}
+
+#[test]
+fn a_reader_outside_the_membership_catches_up_to_its_mark_unprompted() {
+    // Replica 3 is no member: nobody sends it decisions. A write is recorded at the leader
+    // only, so the read's answers carry the commit index replica 3 already has and a mark
+    // one past it. Once that slot is decided nothing tells replica 3 of it; it has to ask.
+    let mut net = Net::new(4);
+    net.write(0, &[]);
+    let first = net.rs[3].read_barrier(net.now).unwrap();
+    net.run(&[]);
+    assert!(net.ready(3, first).is_some());
+    let caught = net.rs[3].commit_index();
+    assert_eq!(caught, net.rs[0].commit_index());
+    net.rs[0].propose(net.now, Bytes::from_static(b"in flight")).unwrap();
+    net.deliver_unless(|from, to| from == 0 && to != 3 || to == 0 && from != 3);
+    let read = net.rs[3].read_barrier(net.now).unwrap();
+    net.deliver_unless(|from, to| from == 0 && to != 3 || to == 0 && from != 3);
+    assert_eq!(net.ready(3, read), None, "it waits for the slot in flight");
+    // The members decide the slot; replica 3 hears nothing from them unless it asks.
+    let start = net.now;
+    net.run(&[]);
+    assert!(net.rs[0].commit_index() > caught, "the slot in flight was decided");
+    let (_, slot) = net.ready(3, read).expect("the read is ready");
+    assert!(slot.0 >= caught && net.rs[3].commit_index() > caught);
+    let waited = net.now.0 - start.0;
+    assert!(waited < 1_000_000_000, "ready {waited} ns after the slot could be learned");
 }

@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
+--- a/crates/quepaxa/src/replica/mod.rs
++++ b/crates/quepaxa/src/replica/mod.rs
+@@ -468,6 +468,8 @@
+             return Err(Error::InvalidConfig("leader_order must list every member exactly once"));
+         }
+         self.check_no_change_pending()?;
++        let mut order = order;
++        order.truncate(self.schedule.members(Slot(self.committed)).len());
+         let change = crate::schedule::encode_change(self.schedule.generation(), &order);
+         self.enqueue(now, change, Kind::Reconfigure)
+     }

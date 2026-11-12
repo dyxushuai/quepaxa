@@ -199,6 +199,15 @@ impl Replica {
         }
     }
 
+    /// Outside the membership, nobody sends this replica decisions: once a majority answered
+    /// a mark past its prefix, the answerer with the highest mark to ask for the slots below
+    /// it. (A member learns them from its peers' traffic.)
+    pub(super) fn read_catch_up_from(&self) -> Option<NodeId> {
+        let round = self.reads.round.as_ref().filter(|_| self.outside())?;
+        let (peer, mark) = round.answers.iter().max_by_key(|(_, m)| **m)?;
+        (self.committed < *mark).then_some(*peer)
+    }
+
     /// Asks again the members that have not answered the round in flight.
     pub(super) fn resend_reads(&mut self) {
         let Some(round) = self.reads.round.as_mut().filter(|r| r.resend_at <= self.now) else { return };

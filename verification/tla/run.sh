@@ -3,7 +3,8 @@
 # - QuePaxa.tla, one slot: too large to exhaust, so TLC runs random behaviours (simulation
 #   mode) for TLA_SECONDS and must find no violation; so must QuePaxaProof.tla, the proof's
 #   inductive invariant on the same model (prove.sh checks the proof itself).
-# - Membership.tla, changes across slots, durability and retirement: checked exhaustively.
+# - Membership.tla, changes across slots (order-only ones and leader rotations included),
+#   durability and retirement: checked exhaustively.
 # - Reads.tla, linearizable reads on top of it: exhaustive with fixed membership, simulated
 #   across membership changes (too large to exhaust).
 # Then every seeded bug must be found (within TLA_BUG_SECONDS), so the check cannot
@@ -64,7 +65,7 @@ if runs quepaxa; then
     "$here/QuePaxa.tla" "$here/QuePaxaProof.tla" "$here/QuePaxaProof.cfg"
 fi
 
-runs membership && for cfg in Membership MembershipQuorum; do
+runs membership && for cfg in Membership MembershipQuorum MembershipOrder; do
   mkdir "$work/$cfg"
   cp "$here/Membership.tla" "$here/$cfg.cfg" "$work/$cfg/"
   out=$(tlc "$work/$cfg" "$membership_seconds" Membership -config "$cfg.cfg" 2>&1)
@@ -103,8 +104,10 @@ bugs=(
   QuePaxa QuePaxa "decide-on-any-aggregate" Agreement - 's/IF best = s\.p$/IF best # Nil/'
   QuePaxa QuePaxa "skip-phase3-adoption" Agreement - 's/next\(IF best = Nil THEN s\.p ELSE best\)/next(s.p)/'
   Membership Membership "window-one-slot-too-wide" ViewAgree - 's/    \/\\ s < Prefix\(log\[r\]\) \+ LAG$/    \/\\ s < Prefix(log[r]) + LAG + 1/'
-  Membership Membership "change-takes-effect-early" ViewAgree - 's/!\.from = t \+ LAG,/!.from = t + LAG - 1,/'
-  Membership Membership "stale-change-installs" FreshInstalls - 's/ \/\\ v\.b = act\.gen$//'
+  Membership Membership "change-takes-effect-early" ViewAgree - 's/from \|-> t \+ LAG, gen/from |-> t + LAG - 1, gen/'
+  Membership Membership "stale-change-installs" FreshInstalls - 's/ \/\\ val\[t\]\.b = st\.gen$//'
+  Membership MembershipOrder "rotation-keeps-the-generation" FreshInstalls - 's/gen \|-> IF rot THEN st\.gen \+ 1 ELSE st\.gen,/gen |-> st.gen,/'
+  Membership MembershipOrder "reorder-keeps-the-generation" FreshInstalls - 's/gen \|-> st\.gen \+ 1, quiet/gen |-> IF val[t].m = c THEN st.gen ELSE st.gen + 1, quiet/'
   Membership Membership "retire-on-own-progress" RecoverableFast - 's/       \/\\ 2 \* Cardinality\(caught\) > Cardinality\(st\.nxt\)/       \/\\ Prefix(log[r]) >= st.from/'
   Membership MembershipQuorum "retire-on-one-durable-copy" RecoverableFast - 's/       \/\\ 2 \* Cardinality\(caught\) > Cardinality\(st\.nxt\)/       \/\\ Cardinality(caught) > 0/'
   Membership Membership "retire-on-progress-in-memory" RecoverableFast - 's/caught == \{m \\in st\.nxt : Prefix\(dlog\[m\]\) >= st\.from\}/caught == {m \\in st.nxt : Prefix(log[m]) >= st.from}/'

@@ -606,6 +606,12 @@ impl Replica {
         Ok(())
     }
 
+    /// Not a member of the latest epoch this replica knows: joining, removed, or added back
+    /// by a change it has not learned yet.
+    fn outside(&self) -> bool {
+        !self.schedule.members(Slot(self.schedule.epoch().1)).contains(&self.me)
+    }
+
     fn window(&self) -> u64 {
         u64::from(self.cfg.max_in_flight_slots)
     }

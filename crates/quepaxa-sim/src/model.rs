@@ -157,10 +157,8 @@ struct State {
     warmup: BTreeSet<Bytes>,
     /// An entry committed in a deputy's batch (not part of the fingerprint: coverage only).
     deputy: bool,
-    /// Members of epoch 0 (replicas `0..members`; the others are spares).
-    members: usize,
-    /// Every applied epoch: first slot and members. All replicas must agree on them.
-    epochs: BTreeMap<u64, (u64, Vec<u32>)>,
+    /// The members of epoch 0 (the other replicas are spares) and every applied epoch.
+    epochs: crate::invariants::Epochs,
     /// The membership change to make (its members), and the proposal awaiting `Committed`
     /// and where (it is in no `Commit`).
     reconfigure: Option<Vec<NodeId>>,
@@ -185,6 +183,10 @@ enum Step {
         node: usize,
         keep: usize,
     },
+}
+
+fn ids(members: &[NodeId]) -> Vec<usize> {
+    members.iter().map(|m| m.0 as usize).collect()
 }
 
 fn config(n: usize, i: usize, starts: u64) -> Config {
@@ -398,7 +400,7 @@ impl State {
 
     fn crash(&mut self, node: usize, keep: usize) -> Result<(), String> {
         self.crashes -= 1;
-        self.history.forget(self.members, node);
+        self.history.forget(&self.epochs, node);
         let mut first = true;
         let mut kept = Vec::new();
         let mut replaced = None;
@@ -416,7 +418,7 @@ impl State {
             }
             _ => true,
         });
-        let total = self.members;
+        let total = self.epochs.initial.len();
         let n = &mut self.nodes[node];
         if let Some(records) = replaced {
             n.durable = records;
@@ -497,10 +499,8 @@ impl State {
                 Action::Dropped { id, reason: DropReason::Superseded }
                     if self.change == Some((i, id)) || self.rival_change == Some((i, id)) =>
                 {
-                    let have = self.epochs.values().next_back().map(|(_, m)| m.clone()).unwrap_or_default();
-                    let made = |m: &Option<Vec<NodeId>>| {
-                        m.as_ref().is_some_and(|m| m.iter().map(|n| n.0).collect::<Vec<_>>() == have)
-                    };
+                    let have = self.in_force();
+                    let made = |m: &Option<Vec<NodeId>>| m.as_ref().is_some_and(|m| ids(m) == have);
                     // The rival is never proposed again, so only the other change beats it;
                     // the change loses to the rival or to its own earlier copy.
                     let beaten = if self.rival_change == Some((i, id)) {
@@ -527,8 +527,8 @@ impl State {
                     acked_slot = Some(slot.0);
                 }
                 Action::Reconfigured { epoch, from, members } => {
-                    let members: Vec<u32> = members.iter().map(|m| m.0).collect();
-                    match self.epochs.get(&epoch) {
+                    let members = ids(&members);
+                    match self.epochs.applied.get(&epoch) {
                         Some(seen) if *seen != (from.0, members.clone()) => {
                             return Err(format!(
                                 "n{i} applied epoch {epoch} from {} as {members:?}; another replica: {seen:?}",
@@ -537,20 +537,31 @@ impl State {
                         }
                         Some(_) => {}
                         // Rivals share a base: once one applies, the other is stale.
-                        None if self.rival.is_some() && !self.epochs.is_empty() => {
+                        None if self.rival.is_some() && !self.epochs.applied.is_empty() => {
                             return Err(format!(
                                 "n{i} applied epoch {epoch} after {:?}: both rivals applied",
-                                self.epochs
+                                self.epochs.applied
                             ));
                         }
                         None => {
-                            if let Some((other, _)) = self.epochs.iter().find(|(_, (f, _))| *f == from.0) {
+                            // The members in force are exactly those some change asked for,
+                            // however many they are.
+                            let asked =
+                                |m: &Option<Vec<NodeId>>| m.as_ref().is_some_and(|m| ids(m) == members);
+                            if !asked(&self.reconfigure) && !asked(&self.rival) {
+                                return Err(format!(
+                                    "n{i} applied epoch {epoch} as {members:?}, which no change asked for"
+                                ));
+                            }
+                            if let Some((other, _)) =
+                                self.epochs.applied.iter().find(|(_, (f, _))| *f == from.0)
+                            {
                                 return Err(format!(
                                     "n{i} applied epoch {epoch} from {}, where another replica began epoch {other}",
                                     from.0
                                 ));
                             }
-                            self.epochs.insert(epoch, (from.0, members));
+                            self.epochs.applied.insert(epoch, (from.0, members));
                         }
                     }
                 }
@@ -590,7 +601,7 @@ impl State {
     /// Checks the protocol invariants on every replica, accumulating their evidence.
     fn observe(&mut self) -> Result<(), String> {
         let live: Vec<_> = self.nodes.iter().enumerate().map(|(i, n)| (i, n.replica.inspect())).collect();
-        self.history.observe(self.members, &live)
+        self.history.observe(&self.epochs, &live)
     }
 
     /// Every client write committed somewhere and acknowledged to its client, every read
@@ -605,7 +616,12 @@ impl State {
                 .all(|n| n.reads.is_empty() && n.proposed.keys().all(|id| n.acked.contains(id)))
             && self.change.is_none()
             && self.rival_change.is_none()
-            && (self.reconfigure.is_none() || !self.epochs.is_empty())
+            && (self.reconfigure.is_none() || !self.epochs.applied.is_empty())
+    }
+
+    /// The members of the latest applied epoch (none before the first change).
+    fn in_force(&self) -> Vec<usize> {
+        self.epochs.applied.values().next_back().map(|(_, m)| m.clone()).unwrap_or_default()
     }
 
     fn complete(&self) -> bool {
@@ -646,8 +662,7 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         link_delay: cfg.link_delay,
         warmup: BTreeSet::new(),
         deputy: false,
-        members: cfg.nodes,
-        epochs: BTreeMap::new(),
+        epochs: crate::invariants::Epochs { initial: (0..cfg.nodes).collect(), applied: BTreeMap::new() },
         reconfigure: None,
         change: None,
         rival: None,
@@ -701,7 +716,7 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
         report.hedged += usize::from(metrics().any(|m| m.hedged > 0));
         report.stepped_aside += usize::from(metrics().any(|m| m.stepped_aside > 0));
         report.deputy += usize::from(state.deputy);
-        report.reconfigured += usize::from(!state.epochs.is_empty());
+        report.reconfigured += usize::from(!state.epochs.applied.is_empty());
         if report.states >= cfg.max_states {
             report.exhausted = false;
             break;

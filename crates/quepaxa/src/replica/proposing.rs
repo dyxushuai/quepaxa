@@ -384,6 +384,13 @@ impl Replica {
                 self.metrics.catch_up_retries += 1;
                 self.request_catch_up(peer);
             }
+        } else if self.catch_up_due()
+            && let Some(peer) = self.read_catch_up_from()
+        {
+            // The answers' commit indexes may predate the slots their marks wait for, and the
+            // round's resend timer brings this back here until the read is ready.
+            self.metrics.catch_up_retries += 1;
+            self.request_catch_up(peer);
         }
         let stalled: Vec<Slot> = self.stalled().filter(|(_, at)| *at <= now).map(|(s, _)| s).collect();
         for slot in stalled {

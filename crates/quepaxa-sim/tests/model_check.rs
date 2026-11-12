@@ -193,6 +193,55 @@ fn replace_a_member(deviations: u32, crashes: u32) {
     assert!(report.reconfigured > 0, "{report:?}");
 }
 
+/// A spare joins the three members while a write commits, with a crash-restart anywhere:
+/// every replica applies the four members asked for in the same slot, and the spare catches
+/// up with the log. Nightly's extra deviation adds a partition, a loss or a reordering.
+#[test]
+fn a_cluster_grown_during_a_write_with_a_crash_is_agreed() {
+    let report = resize(1, vec![0, 1, 2, 3], deviations(0), 1);
+    assert!(report.complete > 0, "the spare caught up: {report:?}");
+}
+
+/// The same growth with any one deviation.
+#[test]
+fn a_cluster_grown_during_a_write_with_a_partition_is_agreed() {
+    let report = resize(1, vec![0, 1, 2, 3], deviations(1), 0);
+    assert!(report.complete > 0, "the spare caught up: {report:?}");
+}
+
+/// A member leaves the three while a write commits, with a crash-restart anywhere: every
+/// replica, the removed one included, applies the two members asked for in the same slot.
+#[test]
+fn a_cluster_shrunk_during_a_write_with_a_crash_is_agreed() {
+    resize(0, vec![0, 1], deviations(0), 1);
+}
+
+/// The same shrink with any one deviation.
+#[test]
+fn a_cluster_shrunk_during_a_write_with_a_partition_is_agreed() {
+    resize(0, vec![0, 1], deviations(1), 0);
+}
+
+fn resize(
+    spares: usize,
+    members: Vec<usize>,
+    deviations: u32,
+    crashes: u32,
+) -> quepaxa_sim::model::ModelReport {
+    let cfg = ModelConfig {
+        spares,
+        reconfigure: Some((1, members)),
+        max_depth: depth(200),
+        max_states: budget(2_000_000),
+        ..ModelConfig::new(vec![2], deviations, crashes)
+    };
+    let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
+    println!("{report:?}");
+    assert!(report.served > 0 && report.exhausted, "{report:?}");
+    assert!(report.reconfigured > 0, "{report:?}");
+    report
+}
+
 /// Only the leader order changes, during a write, with any one deviation: every replica
 /// applies the new order in the same slot and the write commits.
 #[test]
