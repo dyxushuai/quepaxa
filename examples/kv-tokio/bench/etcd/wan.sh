@@ -397,9 +397,11 @@ run_case() {
       echo "${regions[$i]} $(docker run --rm --network "$net" "$image" bash -c \
         "exec 3<>/dev/tcp/$(replica_ip "$i")/7100 && echo STATS >&3 && head -1 <&3" 2>/dev/null)"
     done > "$results/$name-stats.txt"
-    # Decided order changes, as each replica logged them.
-    for i in $(seq 0 $((n - 1))); do docker logs "qpx-r$i" 2>&1 | grep 'epoch' | sed "s/^/${regions[$i]} /"; done \
-      > "$results/$name-epochs.txt"
+    # Decided order changes, as each replica logged them; a run without any logs none (grep's
+    # status 1), which is no failure.
+    for i in $(seq 0 $((n - 1))); do
+      docker logs "qpx-r$i" 2>&1 | { grep 'epoch' || [ $? = 1 ]; } | sed "s/^/${regions[$i]} /"
+    done > "$results/$name-epochs.txt"
   fi
   {
     echo "leader_after=$(leader_now "$system")"
