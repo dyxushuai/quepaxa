@@ -257,6 +257,31 @@ fn a_restarted_replica_measures_afresh() {
 }
 
 #[test]
+fn probing_lasts_four_rounds_past_the_last_write_and_remembers_four_probes() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    apply_writes(&mut r, Timestamp(MS), &[1]);
+    let mut rounds = Vec::new();
+    while let Some(at) = r.next_deadline() {
+        r.handle_timeout(at).unwrap();
+        r.poll_actions(&mut out);
+        rounds.extend(probes(&out).first().map(|(_, sent, _)| *sent));
+        out.clear();
+    }
+    // Spelled out rather than from the constants, so a change to them shows.
+    let expected: Vec<u64> = (0..5).map(|i| MS + i * PROBE_INTERVAL).collect();
+    assert_eq!(rounds, expected, "the last write at 1 ms, then four seconds active");
+    assert_eq!(r.placement.awaiting[&NodeId(1)], expected[1..], "unanswered: the four latest");
+}
+
+#[test]
+fn a_reply_within_the_tick_of_its_probe_measures_zero() {
+    let mut r = placed(0);
+    answer(&mut r, 1, 5 * MS, 5 * MS);
+    assert_eq!(r.fresh_rtt(NodeId(1)), Some(0));
+}
+
+#[test]
 fn a_reply_to_another_incarnations_probe_is_ignored() {
     let mut r = placed(0);
     let mut out = Vec::new();

@@ -147,3 +147,38 @@ fn legacy_snapshot_holes_and_high_write_ids_remain_valid_after_recovery_and_inst
     assert_eq!(replayed.propose(NOW, Bytes::new()), Ok(ProposalId(0)));
     settle(&mut replayed, &mut disk);
 }
+
+/// Where replica 3, no member of {0, 1, 2}, asks for slots once its read's round timer
+/// fires, after member 0 answered the round with mark `high`; and its catch-up retries.
+fn outside_catch_ups(high: u64) -> (Vec<NodeId>, u64) {
+    use crate::codec::Message;
+    use crate::replica::tests::{from_peer, r_wire, replica_as};
+    let mut r = replica_as(3);
+    let mut out = Vec::new();
+    r.read_barrier(Timestamp(1)).unwrap();
+    r.poll_actions(&mut out);
+    let reply = Body::ReadReply { incarnation: r.incarnation, round: 0, high: Slot(high) };
+    r.handle(Timestamp(2), from_peer(0, 3, reply)).unwrap();
+    r.poll_actions(&mut out);
+    out.clear();
+    let at = r.next_deadline().expect("the round's resend timer");
+    r.handle_timeout(at).unwrap();
+    r.poll_actions(&mut out);
+    let to = out
+        .iter()
+        .filter_map(|a| match a {
+            Action::Send(o) => match Message::decode(&o.bytes, &r_wire()) {
+                Ok(Message { body: Body::CatchUp { .. }, .. }) => Some(o.to),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    (to, r.metrics().catch_up_retries)
+}
+
+#[test]
+fn an_outside_reader_asks_for_slots_only_below_the_mark() {
+    assert_eq!(outside_catch_ups(0), (Vec::new(), 0), "nothing below a mark it already reached");
+    assert_eq!(outside_catch_ups(2), (vec![NodeId(0)], 1));
+}

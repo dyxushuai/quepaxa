@@ -546,5 +546,19 @@ mod tests {
         assert!(!forged.fits(4) && !forged.fits(u64::MAX));
         let quiet_ahead = Schedule { quiet_until: 4 + LAG, ..s };
         assert!(!quiet_ahead.fits(4) && quiet_ahead.fits(5));
+        // Even one bump moved a bound `LAG` on.
+        let fresh = Schedule::new(&ids(&[0, 1, 2]));
+        assert!(!Schedule { generation: 1, ..fresh }.fits(10));
+    }
+
+    #[test]
+    fn before_any_slot_only_the_initial_schedule_fits() {
+        let s = Schedule::new(&ids(&[0, 1, 2]));
+        assert!(s.fits(0));
+        let two = Schedule { history: alloc::vec![(0, ids(&[0, 1, 2])), (0, ids(&[1, 2, 0]))], ..s.clone() };
+        let later = Schedule { history: alloc::vec![(1, ids(&[0, 1, 2]))], ..s.clone() };
+        let quiet = Schedule { quiet_until: 1, ..s.clone() };
+        let epoch = Schedule { epoch_from: 1, ..s };
+        assert!(!two.fits(0) && !later.fits(0) && !quiet.fits(0) && !epoch.fits(0));
     }
 }

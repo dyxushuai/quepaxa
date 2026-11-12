@@ -12,6 +12,11 @@ crates/quepaxa/src/rng.rs: replace >> with << in ChaCha20::next_u32
 crates/quepaxa/src/rng.rs: replace | with ^ in ChaCha20::next_u64
 crates/quepaxa/src/replica/messages.rs: replace > with >= in Replica::on_message
 
+# Equivalent: emit_commits always follows advance_committed (and snapshots set both), so
+# reads are checked with emitted == committed and wait_for is only reached below K.
+crates/quepaxa/src/replica/reads.rs: replace < with > in Replica::check_reads
+crates/quepaxa/src/replica/reads.rs: replace < with <= in Replica::wait_for
+
 # Equivalent with overwhelming probability: a ChaCha20 output of exactly 0 or u64::MAX.
 crates/quepaxa/src/rng.rs: replace && with || in ChaCha20::priority
 
