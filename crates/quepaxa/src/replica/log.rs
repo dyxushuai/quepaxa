@@ -197,7 +197,10 @@ impl Replica {
                     }
                     continue;
                 }
-                if let Some((at, _, hedged)) = self.outstanding.remove(&id) {
+                if let Some((at, kind, hedged)) = self.outstanding.remove(&id) {
+                    if kind == Kind::App {
+                        self.note_commit_latency(self.now.0.saturating_sub(at.0));
+                    }
                     // A hedged entry waited out the hedge delay itself: learning from it
                     // would stretch the delay further each time the leader is slow.
                     if !hedged {

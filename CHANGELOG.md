@@ -16,8 +16,15 @@ All notable changes to this project are documented here. The project follows
   kinds, `RttProbe` and `RttReply`; peers of older versions reject them) and count
   writes per origin, and the leader moves the lead to the member that gives writers the
   lowest commit latency once it keeps a 20% gain for `placement_sustain` (3 minutes)
-  and no order change happened within `placement_hold` (10 minutes). With placement on,
-  a membership change without a leader order keeps the order of the staying members.
+  and no order change happened within `placement_hold` (10 minutes); the gain must also
+  exceed 5 ms a write, so round trips within a datacenter never move it. Round trips
+  cannot see a leader slowed by its CPU or disk, so members also report the writers' tail
+  commit latency under each leader, and the members the round trips cannot tell apart
+  are each led for a sustained period once (again after eight holds); the fastest then
+  leads if the leader is slower by three standard errors and a tenth. This is the paper's
+  §5.3 tuning restricted to members the round trips rank alike: the paper's version,
+  exploring every member, was slower in every scenario measured. A membership change
+  without a leader order puts the staying members in order of their cost.
 - `quepaxa`: `Replica::propose_leader_order` changes only the leader order of the members
   in force; kv-tokio exposes it as `LEADERS <ids>`. In C,
   `qpx_propose_reconfiguration` with the current members and a new order does the same.

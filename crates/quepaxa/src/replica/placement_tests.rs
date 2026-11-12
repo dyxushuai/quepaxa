@@ -175,8 +175,11 @@ fn a_probe_is_answered_and_its_table_kept() {
     let mut r = placed(0);
     let mut out = Vec::new();
     let table = alloc::vec![(NodeId(0), 70 * MS), (NodeId(2), 30 * MS), (NodeId(9), MS)];
-    r.handle(Timestamp(3 * MS), from_peer(1, 0, Body::RttProbe { incarnation: 7, sent: 12345, table }))
-        .unwrap();
+    r.handle(
+        Timestamp(3 * MS),
+        from_peer(1, 0, Body::RttProbe { incarnation: 7, sent: 12345, commit: 0, table }),
+    )
+    .unwrap();
     r.poll_actions(&mut out);
     assert_eq!(rtt_replies(&out), [(NodeId(1), 12345)]);
     let kept = &r.placement.tables[&NodeId(1)];
@@ -225,7 +228,7 @@ fn a_member_without_placement_neither_probes_nor_answers() {
     assert!(r.placement.writes.is_empty(), "nothing is counted");
     r.handle(
         Timestamp(2 * MS),
-        from_peer(1, 0, Body::RttProbe { incarnation: 7, sent: 7, table: Vec::new() }),
+        from_peer(1, 0, Body::RttProbe { incarnation: 7, sent: 7, commit: 0, table: Vec::new() }),
     )
     .unwrap();
     r.poll_actions(&mut out);

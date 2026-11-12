@@ -117,11 +117,13 @@ pub(crate) enum Body {
         round: u64,
         high: Slot,
     },
-    /// Leader placement: the sender's incarnation and clock when sent, and its smoothed
-    /// round trip to each member it has a fresh one for, in nanoseconds.
+    /// Leader placement: the sender's incarnation and clock when sent, the smoothed commit
+    /// latency of its own entries (0: none yet), and its smoothed round trip to each member
+    /// it has a fresh one for, in nanoseconds.
     RttProbe {
         incarnation: u64,
         sent: u64,
+        commit: u64,
         table: Vec<(NodeId, u64)>,
     },
     /// Echoes an `RttProbe`'s `incarnation` and `sent`.
@@ -250,9 +252,10 @@ impl Message {
                 out.put_u64_le(*round);
                 out.put_u64_le(high.0);
             }
-            Body::RttProbe { incarnation, sent, table } => {
+            Body::RttProbe { incarnation, sent, commit, table } => {
                 out.put_u64_le(*incarnation);
                 out.put_u64_le(*sent);
+                out.put_u64_le(*commit);
                 out.put_u32_le(table.len() as u32);
                 for (node, rtt) in table {
                     out.put_u32_le(node.0);
@@ -278,7 +281,7 @@ impl Message {
             | Body::ReadReply { .. }
             | Body::RttReply { .. }
             | Body::ForwardAck => 0,
-            Body::RttProbe { table, .. } => 20 + 12 * table.len(),
+            Body::RttProbe { table, .. } => 28 + 12 * table.len(),
             Body::Forward { batch } => batch.len(),
             Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len() + 33).sum(),
         }
@@ -347,13 +350,14 @@ impl Message {
             KIND_RTT_PROBE => {
                 let incarnation = r.u64()?;
                 let sent = r.u64()?;
+                let commit = r.u64()?;
                 let n = r.u32()? as usize;
                 // Each row takes 12 bytes, bounding the allocation by input size.
                 let mut table = Vec::with_capacity(n.min(buf.len() / 12));
                 for _ in 0..n {
                     table.push((NodeId(r.u32()?), r.u64()?));
                 }
-                Body::RttProbe { incarnation, sent, table }
+                Body::RttProbe { incarnation, sent, commit, table }
             }
             KIND_RTT_REPLY => Body::RttReply { incarnation: r.u64()?, sent: r.u64()? },
             _ => return Err(DecodeError::UnknownKind),
@@ -569,9 +573,14 @@ mod tests {
     fn rtt_messages_match_golden_bytes_v1() {
         let probe = Message {
             env: env(),
-            body: Body::RttProbe { incarnation: 2, sent: 5, table: alloc::vec![(NodeId(3), 0x0102)] },
+            body: Body::RttProbe {
+                incarnation: 2,
+                sent: 5,
+                commit: 0x0304,
+                table: alloc::vec![(NodeId(3), 0x0102)],
+            },
         };
-        let body = "0200000000000000 0500000000000000 01000000 03000000 0201000000000000";
+        let body = "0200000000000000 0500000000000000 0403000000000000 01000000 03000000 0201000000000000";
         assert_eq!(probe.encode().to_vec(), golden("0b", body));
         let reply = Message { env: env(), body: Body::RttReply { incarnation: 2, sent: 5 } };
         assert_eq!(reply.encode().to_vec(), golden("0c", "0200000000000000 0500000000000000"));
@@ -581,7 +590,7 @@ mod tests {
     fn an_rtt_table_longer_than_its_bytes_is_rejected() {
         let probe = Message {
             env: env(),
-            body: Body::RttProbe { incarnation: 2, sent: 5, table: alloc::vec![(NodeId(3), 1)] },
+            body: Body::RttProbe { incarnation: 2, sent: 5, commit: 9, table: alloc::vec![(NodeId(3), 1)] },
         };
         let mut bytes = probe.encode().to_vec();
         let n = bytes.len() - 16;
@@ -726,7 +735,7 @@ mod tests {
                 Body::ReadQuery { incarnation: from, round },
                 Body::ReadReply { incarnation: from, round, high: Slot(from) },
                 Body::ForwardAck,
-                Body::RttProbe { incarnation: 2, sent: from, table: alloc::vec![(NodeId(round as u32), from), (NodeId(2), round)] },
+                Body::RttProbe { incarnation: 2, sent: from, commit: round, table: alloc::vec![(NodeId(round as u32), from), (NodeId(2), round)] },
                 Body::RttReply { incarnation: 2, sent: round },
             ] {
                 let m = Message { env: env(), body };

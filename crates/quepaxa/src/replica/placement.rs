@@ -25,6 +25,9 @@ use crate::types::{NodeId, ProposalId, Slot, Timestamp};
 pub(super) const PROBE_INTERVAL: u64 = 1_000_000_000;
 /// A round trip or table older than this is unknown.
 pub(super) const FRESH_FOR: u64 = 4 * PROBE_INTERVAL;
+/// Own commit latencies kept per probe round for its percentile.
+const LATENCY_SAMPLES: usize = 1024;
+
 /// Probing stops this long after the last write is applied.
 pub(super) const ACTIVE_FOR: u64 = 4 * PROBE_INTERVAL;
 
@@ -41,6 +44,17 @@ pub(super) struct Placement {
     pub(super) awaiting: BTreeMap<NodeId, Vec<u64>>,
     /// Each member's latest round-trip table, from its probes, and when it arrived.
     pub(super) tables: BTreeMap<NodeId, (Vec<(NodeId, u64)>, Timestamp)>,
+    /// Commit latencies of this replica's own entries since the last probe round, at most
+    /// `LATENCY_SAMPLES` of them.
+    pub(super) latencies: Vec<u64>,
+    /// Each member's 90th-percentile commit latency of its own entries over its last probe
+    /// round, from its probes, and when it arrived.
+    pub(super) observed: BTreeMap<NodeId, (u64, Timestamp)>,
+    /// The writers' tail commit latency under each member as leader, one sample per round
+    /// of its latest tenure (`ranking.rs`, exploration).
+    pub(super) led: BTreeMap<NodeId, Led>,
+    /// This replica's 90th-percentile commit latency over the last probe round with writes.
+    pub(super) tail: Option<u64>,
     /// Application entries applied per origin since the last probe round.
     pub(super) writes: BTreeMap<NodeId, u64>,
     /// Smoothed writes per probe round, per origin, times eight.
@@ -62,6 +76,41 @@ pub(super) struct Placement {
     pub(super) excluded: BTreeMap<NodeId, Exclusion>,
     /// Placement's own order change, from submission until decided, resolved or fenced.
     pub(super) moving: Option<ProposalId>,
+}
+
+/// Per-round samples (microseconds): count, sum, sum of squares, and the latest round.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
+pub(super) struct Led {
+    pub(super) count: u64,
+    pub(super) sum: u128,
+    pub(super) sum_sq: u128,
+    pub(super) at: Timestamp,
+}
+
+impl Led {
+    pub(super) fn add(&mut self, us: u64, at: Timestamp) {
+        self.count += 1;
+        self.sum = self.sum.saturating_add(u128::from(us));
+        self.sum_sq = self.sum_sq.saturating_add(u128::from(us) * u128::from(us));
+        self.at = at;
+    }
+
+    pub(super) fn mean(&self) -> u128 {
+        self.sum / u128::from(self.count.max(1))
+    }
+
+    /// Variance of the mean.
+    fn var_of_mean(&self) -> u128 {
+        let n = u128::from(self.count.max(1));
+        self.sum_sq.saturating_sub(self.sum * self.sum / n) / n / n
+    }
+
+    /// Whether these samples are slower than `other`'s by more than three standard errors.
+    pub(super) fn worse_than(&self, other: &Led) -> bool {
+        let (a, b) = (self.mean(), other.mean());
+        a > b && (a - b) * (a - b) > 9 * (self.var_of_mean() + other.var_of_mean())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -105,6 +154,13 @@ impl Replica {
         }
     }
 
+    /// Keeps an own entry's commit latency for this round's percentile.
+    pub(super) fn note_commit_latency(&mut self, ns: u64) {
+        if self.cfg.placement && self.placement.latencies.len() < LATENCY_SAMPLES {
+            self.placement.latencies.push(ns);
+        }
+    }
+
     /// The smoothed round trip to `member`, if sampled recently.
     pub(super) fn fresh_rtt(&self, member: NodeId) -> Option<u64> {
         self.placement.rtt.get(&member).filter(|(_, at)| fresh(*at, self.now)).map(|(rtt, _)| *rtt)
@@ -122,11 +178,19 @@ impl Replica {
             return;
         }
         self.placement.next_probe = Some(now.after(PROBE_INTERVAL));
+        // The tail, not the average: a leader starved of CPU commits most entries quickly
+        // and stalls the rest for a scheduler period.
+        let mut l = core::mem::take(&mut self.placement.latencies);
+        if !l.is_empty() {
+            l.sort_unstable();
+            self.placement.tail = Some(l[(l.len() - 1) * 9 / 10]);
+        }
         self.close_round();
         let members = self.schedule.members(Slot(self.committed)).to_vec();
         // Members of earlier epochs are no longer measured or ranked.
         self.placement.rtt.retain(|n, _| members.contains(n));
         self.placement.tables.retain(|n, _| members.contains(n));
+        self.placement.observed.retain(|n, _| members.contains(n));
         self.placement.awaiting.retain(|n, _| members.contains(n));
         if !members.contains(&self.me) {
             return;
@@ -140,8 +204,8 @@ impl Replica {
                 sent.remove(0);
             }
             sent.push(now.0);
-            let incarnation = self.incarnation;
-            self.send(to, Body::RttProbe { incarnation, sent: now.0, table: table.clone() });
+            let (incarnation, commit) = (self.incarnation, self.placement.tail.unwrap_or(0));
+            self.send(to, Body::RttProbe { incarnation, sent: now.0, commit, table: table.clone() });
         }
         self.evaluate_placement();
     }
@@ -151,6 +215,7 @@ impl Replica {
         from: NodeId,
         incarnation: u64,
         sent: u64,
+        commit: u64,
         mut table: Vec<(NodeId, u64)>,
     ) {
         if !self.cfg.placement {
@@ -162,6 +227,11 @@ impl Replica {
         }
         table.retain(|(n, _)| members.contains(n));
         self.placement.tables.insert(from, (table, self.now));
+        if commit > 0 {
+            self.placement.observed.insert(from, (commit, self.now));
+        } else {
+            self.placement.observed.remove(&from);
+        }
         self.send(from, Body::RttReply { incarnation, sent });
     }
 

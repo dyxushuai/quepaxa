@@ -1,6 +1,6 @@
 //! Leader placement decisions, from injected round trips and write counts.
 
-use super::placement::PROBE_INTERVAL;
+use super::placement::{Led, PROBE_INTERVAL};
 use super::*;
 
 const MS: u64 = 1_000_000;
@@ -74,10 +74,15 @@ fn rounds(r: &mut Replica, from: u64, secs: u64, rtt: &[&[u64]], writes: &[(u32,
 /// The order placement submitted, if any.
 fn moved(r: &Replica) -> Option<Vec<u32>> {
     let id = r.placement.moving?;
-    let item =
-        r.pending.iter().find(|i| i.entry.id == id).map(|i| i.entry.payload.clone()).or_else(|| {
+    let item = r
+        .pending
+        .iter()
+        .find(|i| i.entry.id == id)
+        .map(|i| i.entry.payload.clone())
+        .or_else(|| {
             r.batches.values().flat_map(|b| batch::changes(&b.value)).find(|(k, _)| k.2 == id).map(|(_, p)| p)
-        })?;
+        })
+        .or_else(|| r.forwarded.get(&id).map(|(i, _)| i.entry.payload.clone()))?;
     let (_, order) = crate::schedule::decode_change(&item)?;
     Some(order.into_iter().map(|n| n.0).collect())
 }
@@ -558,4 +563,169 @@ fn the_hold_ends_exactly_a_hold_after_the_last_order_change() {
     assert_eq!(t, PROBE_INTERVAL + HOLD);
     round(&mut r, t, &rows(&three(50)), &writes);
     assert_eq!(moved(&r).map(|o| o[0]), Some(1));
+}
+
+/// Three members 2 ms apart, every one writing.
+const LAN: [[u64; 3]; 3] = [[0, 2, 2], [2, 0, 2], [2, 2, 0]];
+const ALL: [(u32, u64); 3] = [(0, 10), (1, 10), (2, 10)];
+
+/// `rounds` samples of the writers' tail around `ms` (±1 ms) under `member`, latest at `at`.
+fn led(r: &mut Replica, member: u32, ms: u64, rounds: u64, at: u64) {
+    let mut l = Led::default();
+    for k in 0..rounds {
+        l.add(ms * 1_000 + if k % 2 == 0 { 1_000 } else { 0 }, Timestamp(at));
+    }
+    l.add(ms * 1_000 - 1_000, Timestamp(at));
+    r.placement.led.insert(NodeId(member), l);
+}
+
+/// The member a trial or move put first, if any.
+fn first(r: &Replica) -> Option<u32> {
+    moved(r).map(|o| o[0])
+}
+
+/// Replica 0 leading, its tenure measured at `ms`; one probe round after the sustained
+/// period.
+fn explored(ms: u64, others: &[(u32, u64, u64)]) -> Replica {
+    let mut r = leader(0, &[0, 1, 2]);
+    led(&mut r, 0, ms, 20, SUSTAIN);
+    for &(m, ms, at) in others {
+        led(&mut r, m, ms, 20, at);
+    }
+    r
+}
+
+#[test]
+fn a_measured_leader_explores_a_member_the_round_trips_cannot_tell_apart() {
+    let mut r = explored(5, &[]);
+    // A recent order change does not hold exploration back: each tenure took a sustained
+    // period already.
+    r.placement.changed_at = Some(Timestamp(SUSTAIN));
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), Some(1));
+}
+
+#[test]
+fn no_exploration_before_the_tenure_is_measured() {
+    let mut r = leader(0, &[0, 1, 2]);
+    led(&mut r, 0, 5, 5, SUSTAIN);
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), None, "too few rounds");
+    let mut r = explored(5, &[]);
+    r.placement.led_since = Timestamp(PROBE_INTERVAL);
+    round(&mut r, SUSTAIN, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), None, "not a sustained period");
+}
+
+#[test]
+fn members_the_round_trips_rank_apart_are_not_explored() {
+    // 1 and 2 are 200 ms apart: each costs 20% more per write than leader 0.
+    let mut r = explored(5, &[]);
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&three(200)), &ALL);
+    assert_eq!(first(&r), None);
+}
+
+#[test]
+fn a_measured_member_is_skipped_until_its_measurement_goes_stale() {
+    let mut r = explored(5, &[(1, 5, SUSTAIN)]);
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), Some(2), "1 is measured");
+    // Every member measured, alike: nothing moves.
+    let mut r = explored(5, &[(1, 5, SUSTAIN), (2, 5, SUSTAIN)]);
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), None);
+    // 1's measurement went stale: it is measured again.
+    let t = 9 * HOLD;
+    let mut r = leader(0, &[0, 1, 2]);
+    led(&mut r, 0, 5, 20, t);
+    led(&mut r, 1, 5, 20, 0);
+    led(&mut r, 2, 5, 20, t);
+    round(&mut r, t, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), Some(1));
+}
+
+#[test]
+fn once_every_tied_member_is_measured_the_fastest_leads() {
+    let mut r = explored(9, &[(1, 5, SUSTAIN), (2, 7, SUSTAIN)]);
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), Some(1));
+    // Not within a hold of the last change.
+    let mut r = explored(9, &[(1, 5, SUSTAIN), (2, 7, SUSTAIN)]);
+    r.placement.changed_at = Some(Timestamp(SUSTAIN));
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), None);
+}
+
+#[test]
+fn a_member_faster_by_less_than_a_tenth_is_not_worth_a_move() {
+    let mut r = explored(11, &[(1, 10, SUSTAIN), (2, 11, SUSTAIN)]);
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), None);
+    let mut r = explored(12, &[(1, 10, SUSTAIN), (2, 12, SUSTAIN)]);
+    round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), Some(1));
+}
+
+#[test]
+fn a_member_demoted_within_four_holds_is_not_explored() {
+    // 1 was demoted by rotation; its exclusion ended a hold ago.
+    let t = 5 * HOLD;
+    let mut r = leader(0, &[0, 1, 2]);
+    led(&mut r, 0, 5, 20, t);
+    r.placement.excluded.insert(NodeId(1), placement::Exclusion { until: Timestamp(t - HOLD), factor: 1 });
+    round(&mut r, t, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), Some(2), "1 was demoted too recently");
+    // Four holds after its exclusion ended, it may be explored again.
+    let mut r = leader(0, &[0, 1, 2]);
+    led(&mut r, 0, 5, 20, t);
+    r.placement.excluded.insert(NodeId(1), placement::Exclusion { until: Timestamp(0), factor: 1 });
+    round(&mut r, t, &rows(&LAN), &ALL);
+    assert_eq!(first(&r), Some(1));
+}
+
+#[test]
+fn round_trips_within_a_datacenter_never_move_the_leader() {
+    // Only 1 writes; round trips 0-1 and 1-2 are 0.2 ms, 0-2 is 0.8 ms (`round` takes whole
+    // ms). 1 costs half of what 0 does, but 0.2 ms a write less: below the slack.
+    let mut r = leader(0, &[0, 1, 2]);
+    let mut now = PROBE_INTERVAL;
+    for _ in 0..2 * SUSTAIN / PROBE_INTERVAL {
+        let at = Timestamp(now);
+        r.placement.rtt.insert(NodeId(1), (200_000, at));
+        r.placement.rtt.insert(NodeId(2), (800_000, at));
+        r.placement.tables.insert(NodeId(1), (alloc::vec![(NodeId(0), 200_000), (NodeId(2), 200_000)], at));
+        r.placement.tables.insert(NodeId(2), (alloc::vec![(NodeId(0), 800_000), (NodeId(1), 200_000)], at));
+        r.placement.writes = [(NodeId(1), 10)].into_iter().collect();
+        r.placement.last_write = Some(at);
+        r.placement.next_probe = Some(at);
+        r.handle_timeout(at).unwrap();
+        let mut out = Vec::new();
+        r.poll_actions(&mut out);
+        now += PROBE_INTERVAL;
+    }
+    assert_eq!(moved(&r), None);
+}
+
+#[test]
+fn the_writers_tail_is_sampled_under_the_leader_in_force() {
+    let mut r = leader(1, &[0, 1, 2]);
+    r.placement.tail = Some(4 * MS);
+    r.placement.observed.insert(NodeId(0), (6 * MS, Timestamp(3 * PROBE_INTERVAL)));
+    r.placement.observed.insert(NodeId(2), (8 * MS, Timestamp(3 * PROBE_INTERVAL)));
+    round(&mut r, 3 * PROBE_INTERVAL, &rows(&LAN), &ALL);
+    let l = r.placement.led[&NodeId(0)];
+    assert_eq!((l.count, l.sum), (1, 6_000));
+}
+
+#[test]
+fn a_membership_change_without_an_order_puts_the_best_placed_member_first() {
+    // ap-ne leads; us-east (0) is best placed: removing sa-east (4) also reorders.
+    let mut r = leader(3, &[3, 0, 1, 2, 4]);
+    let all = [(0, 10), (1, 10), (2, 10), (3, 10), (4, 10)];
+    round(&mut r, PROBE_INTERVAL, &wan(), &all);
+    let in_force: Vec<NodeId> = [3, 0, 1, 2, 4].map(NodeId).to_vec();
+    let members: Vec<NodeId> = [0, 1, 2, 3, 5].map(NodeId).to_vec();
+    let order: Vec<u32> = r.placed_order(&in_force, &members).into_iter().map(|n| n.0).collect();
+    assert_eq!(order[0], 0, "{order:?}");
+    assert_eq!(order.last(), Some(&5), "the new member goes last: {order:?}");
 }

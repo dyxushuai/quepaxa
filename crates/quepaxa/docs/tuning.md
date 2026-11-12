@@ -64,12 +64,23 @@ The defaults assume round trips of a few milliseconds.
   leader at every round for `placement_sustain`, no order change happened within
   `placement_hold`, and at least about one write a second flows, the leader proposes an
   order with that member first (a normal leader-order change, in force 64 slots later).
-  A member any writer cannot reach is never placed first, and a leader that miss-based
-  rotation demoted is not placed first again for a hold (twice as long each time it is
-  demoted again soon). Writes are attributed to the member they were proposed at, so
-  clients should submit to their nearest replica; clients that send everything to the
-  leader make it look best placed. A membership change without a `leader_order` keeps the
-  order of the members that stay, new members last.
+  The gain must also exceed 5 ms a write, so round trips within one datacenter, which
+  differ by a fifth on noise alone, never move the leader. A member any writer cannot
+  reach is never placed first, and a leader that miss-based rotation demoted is not placed
+  first again for a hold (twice as long each time it is demoted again soon).
+
+  Round trips cannot see a leader slowed by its CPU or disk. So every member also records,
+  each round, the writers' tail commit latency under the leader in force, and the members
+  the round trips cannot tell apart (within a tenth, plus 5 ms a write) are measured: a
+  leader whose own tenure is measured hands the lead to each such member not measured
+  within eight holds, one sustained period each, then to the fastest if it is slower by
+  three standard errors and by more than a tenth. Across regions, where the round trips
+  already rank members apart, nothing is explored.
+
+  Writes are attributed to the member they were proposed at, so clients should submit to
+  their nearest replica; clients that send everything to the leader make it look best
+  placed. A membership change without a `leader_order` puts the staying members in order
+  of their cost (one rotation demoted recently last), new members last.
 
 The repository's simulated five-region benchmark (`docs/benchmarks.md`) shows each effect.
 

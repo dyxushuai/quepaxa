@@ -226,6 +226,18 @@ leaders_of() {
     grep -o 'LEADERS [0-9,]*' | cut -d' ' -f2
 }
 
+# The epoch in force any QuePaxa replica reports in its STATS line.
+epoch_now() {
+  local i e
+  for i in $(seq 0 $((n - 1))); do
+    e=$(docker run --rm --network "$net" "$image" bash -c \
+      "exec 3<>/dev/tcp/$(replica_ip "$i")/7100 && echo STATS >&3 && head -1 <&3" 2>/dev/null |
+      grep -o 'epoch: [0-9]*' | cut -d' ' -f2)
+    [ -n "$e" ] && { echo "$e"; return; }
+  done
+  echo -
+}
+
 # The region leading now: the first replica of the order in force any QuePaxa replica
 # reports, or what etcd reports.
 leader_now() {
@@ -341,7 +353,8 @@ sample_leaders() {
   local t0=$1 stop=$2 out=$3
   sleep_until "$t0"
   until [ -e "$stop" ]; do
-    echo "$((($(date +%s%3N) - t0) / 1000)) $(leader_now quepaxa)" >> "$out"
+    # The epoch tells a decided order change (it advances) from a rotation (it does not).
+    echo "$((($(date +%s%3N) - t0) / 1000)) $(leader_now quepaxa) $(epoch_now)" >> "$out"
     sleep 5
   done
 }
@@ -376,7 +389,18 @@ run_case() {
     heal "$scenario" "$pinned"
   fi
   for i in "${pids[@]}"; do wait "$i"; done
-  if [ -n "$sampler" ]; then touch "$results/$name.stop"; wait "$sampler"; fi
+  if [ -n "$sampler" ]; then
+    touch "$results/$name.stop"
+    wait "$sampler"
+    # Each replica's counters (placement moves, steps aside, epoch) say who moved the lead.
+    for i in $(seq 0 $((n - 1))); do
+      echo "${regions[$i]} $(docker run --rm --network "$net" "$image" bash -c \
+        "exec 3<>/dev/tcp/$(replica_ip "$i")/7100 && echo STATS >&3 && head -1 <&3" 2>/dev/null)"
+    done > "$results/$name-stats.txt"
+    # Decided order changes, as each replica logged them.
+    for i in $(seq 0 $((n - 1))); do docker logs "qpx-r$i" 2>&1 | grep 'epoch' | sed "s/^/${regions[$i]} /"; done \
+      > "$results/$name-epochs.txt"
+  fi
   {
     echo "leader_after=$(leader_now "$system")"
     [ "$scenario" = jitter ] && echo "reorders=$(($(reorders) - before))"
