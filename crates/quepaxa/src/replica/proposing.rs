@@ -202,7 +202,11 @@ impl Replica {
     /// leader, since a follower's proposal loses to a live leader's in slot after slot, and
     /// hedges them again only if the leader stays silent. Entries another follower handed
     /// here are proposed again here: that follower judged the leader, this one may not have.
-    pub(super) fn lost_slot(&mut self, seq: u64) {
+    /// Not when the slot went to the target's own value and the target has decided a slot
+    /// itself since the batch was proposed (`watch.progressed`): it is alive, and handed them
+    /// here only by stepping aside for a moment; proposed here they would lose to it slot
+    /// after slot as well.
+    pub(super) fn lost_slot(&mut self, seq: u64, winner: NodeId, started: Timestamp) {
         if self.proposes_directly() {
             if let Some(b) = self.batches.get_mut(&seq) {
                 b.slot = None;
@@ -210,6 +214,7 @@ impl Replica {
             return;
         }
         let Some(b) = self.batches.remove(&seq) else { return };
+        let deciding = winner == self.target() && self.watch.progressed > started;
         // Our own encoding: it decodes.
         let entries = batch::decode(&b.value).unwrap_or_default();
         for e in entries {
@@ -217,7 +222,7 @@ impl Replica {
             if self.dedup.contains(o, inc, id) {
                 continue;
             }
-            if o == self.me { self.pending.push_back(e) } else { self.relayed.push_back(e) }
+            if o == self.me || deciding { self.pending.push_back(e) } else { self.relayed.push_back(e) }
         }
     }
 
@@ -297,7 +302,7 @@ impl Replica {
         // The slot's epoch is fixed: it was decided at least `LAG` slots before any slot we drive.
         let recorders = self.schedule.members(slot).to_vec();
         let prop = SlotProposer::new(recorders, leader, proposal, &mut self.rng);
-        self.proposers.insert(slot, Active { prop, batch: seq, resend_at: self.now });
+        self.proposers.insert(slot, Active { prop, batch: seq, resend_at: self.now, started: self.now });
         self.send_requests(slot, false);
     }
 

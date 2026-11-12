@@ -300,6 +300,34 @@ fn a_deputy_proposes_a_handed_entry_again_when_its_batch_loses_the_slot() {
 }
 
 #[test]
+fn entries_a_leader_handed_over_go_back_to_it_once_it_decides_again() {
+    // Leader 0 stepped aside for a moment and handed replica 2's entry here; it is back,
+    // deciding slots itself, and takes the slot this replica proposed the entry in.
+    let mut r = replica_as(1);
+    let mut out = Vec::new();
+    let entries = [batch::Item {
+        entry: crate::batch::Entry {
+            origin: NodeId(2),
+            incarnation: 1,
+            id: ProposalId(7),
+            payload: Bytes::from_static(b"x"),
+        },
+        kind: batch::Kind::App,
+    }];
+    r.handle(Timestamp(1), from_peer(0, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.poll_actions(&mut out);
+    let slot = r.batches.values().find_map(|b| b.slot).expect("the entry is proposed here");
+    let own = Body::Decided { slot: Slot(slot.0 + 1), proposal: proposal(1, 0, 1) };
+    r.handle(Timestamp(2), from_peer(0, 1, own)).unwrap();
+    r.poll_actions(&mut out);
+    out.clear();
+    r.handle(Timestamp(3), from_peer(0, 1, Body::Decided { slot, proposal: proposal(1, 0, 0) })).unwrap();
+    r.poll_actions(&mut out);
+    assert!(r.batches.is_empty(), "not proposed again, to lose to the leader slot after slot");
+    assert_eq!(forwards_to(&out, 0), 1, "handed back to the leader");
+}
+
+#[test]
 fn entries_handed_to_a_leader_this_replica_now_is_are_not_left_waiting() {
     // Replica 1 forwarded to leader 0, then came to lead itself (here: 0 suspected and
     // 1 first in line): the late entries must leave `forwarded`, or their timer fires
@@ -708,6 +736,23 @@ fn a_disk_that_keeps_completing_writes_is_slow_not_stuck() {
     r.poll_actions(&mut out);
     assert!(!r.forwarded.contains_key(&id), "hedged after δ");
     assert_eq!(r.metrics.hedged, 1);
+}
+
+#[test]
+fn a_hedge_stays_scheduled_until_the_disk_is_actually_stuck() {
+    // A write in flight, nobody deciding: the disk would seem stuck at 81 ms, before the
+    // hedge at 82 ms, if no write completed meanwhile. That is a forecast a slow disk keeps
+    // pushing back; holding on it left the entry with no timer at all.
+    let (mut r, id) = follower_with_a_stuck_disk();
+    let mut out = Vec::new();
+    assert_eq!(r.all_stuck_at(), Some(Timestamp(81 * MS)));
+    assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(82 * MS)), "the hedge is scheduled");
+    assert!(r.next_deadline().is_some_and(|t| t <= Timestamp(82 * MS)));
+    // Still nothing written by then: stuck, and held.
+    r.handle_timeout(Timestamp(82 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert!(r.forwarded.contains_key(&id), "held once the disk is stuck");
+    assert_eq!(r.metrics.hedged, 0);
 }
 
 #[test]

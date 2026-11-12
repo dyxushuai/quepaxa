@@ -299,11 +299,15 @@ impl Replica {
     /// counted from when it caught up: no slot can be decided meanwhile, and hedges made then
     /// would contend with the target's slots the moment the disks resume, pushing them off
     /// the fast path. Stepped aside, it hands them over again as usual.
+    ///
+    /// Held only once the disk is stuck, not when it would be by `late` if no write completed
+    /// meanwhile: a slow disk keeps completing writes and pushing that forecast back, and an
+    /// entry held on it had no timer until something else woke this replica.
     pub(super) fn late_at(&self, at: Timestamp) -> Option<Timestamp> {
         let d = self.hedge_delay();
         let busy = d.saturating_mul(4).min(self.cfg.hedge_max).max(d);
         let late = at.max(self.watch.resumed).after(if self.watch.progressed > at { busy } else { d });
-        let held = !self.watch.aside && self.all_stuck_at().is_some_and(|s| s <= late);
+        let held = !self.watch.aside && self.all_stuck_at().is_some_and(|s| s <= late.min(self.now));
         (!held).then_some(late)
     }
 

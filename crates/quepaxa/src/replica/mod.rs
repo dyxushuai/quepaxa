@@ -46,6 +46,8 @@ struct Active {
     prop: SlotProposer,
     batch: u64,
     resend_at: Timestamp,
+    /// When this replica started proposing in the slot.
+    started: Timestamp,
 }
 
 /// A batch this replica proposes, in at most one slot at a time until it is decided.
