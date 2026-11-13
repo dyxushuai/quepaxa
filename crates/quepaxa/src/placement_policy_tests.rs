@@ -133,7 +133,7 @@ fn a_move_is_pending_from_submission_until_it_resolves() {
     assert!(!p.on_resolved(ProposalId(2)), "another proposal");
     assert_eq!(p.moving(), Some(ProposalId(3)));
     assert!(p.on_resolved(ProposalId(3)));
-    assert_eq!(p.pending(), Pending::Idle);
+    assert_eq!(p.pending(), Pending::Idle, "a resolved move leaves nothing pending");
     assert!(!p.on_resolved(ProposalId(3)), "resolved once");
 }
 
@@ -178,6 +178,19 @@ fn a_round_too_late_or_not_ranked_drops_the_target() {
     decide(&mut p, 5 * PI, &gain);
     decide(&mut p, 7 * PI + 1, &gain);
     assert_eq!(p.target().map(|t| t.since), Some(t(7 * PI + 1)), "rounds too far apart start over");
+}
+
+#[test]
+fn an_excluded_member_is_neither_tracked_nor_placed_first() {
+    let gain = [Some(1_000 * PI as u128), Some(1), Some(2)];
+    let mut p = Policy::new(t(0), NodeId(0));
+    p.insert_exclusion(NodeId(1), Exclusion { until: t(10 * SUSTAIN), factor: 1 });
+    let mut first = None;
+    for k in 1..=SUSTAIN / PI + 1 {
+        first = first.or(decide(&mut p, k * PI, &gain));
+        assert_ne!(p.target().map(|t| t.member), Some(NodeId(1)), "an excluded member is never tracked");
+    }
+    assert_eq!(first, Some(NodeId(2)), "the best member not excluded is placed first");
 }
 
 // The bugs found while landing leader measurement (#194), each a field combination no rule
@@ -228,7 +241,7 @@ fn a_tenure_starts_at_the_replicas_clock_not_at_zero() {
         p
     }] {
         p.insert_led(NodeId(0), spanning(5, start + PI));
-        assert_eq!(decide(&mut p, start + PI, &TIED), None);
+        assert_eq!(decide(&mut p, start + PI, &TIED), None, "not a sustained tenure yet");
         assert_eq!(decide(&mut p, start + SUSTAIN, &TIED), Some(NodeId(1)));
     }
 }
@@ -240,18 +253,18 @@ fn samples_from_before_a_tenure_never_count_toward_it() {
     let mut p = Policy::new(t(0), NodeId(0));
     p.insert_led(NodeId(1), spanning(1, SUSTAIN));
     p.on_order_applied(t(SUSTAIN), HOLD, NodeId(0), NodeId(1), true);
-    assert_eq!(p.led(NodeId(1)), None);
+    assert_eq!(p.led(NodeId(1)), None, "a sample from a past tenure counted");
     let by_one = [NodeId(1), NodeId(0), NodeId(2)];
     p.sample(t(SUSTAIN + PI), HOLD, &by_one, Some(9_000));
-    assert_eq!(p.led(NodeId(1)), None);
+    assert_eq!(p.led(NodeId(1)), None, "sampled within the tenure's first two rounds");
     // Nor after a snapshot or restart, which may also change who leads.
     p.insert_led(NodeId(2), spanning(1, SUSTAIN));
     p.on_restart(t(SUSTAIN + 2 * PI), NodeId(2), true);
-    assert_eq!(p.led(NodeId(2)), None);
+    assert_eq!(p.led(NodeId(2)), None, "a sample from a past tenure counted");
     // A round under a leader this policy did not see start begins its tenure.
     p.sample(t(SUSTAIN + 3 * PI), HOLD, &by_one, Some(9_000));
     assert_eq!((p.tenure().leader(), p.tenure().since()), (NodeId(1), t(SUSTAIN + 3 * PI)));
-    assert_eq!(p.led(NodeId(1)), None);
+    assert_eq!(p.led(NodeId(1)), None, "a sample from a past tenure counted");
 }
 
 #[test]
@@ -260,8 +273,8 @@ fn an_idle_stretch_of_a_tenure_is_not_measured() {
     let now = 2 * SUSTAIN;
     let mut p = Policy::new(t(0), NodeId(0));
     p.insert_led(NodeId(0), brief(5, now));
-    assert!(!p.led(NodeId(0)).unwrap().spans(SUSTAIN));
-    assert_eq!(decide(&mut p, now, &TIED), None);
+    assert!(!p.led(NodeId(0)).unwrap().spans(SUSTAIN), "an idle stretch counted as measured");
+    assert_eq!(decide(&mut p, now, &TIED), None, "an idle stretch counted as measured");
 }
 
 #[test]

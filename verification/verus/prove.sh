@@ -7,8 +7,12 @@
 # slot within LAG of the slots fed, and a change computed from an older generation installs
 # nothing; the disk's health (disk_health.rs, from crates/quepaxa/src/replica/disk.rs and
 # watch.rs) is stuck only when no write completed for δ while one was in flight, holds
-# hedges only during a shared stall, and steps aside and back in turn. Uses Verus, fetched
-# (pinned, checksum verified) into target/verus-<digest>, and the Rust toolchain that
+# hedges only during a shared stall, and steps aside and back in turn; leader placement
+# (placement.rs, from crates/quepaxa/src/placement_policy.rs) never places an excluded
+# member first, explores each tied member once until its measurement goes stale, measures
+# leader and candidates by one rule, and resolves its move before anything else. Uses
+# Verus, fetched (pinned, checksum verified) into target/verus-<digest>, and the Rust
+# toolchain that
 # release requires (installed with rustup if missing). Linux x86_64 only.
 #
 # Usage: verification/verus/prove.sh
@@ -42,6 +46,7 @@ verus "$here/gate.rs"
 verus "$here/dedup.rs"
 verus "$here/schedule.rs"
 verus "$here/disk_health.rs"
+verus "$here/placement.rs"
 
 # Each bug: the file, a name, then a sed expression that plants it. The proof must fail on
 # every one.
@@ -67,6 +72,16 @@ bugs=(
   disk_health hold-on-a-forecast                  's/match disk\.health\(now, d\)/match disk.health(late, d)/'
   disk_health resumption-not-recorded             's/^            self\.resumed = now;$//'
   disk_health step-aside-twice                    's/if aside == self\.aside \{/if false \&\& aside == self.aside {/'
+  placement excluded-member-placed-first  's/&& !self\.excluded_at\(order\[i\], now\),/\&\& true,/'
+  placement demoted-member-explored       's/&& !self\.demoted_at\(order\[i\], now, hold\),/\&\& true,/'
+  placement leader-measured-by-span-only  's/if !mine\.measured\(now, sustain, stale\) \{/if !mine.spans(sustain) {/'
+  placement measured-member-explored      's/^                && !self\.measured_at\(order\[i\], now, sustain, stale\) \{/                {/'
+  placement exploit-within-a-hold         's/if !self\.held_at\(now, hold\) && faster/if faster/'
+  placement move-ignores-the-hold         's/ \|\| self\.held_at\(now, hold\) \{/ {/'
+  placement samples-from-a-past-tenure    '/fn start_tenure/,/^    \}/ s/self\.led\.remove\(&leader\);//'
+  placement move-never-resolves           '/fn on_resolved/,/^    \}/ s/self\.pending = Pending::Idle;//'
+  placement untrack-drops-the-move        's/if let Pending::Tracking\(_\) = self\.pending \{/if true {/'
+  placement restart-keeps-the-tenure      '/fn on_restart/,/^    \}/ s/self\.start_tenure\(leader, now\);/self.tenure.leader = leader; self.led.remove(\&leader);/'
 )
 mkdir -p "$work"
 status=0
@@ -74,7 +89,7 @@ for ((i = 0; i < ${#bugs[@]}; i += 3)); do
   file=${bugs[i]} name=${bugs[i + 1]}
   sed -E "${bugs[i + 2]}" "$here/$file.rs" > "$work/$name.rs"
   if cmp -s "$here/$file.rs" "$work/$name.rs"; then
-    echo "STALE   $name (the bug no longer applies: refresh it against gate.rs)"; status=1
+    echo "STALE   $name (the bug no longer applies: refresh it against $file.rs)"; status=1
   elif verus "$work/$name.rs" > "$work/$name.log" 2>&1; then
     echo "MISSED  $name"; status=1
   elif grep -q "verification results:: .* [1-9][0-9]* errors" "$work/$name.log"; then

@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/placement_policy.rs b/crates/quepaxa/src/placement_policy.rs
+index d84ad1a..4523275 100644
+--- a/crates/quepaxa/src/placement_policy.rs
++++ b/crates/quepaxa/src/placement_policy.rs
+@@ -238,7 +238,7 @@ impl Policy {
+     /// After a restart or a snapshot: `leader` leads from `now`, as far as this replica saw,
+     /// and, if the order ever `changed`, it is treated as just changed.
+     pub(crate) fn on_restart(&mut self, now: Timestamp, leader: NodeId, changed: bool) {
+-        self.start_tenure(leader, now);
++        self.tenure.leader = leader;
+         if changed {
+             self.changed_at = Some(now);
+             self.untrack();

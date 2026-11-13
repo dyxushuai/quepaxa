@@ -1,6 +1,7 @@
 //! Leader placement, decision side: the leader in force ranks the members by the commit
 //! latency each would give the writers, and moves the lead by an ordinary leader-order
-//! change when another member keeps a clear gain.
+//! change when another member keeps a clear gain. This file gathers the rates, round trips
+//! and costs; `placement_policy.rs` holds the state and makes the decisions below.
 //!
 //! The cost of candidate c, from write rates w (per origin) and round trips:
 //! `Σ_o w_o · rtt(o, c) + (Σ_o w_o) · quorum(c)`, where `quorum(c)` is the round trip from

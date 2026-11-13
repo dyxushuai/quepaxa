@@ -1,13 +1,13 @@
-diff --git a/crates/quepaxa/src/replica/ranking.rs b/crates/quepaxa/src/replica/ranking.rs
-index 040bcd4..94bcc61 100644
---- a/crates/quepaxa/src/replica/ranking.rs
-+++ b/crates/quepaxa/src/replica/ranking.rs
-@@ -311,7 +311,7 @@ impl Replica {
+diff --git a/crates/quepaxa/src/placement_policy.rs b/crates/quepaxa/src/placement_policy.rs
+index d84ad1a..9377a57 100644
+--- a/crates/quepaxa/src/placement_policy.rs
++++ b/crates/quepaxa/src/placement_policy.rs
+@@ -332,7 +332,7 @@ impl Policy {
+             return self.explore(now, periods, writes, order, costs);
          };
-         let held =
-             self.placement.changed_at.is_some_and(|t| now.0.saturating_sub(t.0) < self.cfg.placement_hold);
--        if now.0.saturating_sub(target.since.0) < self.cfg.placement_sustain || held {
-+        if now.0.saturating_sub(target.since.0) < self.cfg.placement_sustain || (held && false) {
-             return;
+         self.pending = Pending::Tracking(target);
+-        if now.0.saturating_sub(target.since.0) < periods.sustain || self.held(now, periods.hold) {
++        if now.0.saturating_sub(target.since.0) < periods.sustain || (self.held(now, periods.hold) && false) {
+             return None;
          }
          // The gain has held: the member ranked best now goes first (the target kept the

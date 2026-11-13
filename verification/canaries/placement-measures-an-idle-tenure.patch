@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/placement_policy.rs b/crates/quepaxa/src/placement_policy.rs
+index d84ad1a..f905b99 100644
+--- a/crates/quepaxa/src/placement_policy.rs
++++ b/crates/quepaxa/src/placement_policy.rs
+@@ -132,7 +132,7 @@ impl Led {
+     /// since.
+     pub(crate) fn spans(&self, sustain: u64) -> bool {
+         self.count >= MIN_ROUNDS
+-            && self.at.0.saturating_sub(self.since.0).saturating_add(2 * PROBE_INTERVAL) >= sustain
++            && sustain > 0
+     }
+ 
+     /// Whether this describes its member at `now`: it spans the period and is not stale.
