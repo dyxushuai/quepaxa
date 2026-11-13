@@ -302,12 +302,17 @@ fn run(kv: &mut Kv, req: &Request, rev: &mut Option<u64>) -> Response {
             Response::Put { prev: prev.filter(|_| *prev_kv) }
         }
         Request::Delete { key, end, prev_kv } => {
-            let doomed = kv.range(key, end);
+            let doomed = if end.is_empty() {
+                kv.delete(key).map(|e| (Arc::from(&key[..]), e)).into_iter().collect()
+            } else {
+                let doomed = kv.range(key, end);
+                for (k, _) in &doomed {
+                    kv.delete(k);
+                }
+                doomed
+            };
             if !doomed.is_empty() {
                 revision(kv);
-            }
-            for (k, _) in &doomed {
-                kv.delete(k);
             }
             let deleted = doomed.len() as u64;
             Response::Delete { deleted, prev: if *prev_kv { doomed } else { Vec::new() } }
