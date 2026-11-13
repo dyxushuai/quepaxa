@@ -29,10 +29,11 @@
 //! Only who proposes, and when, changes; any replica may propose in any slot, so none of
 //! this affects safety.
 
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::Replica;
+use super::disk::{Disk, Health};
 use crate::codec::Body;
 use crate::types::{NodeId, Slot, Timestamp};
 
@@ -52,17 +53,10 @@ pub(super) struct Watch {
     pub(super) forwarded_to: Option<(NodeId, Timestamp)>,
     /// Smoothed delay from a forward to each member's next message (R), in nanoseconds.
     pub(super) reply: BTreeMap<NodeId, u64>,
-    /// Persists issued and not yet durable: id and when.
-    pub(super) unpersisted: VecDeque<(u64, Timestamp)>,
-    /// Smoothed time from issuing a persist to its being durable, in nanoseconds.
-    pub(super) persist: Option<u64>,
-    /// When this replica's disk last completed a write.
-    pub(super) wrote: Timestamp,
-    /// When another replica last told this one of a slot it decided.
-    pub(super) decided_elsewhere: Timestamp,
-    /// When this replica's disk last caught up after being stuck with nobody deciding.
-    pub(super) resumed: Timestamp,
-    /// This replica stepped aside (`aside_at`) and handed its batches to the next member.
+    /// This replica's disk (`disk.rs`).
+    pub(super) disk: Disk,
+    /// This replica stepped aside (`aside_at`) and handed its batches to the next member;
+    /// changed only by `check_aside`.
     pub(super) aside: bool,
     /// When the target last announced a slot it decided.
     pub(super) progressed: Timestamp,
@@ -118,30 +112,13 @@ impl Replica {
         {
             return None;
         }
-        let (d, usual) = (self.hedge_delay(), self.watch.persist?);
-        let (_, oldest) = self.watch.unpersisted.front()?;
-        if self.watch.decided_elsewhere <= *oldest {
-            return None;
-        }
-        Some(oldest.after(d.saturating_mul(4).min(self.cfg.hedge_max).max(d).max(usual.saturating_mul(4))))
+        self.watch.disk.alone_at(self.busy_delay())
     }
 
-    /// When every disk seems stuck (one shared disk): this replica's disk has completed no
-    /// write for δ (at least four usual write times) while one is in flight, and nobody has
-    /// decided a slot since its oldest write was due (four usual write times after it was
-    /// issued): a decision made durable just before every disk stopped may still arrive
-    /// after the write was issued.
-    ///
-    /// Counted from the last completed write, not from when the oldest was issued: with
-    /// group commit a write on a slow disk waits for the flush in progress and then its own,
-    /// so it can wait δ while the disk keeps completing writes. Held there, hedges only fired
-    /// later, still around a slow leader, and stretched the slowdown.
-    pub(super) fn all_stuck_at(&self) -> Option<Timestamp> {
-        let (d, usual) = (self.hedge_delay(), self.watch.persist?);
-        let (_, oldest) = self.watch.unpersisted.front()?;
-        let due = oldest.after(usual.saturating_mul(4));
-        let idle = (*oldest).max(self.watch.wrote).after(d.max(usual.saturating_mul(4)));
-        (self.watch.decided_elsewhere <= due).then_some(idle)
+    /// 4δ, at most `hedge_max`, at least δ.
+    fn busy_delay(&self) -> u64 {
+        let d = self.hedge_delay();
+        d.saturating_mul(4).min(self.cfg.hedge_max).max(d)
     }
 
     pub(super) fn stepped_aside(&self) -> bool {
@@ -295,7 +272,7 @@ impl Replica {
     /// working through a backlog, and hedges would only contend with it; still hedged, in
     /// case the forward was lost). A slot others took over from it does not count.
     ///
-    /// Not while this replica's disk is stuck with nobody deciding (`all_stuck_at`), and
+    /// Not while this replica's disk is stuck with nobody deciding (`Health::SharedStall`), and
     /// counted from when it caught up: no slot can be decided meanwhile, and hedges made then
     /// would contend with the target's slots the moment the disks resume, pushing them off
     /// the fast path. Stepped aside, it hands them over again as usual.
@@ -305,9 +282,10 @@ impl Replica {
     /// entry held on it had no timer until something else woke this replica.
     pub(super) fn late_at(&self, at: Timestamp) -> Option<Timestamp> {
         let d = self.hedge_delay();
-        let busy = d.saturating_mul(4).min(self.cfg.hedge_max).max(d);
-        let late = at.max(self.watch.resumed).after(if self.watch.progressed > at { busy } else { d });
-        let held = !self.watch.aside && self.all_stuck_at().is_some_and(|s| s <= late.min(self.now));
+        let wait = if self.watch.progressed > at { self.busy_delay() } else { d };
+        let late = at.max(self.watch.disk.resumed()).after(wait);
+        let held = !self.watch.aside
+            && matches!(self.watch.disk.health(self.now, d), Health::SharedStall { since } if since <= late);
         (!held).then_some(late)
     }
 

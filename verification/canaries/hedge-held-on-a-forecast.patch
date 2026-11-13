@@ -1,0 +1,11 @@
+--- a/crates/quepaxa/src/replica/watch.rs
++++ b/crates/quepaxa/src/replica/watch.rs
+@@ -285,7 +285,7 @@
+         let wait = if self.watch.progressed > at { self.busy_delay() } else { d };
+         let late = at.max(self.watch.disk.resumed()).after(wait);
+         let held = !self.watch.aside
+-            && matches!(self.watch.disk.health(self.now, d), Health::SharedStall { since } if since <= late);
++            && matches!(self.watch.disk.health(late, d), Health::SharedStall { since } if since <= late);
+         (!held).then_some(late)
+     }
+ 
