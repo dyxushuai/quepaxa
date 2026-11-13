@@ -66,7 +66,7 @@ use crate::sync::mpsc::{self, SyncSender, TrySendError};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use client::{Cmd, Reply};
-use node::{Ev, MAX_FRAME, Node, PeerFrame};
+use node::{Ev, MAX_FRAME, Node, PeerFrame, PeerLink};
 use ops::{RangeReq, Request};
 use storage::Disk;
 
@@ -231,15 +231,39 @@ async fn within_stall(io: impl Future<Output = std::io::Result<()>>) -> bool {
     matches!(tokio::time::timeout(STALL, io).await, Ok(Ok(())))
 }
 
+/// A bulk frame (a snapshot) is written in chunks of this size, each flushed within `STALL`
+/// and followed by a pause as long as it took. On a link whose bottleneck is one FIFO
+/// queue, the consensus connection's frames then wait behind at most one chunk and get at
+/// least half the link. Over 3 MiB/s with 1 ms latency, 64 KiB chunks (21 ms each) still
+/// outlast the commit latency and the followers suspect the leader; much smaller ones
+/// lose time to the timer's 1 ms granularity on every pause.
+const BULK_CHUNK: usize = 32 << 10;
+
 /// Writes one length-prefixed frame, giving up if the socket stops taking bytes for `STALL`.
-async fn send_frame(w: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> bool {
+/// A `bulk` frame is paced (see `BULK_CHUNK`).
+async fn send_frame(w: &mut (impl AsyncWrite + Unpin), frame: &[u8], bulk: bool) -> bool {
     if !within_stall(w.write_u32_le(frame.len() as u32)).await {
         return false;
     }
-    for chunk in frame.chunks(CHUNK) {
-        if !within_stall(w.write_all(chunk)).await {
+    if !bulk {
+        for chunk in frame.chunks(CHUNK) {
+            if !within_stall(w.write_all(chunk)).await {
+                return false;
+            }
+        }
+        return true;
+    }
+    for chunk in frame.chunks(BULK_CHUNK) {
+        let started = tokio::time::Instant::now();
+        if !within_stall(async {
+            w.write_all(chunk).await?;
+            w.flush().await
+        })
+        .await
+        {
             return false;
         }
+        tokio::time::sleep(started.elapsed()).await;
     }
     true
 }
@@ -252,8 +276,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(1);
 /// a connection carries a frame); lost frames are retransmitted by the protocol. A connect
 /// that takes longer than `STALL`, or a socket that takes no bytes for that long, gives the
 /// connection up: on a link that silently drops packets (a partition), TCP would otherwise
-/// keep retrying with its own backoff and resume seconds after the link heals.
-async fn outbound<S, C>(me: u32, connect: impl Fn() -> C, mut rx: tmpsc::Receiver<Vec<u8>>)
+/// keep retrying with its own backoff and resume seconds after the link heals. A `bulk`
+/// connection paces its frames (see `BULK_CHUNK`).
+async fn outbound<S, C>(me: u32, connect: impl Fn() -> C, mut rx: tmpsc::Receiver<Vec<u8>>, bulk: bool)
 where
     S: AsyncWrite + Unpin,
     C: Future<Output = std::io::Result<S>>,
@@ -263,11 +288,11 @@ where
         if let Ok(Ok(s)) = tokio::time::timeout(STALL, connect()).await {
             // Frames queued while the previous batch was written go out in one syscall.
             let mut w = BufWriter::with_capacity(CHUNK, s);
-            let hello = send_frame(&mut w, &me.to_le_bytes()).await && within_stall(w.flush()).await;
+            let hello = send_frame(&mut w, &me.to_le_bytes(), false).await && within_stall(w.flush()).await;
             while hello && let Some(frame) = rx.recv().await {
-                let mut ok = send_frame(&mut w, &frame).await;
+                let mut ok = send_frame(&mut w, &frame, bulk).await;
                 while ok && let Ok(frame) = rx.try_recv() {
-                    ok = send_frame(&mut w, &frame).await;
+                    ok = send_frame(&mut w, &frame, bulk).await;
                 }
                 if !ok || !within_stall(w.flush()).await {
                     break;
@@ -278,6 +303,27 @@ where
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
+}
+
+/// Frames queued for one peer's consensus connection.
+const MSG_QUEUE: usize = 4096;
+/// Snapshots queued for one peer's bulk connection besides the one being sent: each may be
+/// up to `MAX_FRAME`, and a peer that asks again meanwhile can wait for the next.
+const BULK_QUEUE: usize = 1;
+
+/// Starts the two connections to a peer: consensus messages on one and snapshots, paced,
+/// on the other, so a message never waits for a whole snapshot. The peer tells them apart
+/// by frame kind only.
+fn peer_link<S, C>(me: u32, connect: impl Fn() -> C + Clone + Send + 'static) -> PeerLink
+where
+    S: AsyncWrite + Unpin + Send + 'static,
+    C: Future<Output = std::io::Result<S>> + Send + 'static,
+{
+    let (msgs, rx) = tmpsc::channel(MSG_QUEUE);
+    tokio::spawn(outbound(me, connect.clone(), rx, false));
+    let (bulk, rx) = tmpsc::channel(BULK_QUEUE);
+    tokio::spawn(outbound(me, connect, rx, true));
+    PeerLink::new(msgs, bulk)
 }
 
 /// Connects to a peer for `outbound`.
@@ -422,10 +468,8 @@ async fn main() {
             listen = Some(*addr);
             continue;
         }
-        let (tx, rx) = tmpsc::channel(4096);
-        peers.insert(*i, tx);
         let addr = *addr;
-        tokio::spawn(outbound(args.id, move || dial(addr), rx));
+        peers.insert(*i, peer_link(args.id, move || dial(addr)));
     }
     let listen = listen.expect("--members or --peers must include --id");
     let (events, rx) = mpsc::sync_channel(65_536);
@@ -562,7 +606,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (tx, rx) = tmpsc::channel(4096);
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(outbound(0, move || dial(addr), rx));
+        tokio::spawn(outbound(0, move || dial(addr), rx, false));
         // The first connection is accepted and never read, like a link that drops packets.
         let (_stuck, _) = listener.accept().await.unwrap();
         tokio::spawn(async move { while tx.send(vec![0; 64 << 10]).await.is_ok() {} });
@@ -575,7 +619,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let (tx, rx) = tmpsc::channel(4);
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(outbound(0, move || dial(addr), rx));
+        tokio::spawn(outbound(0, move || dial(addr), rx, true));
         let (s, _) = listener.accept().await.unwrap();
         const LEN: usize = 16 << 20; // a large snapshot
         tx.send(vec![7; LEN]).await.unwrap();

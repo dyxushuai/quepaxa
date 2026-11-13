@@ -51,7 +51,11 @@ fn restarted_request_gets_its_own_result_when_incarnations_share_a_slot() {
         let mut cfg = Config::new([1; 16], NodeId(id), (0..3).map(NodeId).collect(), seed);
         cfg.max_in_flight_slots = 1;
         let replica = Replica::new(cfg, records, Timestamp(0)).unwrap();
-        let peers = senders.iter().enumerate().map(|(id, tx)| (id as u32, tx.clone())).collect();
+        let peers = senders
+            .iter()
+            .enumerate()
+            .map(|(id, tx)| (id as u32, PeerLink::new(tx.clone(), tokio::sync::mpsc::channel(1).0)))
+            .collect();
         let (events, _) = std::sync::mpsc::sync_channel(16);
         let mut node = Node::new(replica, disk, peers, u64::MAX, events);
         node.drain();
