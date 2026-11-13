@@ -1,25 +1,13 @@
 diff --git a/examples/kv-tokio/src/main.rs b/examples/kv-tokio/src/main.rs
-index fab1474..3816c01 100644
+index 96b09d4..a637c9f 100644
 --- a/examples/kv-tokio/src/main.rs
 +++ b/examples/kv-tokio/src/main.rs
-@@ -203,15 +203,11 @@ async fn within_stall(io: impl Future<Output = std::io::Result<()>>) -> bool {
- 
- /// Writes one length-prefixed frame, giving up if the socket stops taking bytes for `STALL`.
- async fn send_frame(w: &mut (impl AsyncWrite + Unpin), frame: &[u8]) -> bool {
--    if !within_stall(w.write_u32_le(frame.len() as u32)).await {
--        return false;
--    }
--    for chunk in frame.chunks(CHUNK) {
--        if !within_stall(w.write_all(chunk)).await {
--            return false;
--        }
--    }
--    true
-+    within_stall(async {
-+        w.write_u32_le(frame.len() as u32).await?;
-+        w.write_all(frame).await
-+    })
-+    .await
- }
- 
- /// `outbound`'s redial backoff.
+@@ -253,7 +253,7 @@ async fn send_frame(w: &mut (impl AsyncWrite + Unpin), frame: &[u8], bulk: bool)
+         }
+         return true;
+     }
+-    for chunk in frame.chunks(BULK_CHUNK) {
++    for chunk in frame.chunks(BULK_CHUNK.max(frame.len())) {
+         let started = tokio::time::Instant::now();
+         if !within_stall(async {
+             w.write_all(chunk).await?;
