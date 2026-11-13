@@ -50,6 +50,28 @@ impl PeerFrame {
     }
 }
 
+/// The bounded queues to one peer, each drained onto its own connection. Snapshots take
+/// the bulk queue: a consensus message never waits behind one, which on a slow link would
+/// take seconds and make the peer suspect a live leader and hedge.
+pub struct PeerLink {
+    msgs: Sender<Vec<u8>>,
+    bulk: Sender<Vec<u8>>,
+}
+
+impl PeerLink {
+    pub fn new(msgs: Sender<Vec<u8>>, bulk: Sender<Vec<u8>>) -> Self {
+        Self { msgs, bulk }
+    }
+
+    /// Queues `frame`, or drops it if its queue is full (the peer is unreachable or slow):
+    /// the protocol retransmits what still matters, and a lagging peer asks for a snapshot
+    /// again.
+    pub fn send(&self, frame: PeerFrame) {
+        let queue = if matches!(frame, PeerFrame::Snapshot(_)) { &self.bulk } else { &self.msgs };
+        let _ = queue.try_send(frame.encode());
+    }
+}
+
 pub enum Ev {
     Peer {
         from: u32,
@@ -149,7 +171,7 @@ pub struct Node {
     events: SyncSender<Ev>,
     /// The peer a snapshot was requested from; snapshots from anyone else are ignored.
     snapshot_from: Option<u32>,
-    peers: HashMap<u32, Sender<Vec<u8>>>,
+    peers: HashMap<u32, PeerLink>,
     start: Instant,
     pending_writes: Pending,
     reads: HashMap<ProposalId, (RangeReq, oneshot::Sender<Reply>)>,
@@ -165,7 +187,7 @@ impl Node {
     pub fn new(
         replica: Replica,
         disk: Disk,
-        peers: HashMap<u32, Sender<Vec<u8>>>,
+        peers: HashMap<u32, PeerLink>,
         every: u64,
         events: SyncSender<Ev>,
     ) -> Self {
@@ -178,7 +200,7 @@ impl Node {
         replica: Replica,
         disk: Option<Disk>,
         snapshots: SnapshotWriter,
-        peers: HashMap<u32, Sender<Vec<u8>>>,
+        peers: HashMap<u32, PeerLink>,
         every: u64,
         events: SyncSender<Ev>,
     ) -> Self {
@@ -481,11 +503,9 @@ impl Node {
         }
     }
 
-    /// Bounded per-peer queues: when a peer is unreachable, frames are dropped and the
-    /// protocol retransmits what still matters.
     fn send(&self, to: u32, frame: PeerFrame) {
         if let Some(p) = self.peers.get(&to) {
-            let _ = p.try_send(frame.encode());
+            p.send(frame);
         }
     }
 
@@ -658,13 +678,33 @@ mod tests {
     #[test]
     fn a_full_peer_queue_drops_frames_instead_of_blocking() {
         let mut n = node("full-peer");
-        // Nothing drains this queue, like a peer that is unreachable.
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        n.peers.insert(1, tx);
+        // Nothing drains these queues, like a peer that is unreachable.
+        let (msgs, mut rx) = tokio::sync::mpsc::channel(1);
+        let (bulk, _bulk) = tokio::sync::mpsc::channel(1);
+        n.peers.insert(1, PeerLink::new(msgs, bulk));
         n.send(1, PeerFrame::Msg(Bytes::from_static(b"first")));
         n.send(1, PeerFrame::Msg(Bytes::from_static(b"second")));
         assert_eq!(rx.try_recv().unwrap(), PeerFrame::Msg(Bytes::from_static(b"first")).encode());
         assert!(rx.try_recv().is_err(), "the frame that did not fit was dropped");
+    }
+
+    #[test]
+    fn snapshots_take_the_bulk_queue_and_nothing_else_does() {
+        let mut n = node("bulk-peer");
+        let (msgs, mut msgs_rx) = tokio::sync::mpsc::channel(8);
+        let (bulk, mut bulk_rx) = tokio::sync::mpsc::channel(1);
+        n.peers.insert(1, PeerLink::new(msgs, bulk));
+        let snapshot = || PeerFrame::Snapshot(Bytes::from_static(b"state"));
+        n.send(1, snapshot());
+        n.send(1, snapshot());
+        // The full bulk queue does not hold messages back.
+        n.send(1, PeerFrame::SnapshotRequest);
+        n.send(1, PeerFrame::Msg(Bytes::from_static(b"m")));
+        assert_eq!(bulk_rx.try_recv().unwrap(), snapshot().encode());
+        assert!(bulk_rx.try_recv().is_err(), "the snapshot that did not fit was dropped");
+        assert_eq!(msgs_rx.try_recv().unwrap(), PeerFrame::SnapshotRequest.encode());
+        assert_eq!(msgs_rx.try_recv().unwrap(), PeerFrame::Msg(Bytes::from_static(b"m")).encode());
+        assert!(msgs_rx.try_recv().is_err());
     }
 
     #[test]

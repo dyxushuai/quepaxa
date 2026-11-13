@@ -66,7 +66,7 @@ use crate::sync::mpsc::{self, SyncSender, TrySendError};
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use client::{Cmd, Reply};
-use node::{Ev, MAX_FRAME, Node, PeerFrame};
+use node::{Ev, MAX_FRAME, Node, PeerFrame, PeerLink};
 use ops::{RangeReq, Request};
 use storage::Disk;
 
@@ -280,6 +280,27 @@ where
     }
 }
 
+/// Frames queued for one peer's consensus connection.
+const MSG_QUEUE: usize = 4096;
+/// Snapshots queued for one peer's bulk connection besides the one being sent: each may be
+/// up to `MAX_FRAME`, and a peer that asks again meanwhile can wait for the next.
+const BULK_QUEUE: usize = 1;
+
+/// Starts the two connections to a peer: consensus messages on one and snapshots on the
+/// other, so a message never waits for a snapshot's chunks. The peer tells them apart by
+/// frame kind only.
+fn peer_link<S, C>(me: u32, connect: impl Fn() -> C + Clone + Send + 'static) -> PeerLink
+where
+    S: AsyncWrite + Unpin + Send + 'static,
+    C: Future<Output = std::io::Result<S>> + Send + 'static,
+{
+    let (msgs, rx) = tmpsc::channel(MSG_QUEUE);
+    tokio::spawn(outbound(me, connect.clone(), rx));
+    let (bulk, rx) = tmpsc::channel(BULK_QUEUE);
+    tokio::spawn(outbound(me, connect, rx));
+    PeerLink::new(msgs, bulk)
+}
+
 /// Connects to a peer for `outbound`.
 async fn dial(addr: SocketAddr) -> std::io::Result<TcpStream> {
     let s = TcpStream::connect(addr).await?;
@@ -422,10 +443,8 @@ async fn main() {
             listen = Some(*addr);
             continue;
         }
-        let (tx, rx) = tmpsc::channel(4096);
-        peers.insert(*i, tx);
         let addr = *addr;
-        tokio::spawn(outbound(args.id, move || dial(addr), rx));
+        peers.insert(*i, peer_link(args.id, move || dial(addr)));
     }
     let listen = listen.expect("--members or --peers must include --id");
     let (events, rx) = mpsc::sync_channel(65_536);

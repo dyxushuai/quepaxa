@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## Unreleased
+
+- `examples/kv-tokio`: snapshots travel on their own connection to each peer, with a
+  queue of one, so consensus messages no longer wait behind a snapshot's chunks. A 16 MiB
+  snapshot over a 3 MiB/s link (5.4 s) made the receiving follower suspect the live leader
+  and hedge 22 entries; now none. Each replica opens two connections to every peer.
+
 ## 0.7.0 — 2026-11-13
 
 Leader placement by latency and write load, the paper's §5.3 leader tuning where round
