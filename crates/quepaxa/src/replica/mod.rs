@@ -254,16 +254,16 @@ impl Replica {
             max_message_bytes: cfg.max_message_bytes,
             max_value_bytes: cfg.max_batch_bytes,
         };
+        let schedule = snapshot
+            .as_ref()
+            .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone());
+        let leader = schedule.leader(Slot(floor));
         let mut r = Self {
             me: cfg.id,
             wire,
             rng: ChaCha20::new(cfg.seed),
-            schedule: snapshot
-                .as_ref()
-                .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone()),
-            applied_schedule: snapshot
-                .as_ref()
-                .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone()),
+            schedule: schedule.clone(),
+            applied_schedule: schedule,
             cfg,
             incarnation: last_incarnation + 1,
             now,
@@ -289,7 +289,7 @@ impl Replica {
             relayed: VecDeque::new(),
             forwarded: BTreeMap::new(),
             watch: watch::Watch::default(),
-            placement: placement::Placement::default(),
+            placement: placement::Placement::new(now, leader),
             outstanding: BTreeMap::new(),
             reads: reads::Reads::default(),
             commit_latency: None,
@@ -664,7 +664,11 @@ impl Replica {
 
     fn fence(&mut self) {
         self.fenced = true;
-        let internal = [self.retire_barrier.take().map(|(_, id)| id), self.placement.moving.take()];
+        let moving = self.placement.policy.moving();
+        if let Some(id) = moving {
+            self.placement.policy.on_resolved(id);
+        }
+        let internal = [self.retire_barrier.take().map(|(_, id)| id), moving];
         for id in mem::take(&mut self.outstanding).into_keys().filter(|id| !internal.contains(&Some(*id))) {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }

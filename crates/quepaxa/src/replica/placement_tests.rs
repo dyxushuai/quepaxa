@@ -335,5 +335,5 @@ fn a_tenure_starts_when_the_replica_starts_not_at_the_clocks_epoch() {
     cfg.placement = true;
     let start = Timestamp(1_000 * PROBE_INTERVAL);
     let r = Replica::new(cfg, [], start).unwrap();
-    assert_eq!(r.placement.led_since, start);
+    assert_eq!(r.placement.policy.tenure().since(), start);
 }

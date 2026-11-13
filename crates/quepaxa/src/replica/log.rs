@@ -186,8 +186,7 @@ impl Replica {
                     continue;
                 }
                 // Placement's own move: applied or ignored, the application never sees it.
-                if self.placement.moving == Some(id) {
-                    self.placement.moving = None;
+                if self.placement.policy.on_resolved(id) {
                     self.outstanding.remove(&id);
                     continue;
                 }

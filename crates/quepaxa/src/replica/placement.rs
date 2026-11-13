@@ -19,10 +19,10 @@ use alloc::vec::Vec;
 use super::Replica;
 use crate::batch::{Entry, Item, Kind};
 use crate::codec::Body;
-use crate::types::{NodeId, ProposalId, Slot, Timestamp};
+pub(super) use crate::placement_policy::PROBE_INTERVAL;
+use crate::placement_policy::Policy;
+use crate::types::{NodeId, Slot, Timestamp};
 
-/// How often a member probes while writes flow.
-pub(super) const PROBE_INTERVAL: u64 = 1_000_000_000;
 /// A round trip or table older than this is unknown.
 pub(super) const FRESH_FOR: u64 = 4 * PROBE_INTERVAL;
 /// Own commit latencies kept per probe round for its percentile: past this, every other one
@@ -32,7 +32,7 @@ const LATENCY_SAMPLES: usize = 1024;
 /// Probing stops this long after the last write is applied.
 pub(super) const ACTIVE_FOR: u64 = 4 * PROBE_INTERVAL;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[cfg_attr(feature = "model", derive(Hash))]
 pub(super) struct Placement {
     /// Smoothed round trip to each member, in nanoseconds, and when it was last sampled.
@@ -54,9 +54,6 @@ pub(super) struct Placement {
     /// Each member's 90th-percentile commit latency of its own entries over its last probe
     /// round, from its probes, and when it arrived.
     pub(super) observed: BTreeMap<NodeId, (u64, Timestamp)>,
-    /// The writers' tail commit latency under each member as leader, one sample per round
-    /// of its latest tenure (`ranking.rs`, exploration).
-    pub(super) led: BTreeMap<NodeId, Led>,
     /// This replica's 90th-percentile commit latency over the last probe round with writes.
     pub(super) tail: Option<u64>,
     /// Application entries applied per origin since the last probe round.
@@ -67,76 +64,29 @@ pub(super) struct Placement {
     pub(super) last_write: Option<Timestamp>,
     /// When to probe next; none while idle or disabled.
     pub(super) next_probe: Option<Timestamp>,
-    /// The last round this replica evaluated as leader.
-    pub(super) last_round: Option<Timestamp>,
-    /// The member that has kept a gain over the leader in force, and since when.
-    pub(super) target: Option<Target>,
-    /// When the order in force last changed (none: this replica knows of no change).
-    pub(super) changed_at: Option<Timestamp>,
-    /// When the leader in force became leader, as far as this replica saw.
-    pub(super) led_since: Timestamp,
-    /// Members miss-based rotation removed from first place, not to be placed first again
-    /// until `until`.
-    pub(super) excluded: BTreeMap<NodeId, Exclusion>,
-    /// Placement's own order change, from submission until decided, resolved or fenced.
-    pub(super) moving: Option<ProposalId>,
+    /// The tenure in force, the move in progress, exclusions and measurements.
+    pub(super) policy: Policy,
 }
 
-/// Per-round samples (microseconds): count, sum, sum of squares, and the first and latest
-/// rounds.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[cfg_attr(feature = "model", derive(Hash))]
-pub(super) struct Led {
-    pub(super) count: u64,
-    pub(super) sum: u128,
-    pub(super) sum_sq: u128,
-    pub(super) since: Timestamp,
-    pub(super) at: Timestamp,
-}
-
-impl Led {
-    pub(super) fn add(&mut self, us: u64, at: Timestamp) {
-        if self.count == 0 {
-            self.since = at;
+impl Placement {
+    /// Nothing measured yet; `leader` leads from `now`.
+    pub(super) fn new(now: Timestamp, leader: NodeId) -> Self {
+        Placement {
+            rtt: BTreeMap::new(),
+            awaiting: BTreeMap::new(),
+            tables: BTreeMap::new(),
+            latencies: Vec::new(),
+            latency_seen: 0,
+            latency_stride: 0,
+            observed: BTreeMap::new(),
+            tail: None,
+            writes: BTreeMap::new(),
+            rates: BTreeMap::new(),
+            last_write: None,
+            next_probe: None,
+            policy: Policy::new(now, leader),
         }
-        self.count += 1;
-        self.sum = self.sum.saturating_add(u128::from(us));
-        self.sum_sq = self.sum_sq.saturating_add(u128::from(us) * u128::from(us));
-        self.at = at;
     }
-
-    pub(super) fn mean(&self) -> u128 {
-        self.sum / u128::from(self.count.max(1))
-    }
-
-    /// Variance of the mean.
-    fn var_of_mean(&self) -> u128 {
-        let n = u128::from(self.count.max(1));
-        self.sum_sq.saturating_sub(self.sum * self.sum / n) / n / n
-    }
-
-    /// Whether these samples are slower than `other`'s by more than three standard errors.
-    pub(super) fn worse_than(&self, other: &Led) -> bool {
-        let (a, b) = (self.mean(), other.mean());
-        a > b && (a - b) * (a - b) > 9 * (self.var_of_mean() + other.var_of_mean())
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "model", derive(Hash))]
-pub(super) struct Target {
-    pub(super) member: NodeId,
-    pub(super) leader: NodeId,
-    pub(super) since: Timestamp,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "model", derive(Hash))]
-pub(super) struct Exclusion {
-    pub(super) until: Timestamp,
-    /// Holds this exclusion lasts: doubled each time the member is demoted again before it
-    /// led for a whole hold.
-    pub(super) factor: u64,
 }
 
 pub(super) fn fresh(at: Timestamp, now: Timestamp) -> bool {
