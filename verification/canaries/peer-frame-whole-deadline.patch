@@ -1,29 +1,13 @@
 diff --git a/examples/kv-tokio/src/main.rs b/examples/kv-tokio/src/main.rs
-index 96b09d4..feaa27c 100644
+index 96b09d4..a637c9f 100644
 --- a/examples/kv-tokio/src/main.rs
 +++ b/examples/kv-tokio/src/main.rs
-@@ -253,19 +253,11 @@ async fn send_frame(w: &mut (impl AsyncWrite + Unpin), frame: &[u8], bulk: bool)
+@@ -253,7 +253,7 @@ async fn send_frame(w: &mut (impl AsyncWrite + Unpin), frame: &[u8], bulk: bool)
          }
          return true;
      }
 -    for chunk in frame.chunks(BULK_CHUNK) {
--        let started = tokio::time::Instant::now();
--        if !within_stall(async {
--            w.write_all(chunk).await?;
--            w.flush().await
--        })
--        .await
--        {
--            return false;
--        }
--        tokio::time::sleep(started.elapsed()).await;
--    }
--    true
-+    within_stall(async {
-+        w.write_all(frame).await?;
-+        w.flush().await
-+    })
-+    .await
- }
- 
- /// `outbound`'s redial backoff.
++    for chunk in frame.chunks(BULK_CHUNK.max(frame.len())) {
+         let started = tokio::time::Instant::now();
+         if !within_stall(async {
+             w.write_all(chunk).await?;
