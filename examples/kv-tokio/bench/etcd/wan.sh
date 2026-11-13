@@ -17,7 +17,8 @@
 #   for the jitter scenario; POLICY (kv-tokio flags of the leader policy under test,
 #   default "--placement on --placement-periods 30000,120000") for the policy scenarios,
 #   and for the others too with POLICY_EVERYWHERE=1; SLOW_CPUS (the heterogeneous
-#   scenario's quota, default 0.5); SYSTEMS (default "quepaxa etcd etcd-tuned").
+#   scenario's quota, default 0.5); SLOW_REGION (the region whose container gets that quota,
+#   default the first leader's); SYSTEMS (default "quepaxa etcd etcd-tuned").
 # Needs Docker and jq. Results go to target/bench-etcd/wan-<time>/.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -45,6 +46,7 @@ gen_cpus=${GEN_CPUS:-10-15}
 slow_ms=${SLOW_MS:-100}
 policy=${POLICY:---placement on --placement-periods 30000,120000}
 slow_cpus=${SLOW_CPUS:-0.5}
+slow_region=${SLOW_REGION:-}
 # The policy scenarios: run length, when the load changes, and the last stretch whose
 # latency is reported (after the policy has settled), in seconds.
 policy_case() { case $1 in convergence | heterogeneous | shift | burst) return 0 ;; esac; return 1; }
@@ -67,6 +69,8 @@ rtt=(
   "120 170 190 300 0"
 )
 n=${#regions[@]}
+[ -z "$slow_region" ] || printf '%s\n' "${regions[@]}" | grep -qx -- "$slow_region" ||
+  { echo "unknown SLOW_REGION $slow_region" >&2; exit 2; }
 rtt_of() { local row; read -r -a row <<< "${rtt[$1]}"; echo "${row[$2]}"; }
 # A majority is three of five: a leader waits for its second-nearest peer, the third
 # smallest entry of its row (counting itself).
@@ -104,7 +108,7 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
   for i in $(seq 0 $((n - 1))); do echo "rtt ${regions[$i]}: ${rtt[$i]}"; done
   echo "rate: $rate/s in total, run ${secs}s, fault at ${fault}s, heal at ${heal}s, repeats $repeats, smoke=$smoke"
   echo "slow: +${slow_ms}ms; jitter: ${jitter_ms}ms, ${loss}% loss"
-  echo "policy: $policy (everywhere: ${POLICY_EVERYWHERE:-0}); policy runs ${policy_secs}s, change at ${change_at}s for ${change_for}s, settled from ${settled_from}s; heterogeneous quota $slow_cpus CPUs"
+  echo "policy: $policy (everywhere: ${POLICY_EVERYWHERE:-0}); policy runs ${policy_secs}s, change at ${change_at}s for ${change_for}s, settled from ${settled_from}s; heterogeneous quota $slow_cpus CPUs on ${slow_region:-the first leader}"
   echo "cpus: replicas ${replica_cpus[*]}, generators $gen_cpus"
   echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms; etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
 } > "$results/env.txt"
@@ -112,14 +116,17 @@ cat "$results/env.txt"
 
 # start_quepaxa <pinned> <scenario>: the pinned region leads first; the policy flags apply
 # to the policy scenarios (and to all with POLICY_EVERYWHERE=1); the heterogeneous
-# scenario puts the first leader's container on a CPU quota.
+# scenario puts the first leader's container (or SLOW_REGION's) on a CPU quota.
 start_quepaxa() {
-  local members="" i flags=() quota
+  local members="" i flags=() quota slow=$1
   for i in $(seq 0 $((n - 1))); do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
   if policy_case "$2" || [ "${POLICY_EVERYWHERE:-0}" = 1 ]; then read -r -a flags <<< "$policy"; fi
+  if [ -n "$slow_region" ]; then
+    for i in $(seq 0 $((n - 1))); do [ "${regions[$i]}" = "$slow_region" ] && slow=$i; done
+  fi
   for i in $(seq 0 $((n - 1))); do
     quota=()
-    [ "$2" = heterogeneous ] && [ "$i" = "$1" ] && quota=(--cpus "$slow_cpus")
+    [ "$2" = heterogeneous ] && [ "$i" = "$slow" ] && quota=(--cpus "$slow_cpus")
     docker run -d --name "qpx-r$i" --network "$net" --ip "$(replica_ip "$i")" --cpuset-cpus "${replica_cpus[$i]}" \
       "${quota[@]}" -v "$data/r$i:/data" "$image" \
       kv-tokio --id "$i" --members "$members" --client 0.0.0.0:7100 --etcd 0.0.0.0:2379 --data /data \

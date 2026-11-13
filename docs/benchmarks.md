@@ -98,6 +98,45 @@ perf report --no-children --sort sym
 `kv-bench` prints every replica's `Metrics` after a run (the `STATS` client command), so
 retransmits, hedges, forwards and fast-path decisions are visible next to the latencies.
 
+### At saturation (#155)
+
+Three replicas with data on tmpfs, each pinned to two CPUs (`taskset` 0-1, 2-3, 4-5),
+`kv-bench` on 8-15 with the `run-local.sh` workload (24 connections, half linearizable
+gets), 12-20 s per point, at `ee49e4a` with the `profiling` build and frame pointers.
+Measured 2026-11-13.
+
+| Offered rate | Achieved | Errors | p50 | p90 | p99 |
+|---|---|---|---|---|---|
+| 150,000/s | 150,045/s | 0 | 0.48 ms | 0.99 ms | 65 ms |
+| 200,000/s | 199,949/s | 0 | 0.58 ms | 17 ms | 105 ms |
+| 250,000/s | 250,090/s | 0 | 0.88 ms | 119 ms | 295 ms |
+| 400,000/s | 400,133/s | 0 | 1.3 ms | 145 ms | 247 ms |
+| 500,000/s | 500,258/s | 0 | 4.0 ms | 230 ms | 1,067 ms |
+
+Throughput keeps up past 500k/s (with `max_outstanding_proposals` at 65,536 nothing is
+refused), but the tail grows from 200k/s on. At 250k/s, 8 s of `perf record -F 2999` on
+all three processes: each replica's event-loop thread is busy for 93-99% of the time (one
+full core), its two Tokio workers 30-34% each, so the event loop saturates first, not
+the outbound I/O. Hedges (10,703-127,537 per replica per run) and leader rotations
+(`suspicions` 3-8) show the queueing it causes. Where the event-loop thread's time goes
+(55,489 samples):
+
+| Share | Where |
+|---|---|
+| 49% | kv-tokio's apply (`ops::run`): `BTreeMap` searches in `Kv::put` and `Kv::range`, mostly `memcmp` (19% of the thread on its own) |
+| 15% | the KV's shard copy-on-write after each snapshot (`BTreeMap::clone`) |
+| 12% | `Replica::handle` (decoding and handling peer messages) |
+| 11% | the rest of `Node` (draining actions, replies, sends) |
+| 3.5% | `Replica::propose` |
+| 2.8% | timers (`handle_timeout`, `next_deadline`) |
+| 3% | other core work (`pump`, `Record::encode` 1.7%) |
+
+The core takes about a fifth of the thread; decoding is a small part of that. Moving
+decoding to the host (an API change that would hand the replica pre-decoded messages)
+would save a few percent of one thread and is not worth it. The host's state machine is
+the bottleneck: `Kv::put` searches each key twice (`get`, then `insert`), and every
+snapshot makes the next write to each shard copy it. Data: `target/eval-results/saturation-155/`.
+
 ### Simulated WAN
 
 `run-local.sh 5000 8 50` adds a 50 ms one-way `netem` delay to all loopback traffic,
@@ -458,6 +497,56 @@ What the tables say, and what they do not:
   the 80% line even without a fault.
 - One host: links are emulated, there is no bandwidth limit, and the five replicas share
   the disk and CPUs. Hypotheses for real regions, not production claims.
+
+### A slow member (`wan.sh heterogeneous`, #195)
+
+The `heterogeneous` scenario has no WAN delay and puts one container on a CPU quota
+(`SLOW_CPUS`, 0.5). Its settled commit p50 was about 18 ms in some runs and 5.7 ms in
+others, whichever member led, which looked like the slow member on the commit path. It is
+not: the shared virtual disk switches between two `fsync` regimes, and commit latency
+follows it in every region at once, with or without a quota.
+
+Six back-to-back 300 s runs at `ee49e4a`, alternating no effective quota (`SLOW_CPUS=2` on
+the two-CPU cpuset) and a 0.5 CPU quota on a follower (`SLOW_REGION=us-west`), with the
+leader pinned to ap-ne (`POLICY="--placement off"`). Alongside, a container appended 512
+bytes with `fsync` to the same data disk once a second. p50 in ms over the settled window
+(240-300 s), per origin region:
+
+| Run | Quota | Probe `fsync` p50 | us-east | us-west (slow) | eu-west | ap-ne (leader) | sa-east |
+|---|---|---|---|---|---|---|---|
+| 1 | none | 4.6 | 5.7 | 5.8 | 5.8 | 5.5 | 5.6 |
+| 2 | us-west 0.5 | 8.6 | 18.6 | 18.8 | 18.9 | 18.1 | 18.5 |
+| 3 | none | 8.0 | 17.5 | 17.5 | 17.6 | 16.9 | 17.1 |
+| 4 | us-west 0.5 | 8.4 | 17.7 | 17.9 | 17.9 | 17.4 | 17.7 |
+| 5 | none | 8.4 | 18.7 | 18.8 | 18.8 | 18.3 | 18.5 |
+| 6 | us-west 0.5 | 8.2 | 17.8 | 17.9 | 18.0 | 17.3 | 17.6 |
+
+- **The step is the disk's.** In every run that switched (2, 3, 5), all five regions went
+  from 5.7 to about 18 ms within the same 30 s window as the probe's `fsync` p50 went from
+  about 4.5 to about 8.5 ms; run 1 started in the slow regime (13.5 ms in its first minute)
+  and left it. Single probe `fsync`s took up to 3.3 s around the switch. The guest's IO
+  pressure barely moves (`some` avg10 from about 8.5% to 10-11%): the contention is below
+  the VM.
+- **The slow member is not on the commit path.** Its own region's writes, forwarded
+  through the throttled replica, commit like everyone else's in both regimes; in a
+  separate pair of runs it kept p50 at 5.7 ms for the 170 s before the disk switched, as
+  the run without a quota did throughout, with no retransmission or hedge on any member
+  in the latter. Every container issued the same write IOs and bytes (cgroup `io.stat`;
+  the slow one equal to the others, the leader up to 2% fewer), so the quota adds no disk
+  load. The simulator agrees: with five replicas on a 1 ms LAN, a follower that spends
+  200 or 600 us per message leaves the other origins' p50 unchanged (9.8 ms against 9.8 ms
+  with no slow member, `SimConfig::slow_cpu`); only its own entries slow down.
+- **Why about two `fsync`s.** A write commits once the leader's reservation and a majority
+  of records are durable; with group commit a record often waits for the `fsync` already
+  in progress before its own, so a commit costs between one and two `fsync`s of the
+  moment. The five replicas share one disk, so they also queue behind each other's.
+- The 1.7 ms figure #195 compared against is this host's idle `fsync` (`env.txt`), not a
+  commit p50: with no quota the same harness commits at 5.7 ms in the fast regime.
+
+The data: `target/bench-etcd/wan-20261113-213208/` through `wan-20261113-220040/`, the
+probes and `io.stat` samples in `target/eval-results/slow-follower-ab/`. The earlier
+heterogeneous runs (PR #194, #203) show the same two regimes, switching mid-run under
+one leader.
 
 ## Not measured
 
