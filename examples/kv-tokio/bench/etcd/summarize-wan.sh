@@ -1,9 +1,38 @@
 #!/usr/bin/env bash
 # Turns a results directory from wan.sh into markdown tables: one row per system and case
 # over all regions, then one per region, each value the median over runs with the range.
+# Every row also carries the disk probe wan.sh ran alongside (see disk_row) and the disk
+# regime it puts the case in.
 # Usage: summarize-wan.sh <results dir>
+# Environment: DISK_SLOW_MS (probe fsync p50 in ms from which a run counts as in the slow
+#   disk regime, default 6).
 set -euo pipefail
 dir=$1
+# #208 measured this host's shared disk in two regimes, probe p50 4.5-4.6 ms and 8.0-8.6 ms,
+# with commit p50 about 5.7 and 18 ms; 6 ms lies between them with room on both sides.
+slow_ms=${DISK_SLOW_MS:-6}
+tmpfs=0
+grep -qx 'data: tmpfs' "$dir/env.txt" && tmpfs=1
+
+# One run's disk probe over the same window as its latency: fsync p50 and max in ms, or
+# "- -" for a run without probe samples.
+disk_row() {
+  local from
+  from=$(sed -n 's/^measure_from_s=//p' "$dir/$1-leader.txt" 2>/dev/null)
+  sort -n <(awk -v from="${from:-0}" '$1 >= from { print $2 }' "$dir/$1-disk.txt" 2>/dev/null) | awk '
+    { v[NR] = $1 }
+    END { if (NR) printf "%.1f %.1f", v[int((NR - 1) * 0.5 + 0.5) + 1] / 1000, v[NR] / 1000; else printf "- -" }'
+}
+
+# Reads run rows whose second-to-last column is the probe's p50; prints the disk regime of
+# them all: fast, slow, mixed (runs in both: their medians mix the two), tmpfs (no disk
+# under the replicas), or - (no probe).
+regime() {
+  if [ $tmpfs = 1 ]; then echo tmpfs; return; fi
+  awk -v slow="$slow_ms" '
+    $(NF - 1) != "-" { if ($(NF - 1) + 0 >= slow) s = 1; else f = 1 }
+    END { print s && f ? "mixed" : s ? "slow" : f ? "fast" : "-" }'
+}
 
 # Prints one run's values over the regions given (their generators' files): p50 p99 max
 # (ms, from the merged samples; for the leader-policy scenarios only requests due once the
@@ -94,8 +123,15 @@ echo
 echo "With the leader's region crashed or cut off, its own clients cannot write at all; those"
 echo "rows ($far down) cover the other regions."
 echo
-echo "| System | Case | p50 | p99 | max | Errors | Unanswered | Longest gap (ms) | Degraded (ms) | Leader after | Leader changes | Last change (s) |"
-echo "|---|---|---|---|---|---|---|---|---|---|---|---|"
+echo "\`Disk fsync\` is the probe's p50 and max (ms), one 512-byte append with \`fsync\` a"
+echo "second on the replicas' data disk over the same window; a run is in the slow disk regime"
+echo "from a p50 of $slow_ms ms. Compare only rows of the same regime: on a shared virtual disk"
+echo "it moves every commit latency (docs/benchmarks.md, \"A slow member\")."
+echo
+echo "| System | Case | p50 | p99 | max | Errors | Unanswered | Longest gap (ms) | Degraded (ms) | Leader after | Leader changes | Last change (s) | Disk fsync p50 | Disk fsync max | Disk regime |"
+echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+all_regimes=""
+declare -A case_regime
 for system in $systems; do
   for c in $cases; do
     case $c in "$system"-*) ;; *) continue ;; esac
@@ -103,15 +139,27 @@ for system in $systems; do
     # "etcd-tuned-calm" also starts with "etcd-".
     [ "$system" = etcd ] && [[ $rest == tuned-* ]] && continue
     case $rest in crash | partition) over=$others ;; *) over=$all ;; esac
-    rows=$(for f in "$dir/$c"-[0-9]*-r0.txt; do run_row "$(basename "$f" -r0.txt)" "$over"; done)
-    echo "| $system | $rest$(combine <<< "$rows")"
+    rows=$(for f in "$dir/$c"-[0-9]*-r0.txt; do
+      name=$(basename "$f" -r0.txt)
+      echo "$(run_row "$name" "$over") $(disk_row "$name")"
+    done)
+    case_regime[$c]=$(regime <<< "$rows")
+    all_regimes+=" ${case_regime[$c]}"
+    echo "| $system | $rest$(combine <<< "$rows") ${case_regime[$c]} |"
   done
 done
 echo
+seen=$(tr ' ' '\n' <<< "$all_regimes" | grep -vx -e '' -e - | sort -u | paste -sd' ')
+case $seen in
+  "") echo "No disk probe in these runs." ;;
+  fast | slow | tmpfs) echo "Every case ran in the $seen disk regime." ;;
+  *) echo "**The cases ran in different disk regimes ($seen):** compare only rows of the same regime." ;;
+esac
+echo
 echo "### By region"
 echo
-echo "| System | Case | Region | p50 | p99 | max | Errors | Unanswered | Longest gap (ms) | Degraded (ms) |"
-echo "|---|---|---|---|---|---|---|---|---|---|"
+echo "| System | Case | Region | p50 | p99 | max | Errors | Unanswered | Longest gap (ms) | Degraded (ms) | Disk regime |"
+echo "|---|---|---|---|---|---|---|---|---|---|---|"
 for system in $systems; do
   for c in $cases; do
     case $c in "$system"-*) ;; *) continue ;; esac
@@ -120,7 +168,7 @@ for system in $systems; do
     i=0
     for region in $regions; do
       rows=$(for f in "$dir/$c"-[0-9]*-r"$i".txt; do region_row "$f"; done)
-      echo "| $system | $rest | $region$(combine <<< "$rows")"
+      echo "| $system | $rest | $region$(combine <<< "$rows") ${case_regime[$c]} |"
       i=$((i + 1))
     done
   done

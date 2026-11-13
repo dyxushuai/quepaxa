@@ -18,7 +18,9 @@
 #   default "--placement on --placement-periods 30000,120000") for the policy scenarios,
 #   and for the others too with POLICY_EVERYWHERE=1; SLOW_CPUS (the heterogeneous
 #   scenario's quota, default 0.5); SLOW_REGION (the region whose container gets that quota,
-#   default the first leader's); SYSTEMS (default "quepaxa etcd etcd-tuned").
+#   default the first leader's); SYSTEMS (default "quepaxa etcd etcd-tuned"); PROBE_CPUS
+#   (the disk probe's cpuset, default the generators'); DATA_TMPFS=1 (each replica's data
+#   on its own tmpfs: no disk in the comparison, and no durability either).
 # Needs Docker and jq. Results go to target/bench-etcd/wan-<time>/.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -47,6 +49,8 @@ slow_ms=${SLOW_MS:-100}
 policy=${POLICY:---placement on --placement-periods 30000,120000}
 slow_cpus=${SLOW_CPUS:-0.5}
 slow_region=${SLOW_REGION:-}
+probe_cpus=${PROBE_CPUS:-$gen_cpus}
+data_tmpfs=${DATA_TMPFS:-0}
 # The policy scenarios: run length, when the load changes, and the last stretch whose
 # latency is reported (after the policy has settled), in seconds.
 policy_case() { case $1 in convergence | heterogeneous | shift | burst) return 0 ;; esac; return 1; }
@@ -95,7 +99,7 @@ source "$here/lib.sh"
 replicas=() gens=()
 for i in $(seq 0 $((n - 1))); do replicas+=("qpx-r$i") gens+=("qpx-g$i"); done
 cleanup() {
-  docker rm -f "${replicas[@]}" "${gens[@]}" qpx-burst >/dev/null 2>&1 || true
+  docker rm -f "${replicas[@]}" "${gens[@]}" qpx-burst qpx-disk >/dev/null 2>&1 || true
   wipe_data 2>/dev/null || true
 }
 trap 'cleanup; docker network rm "$net" >/dev/null 2>&1 || true' EXIT
@@ -109,16 +113,23 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
   echo "rate: $rate/s in total, run ${secs}s, fault at ${fault}s, heal at ${heal}s, repeats $repeats, smoke=$smoke"
   echo "slow: +${slow_ms}ms; jitter: ${jitter_ms}ms, ${loss}% loss"
   echo "policy: $policy (everywhere: ${POLICY_EVERYWHERE:-0}); policy runs ${policy_secs}s, change at ${change_at}s for ${change_for}s, settled from ${settled_from}s; heterogeneous quota $slow_cpus CPUs on ${slow_region:-the first leader}"
-  echo "cpus: replicas ${replica_cpus[*]}, generators $gen_cpus"
+  echo "cpus: replicas ${replica_cpus[*]}, generators $gen_cpus, disk probe $probe_cpus"
+  # summarize-wan.sh reads this line.
+  if [ "$data_tmpfs" = 1 ]; then echo "data: tmpfs"; else echo "data: host disk"; fi
   echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms; etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
 } > "$results/env.txt"
 cat "$results/env.txt"
+
+# data_mount <replica>: the docker flags that give it its data directory.
+data_mount() {
+  if [ "$data_tmpfs" = 1 ]; then echo "--tmpfs /data"; else echo "-v $data/r$1:/data"; fi
+}
 
 # start_quepaxa <pinned> <scenario>: the pinned region leads first; the policy flags apply
 # to the policy scenarios (and to all with POLICY_EVERYWHERE=1); the heterogeneous
 # scenario puts the first leader's container (or SLOW_REGION's) on a CPU quota.
 start_quepaxa() {
-  local members="" i flags=() quota slow=$1
+  local members="" i flags=() quota mount slow=$1
   for i in $(seq 0 $((n - 1))); do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
   if policy_case "$2" || [ "${POLICY_EVERYWHERE:-0}" = 1 ]; then read -r -a flags <<< "$policy"; fi
   if [ -n "$slow_region" ]; then
@@ -127,8 +138,9 @@ start_quepaxa() {
   for i in $(seq 0 $((n - 1))); do
     quota=()
     [ "$2" = heterogeneous ] && [ "$i" = "$slow" ] && quota=(--cpus "$slow_cpus")
+    read -r -a mount <<< "$(data_mount "$i")"
     docker run -d --name "qpx-r$i" --network "$net" --ip "$(replica_ip "$i")" --cpuset-cpus "${replica_cpus[$i]}" \
-      "${quota[@]}" -v "$data/r$i:/data" "$image" \
+      "${quota[@]}" "${mount[@]}" "$image" \
       kv-tokio --id "$i" --members "$members" --client 0.0.0.0:7100 --etcd 0.0.0.0:2379 --data /data \
       --leader-order "$(leader_order "$1")" --retransmit-ms 400 --hedge-max-ms 3000 "${flags[@]}" >/dev/null
   done
@@ -136,11 +148,12 @@ start_quepaxa() {
 
 # start_etcd <heartbeat ms> <election ms>
 start_etcd() {
-  local cluster="" i
+  local cluster="" i mount
   for i in $(seq 0 $((n - 1))); do cluster+="${cluster:+,}r$i=http://$(replica_ip "$i"):2380"; done
   for i in $(seq 0 $((n - 1))); do
+    read -r -a mount <<< "$(data_mount "$i")"
     docker run -d --name "qpx-r$i" --network "$net" --ip "$(replica_ip "$i")" --cpuset-cpus "${replica_cpus[$i]}" \
-      -v "$data/r$i:/data" "$etcd_image" \
+      "${mount[@]}" "$etcd_image" \
       etcd --name "r$i" --data-dir /data \
       --listen-peer-urls http://0.0.0.0:2380 --initial-advertise-peer-urls "http://$(replica_ip "$i"):2380" \
       --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls "http://$(replica_ip "$i"):2379" \
@@ -366,16 +379,45 @@ sample_leaders() {
   done
 }
 
+# probe_disk <t0> <secs> <file>: from t0 for that long, once a second, appends 512 bytes with
+# fsync to the replicas' data disk and writes "<second> <us>" to that file in the results:
+# the wall time of one dd, process start included. A shared virtual disk can switch between
+# fsync regimes that move every commit latency (docs/benchmarks.md, "A slow member").
+probe_disk() {
+  # shellcheck disable=SC2016 # expanded in the container
+  docker run --rm --name qpx-disk --cpuset-cpus "$probe_cpus" -v "$data:/d" -v "$results:/out" "$image" bash -c '
+    t0=$1 secs=$2 out=/out/$3 k=0
+    now_us() { echo "${EPOCHREALTIME/[.,]/}"; }
+    append() { dd if=/dev/zero of=/d/probe bs=512 count=1 oflag=append conv=notrunc,fsync 2>/dev/null; }
+    # Unrecorded: the first append creates the file and takes several times longer.
+    append
+    while [ "$k" -lt "$secs" ]; do
+      ms=$((t0 + k * 1000 - $(now_us) / 1000))
+      [ "$ms" -le 0 ] || sleep "$((ms / 1000)).$(printf %03d $((ms % 1000)))"
+      s=$(now_us)
+      append
+      e=$(now_us)
+      echo "$k $((e - s))" >> "$out"
+      # A stalled fsync skips the seconds it took instead of firing a burst after it.
+      k=$(((e / 1000 - t0) / 1000 + 1))
+    done' _ "$1" "$2" "$3"
+}
+
 # One run: a generator per region on its local replica, the fault on the leader's region.
 run_case() {
-  local system=$1 scenario=$2 pinned=$3 name=$4 run=$5 i pids=() before load sampler=""
+  local system=$1 scenario=$2 pinned=$3 name=$4 run=$5 i pids=() before load sampler="" prober=""
   # The policy scenarios report the longest stall after their load changes instead.
   local run_secs=$secs fault_at=$fault
   policy_case "$scenario" && run_secs=$policy_secs fault_at=$change_at
   # Probes (containers of their own) run before and after the load, never during it; only
-  # the policy scenarios sample the leader meanwhile, from the generators' CPUs.
+  # the policy scenarios sample the leader meanwhile, from the generators' CPUs, and the
+  # disk probe (one 512-byte fsync a second, on PROBE_CPUS) runs throughout.
   [ "$scenario" = jitter ] && before=$(reorders)
   local t0=$(($(date +%s%3N) + 5000))
+  if [ "$data_tmpfs" != 1 ]; then
+    probe_disk "$t0" "$run_secs" "$name-disk.txt" &
+    prober=$!
+  fi
   for i in $(seq 0 $((n - 1))); do
     read -r -a load <<< "$(region_load "$scenario" "$i")"
     docker run --rm --name "qpx-g$i" --network "$net" --ip "$(gen_ip "$i")" --cpuset-cpus "$gen_cpus" \
@@ -396,6 +438,7 @@ run_case() {
     heal "$scenario" "$pinned"
   fi
   for i in "${pids[@]}"; do wait "$i"; done
+  [ -z "$prober" ] || wait "$prober"
   if [ -n "$sampler" ]; then
     touch "$results/$name.stop"
     wait "$sampler"
