@@ -117,8 +117,13 @@ settled, plus how often the leading region changed and when it last did (sampled
 | Case | Setup |
 |---|---|
 | `convergence` | the leader starts in ap-ne; every region writes equally |
-| `heterogeneous` | no WAN delay; the first leader's container runs on a `SLOW_CPUS` (0.5) CPU quota |
+| `heterogeneous` | no WAN delay; the first leader's container (or `SLOW_REGION`'s) runs on a `SLOW_CPUS` (0.5) CPU quota |
 | `shift` | the leader starts in us-east; us-east, eu-west and sa-east write until 150 s, then only ap-ne and us-west, for good |
 | `burst` | the leader starts in us-east; ap-ne and sa-east write five times as much from 150 s to 160 s |
 
-`POLICY_EVERYWHERE=1` applies the policy flags to the fault cases too.
+`POLICY_EVERYWHERE=1` applies the policy flags to the fault cases too. To keep a slow
+follower under a full-CPU leader, pin the leader and move the quota:
+`SYSTEMS=quepaxa POLICY="--placement off" SLOW_REGION=us-west wan.sh heterogeneous`. The
+data disk is shared by all five replicas, and on a shared virtual disk its `fsync` latency
+can double mid-run, which moves every region's commit latency together (see
+`docs/benchmarks.md`, "A slow member").
