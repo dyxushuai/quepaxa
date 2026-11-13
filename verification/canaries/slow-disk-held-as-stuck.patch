@@ -1,0 +1,11 @@
+--- a/crates/quepaxa/src/replica/disk.rs
++++ b/crates/quepaxa/src/replica/disk.rs
+@@ -80,7 +80,7 @@
+         let Some(&(_, oldest)) = self.writes.front() else { return Health::Idle };
+         let Some(usual) = self.usual else { return Health::Writing };
+         let usual4 = usual.saturating_mul(4);
+-        let since = oldest.max(self.wrote).after(d.max(usual4));
++        let since = oldest.after(d.max(usual4));
+         if since > now {
+             Health::Writing
+         } else if self.decided_elsewhere <= oldest.after(usual4) {

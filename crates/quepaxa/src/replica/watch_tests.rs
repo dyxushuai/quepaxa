@@ -1,5 +1,6 @@
 //! A follower's watch on its leader: suspecting a silent one and proposing directly.
 
+use super::disk::Health;
 use super::tests::{from_peer, proposal, r_wire, replica_as};
 use super::*;
 
@@ -382,7 +383,7 @@ fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
     .unwrap();
     r.poll_actions(&mut out);
     // Its disk works: the decision's record is written.
-    let (last, _) = *r.watch.unpersisted.back().expect("the decision is being written");
+    let last = r.watch.disk.in_flight().next_back().expect("the decision is being written");
     r.handle(Timestamp(5 * MS), Input::Persisted(PersistId(last))).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.next_deadline(), Some(Timestamp(MS + 4 * 80 * MS)), "4δ, not δ");
@@ -580,11 +581,11 @@ fn a_leader_still_talking_keeps_its_slow_slot() {
 
 /// Leader 0 with a write stuck on its disk since 1 ms (usual writes take 1 ms; δ = 20 ms),
 /// and an entry of its own waiting in a batch.
-fn leader_with_a_stuck_disk() -> (Replica, ProposalId) {
+pub(super) fn leader_with_a_stuck_disk() -> (Replica, ProposalId) {
     let mut r = replica_as(0);
     let mut out = Vec::new();
     r.commit_latency = Some(5 * MS);
-    r.watch.persist = Some(MS);
+    r.watch.disk.assume_usual(MS);
     let id = r.propose(Timestamp(MS), Bytes::from_static(b"own")).unwrap();
     r.poll_actions(&mut out);
     assert!(out.iter().any(|a| matches!(a, Action::Persist { .. })), "a write is in flight");
@@ -633,7 +634,7 @@ fn a_leader_whose_disk_is_stuck_hands_its_entries_on_while_others_decide() {
     assert_eq!(forwards_to(&out, 1), 1, "forwarded to the deputy again");
     assert!(r.relayed.is_empty(), "not hedged here");
     // Its disk catches up: it leads again.
-    let (last, _) = *r.watch.unpersisted.back().expect("writes in flight");
+    let last = r.watch.disk.in_flight().next_back().expect("writes in flight");
     r.handle(r.now, Input::Persisted(PersistId(last))).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.target(), NodeId(0));
@@ -655,13 +656,13 @@ fn a_follower_whose_disk_is_stuck_does_not_step_aside() {
     // Its slots hold nobody up, and stepping aside would stop it hedging around a slow leader.
     let mut r = with_latency(Some(5));
     let mut out = Vec::new();
-    r.watch.persist = Some(MS);
+    r.watch.disk.assume_usual(MS);
     r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 0, 0) };
     r.handle(Timestamp(10 * MS), from_peer(0, 1, decided)).unwrap();
     r.poll_actions(&mut out);
-    assert!(!r.watch.unpersisted.is_empty(), "a write is stuck");
+    assert!(r.watch.disk.in_flight().len() > 0, "a write is stuck");
     assert_eq!(r.aside_at(), None);
     r.handle_timeout(Timestamp(MS + 200 * MS)).unwrap();
     r.poll_actions(&mut out);
@@ -673,11 +674,11 @@ fn a_follower_whose_disk_is_stuck_does_not_step_aside() {
 fn follower_with_a_stuck_disk() -> (Replica, ProposalId) {
     let mut r = with_latency(None);
     let mut out = Vec::new();
-    r.watch.persist = Some(MS);
+    r.watch.disk.assume_usual(MS);
     let request = Body::RecordRequest { slot: Slot(0), step: 4, proposal: proposal(1, 0, 0) };
     r.handle(Timestamp(MS), from_peer(0, 1, request)).unwrap();
     r.poll_actions(&mut out);
-    assert!(!r.watch.unpersisted.is_empty(), "a write is in flight");
+    assert!(r.watch.disk.in_flight().len() > 0, "a write is in flight");
     let id = r.propose(Timestamp(2 * MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 1);
@@ -700,7 +701,7 @@ fn a_follower_does_not_hedge_while_every_disk_seems_stuck() {
     assert!(r.forwarded.contains_key(&id), "not hedged past δ");
     assert_eq!(r.metrics.hedged, 0);
     // The disk catches up: δ counts from then.
-    let (last, _) = *r.watch.unpersisted.back().expect("writes in flight");
+    let last = r.watch.disk.in_flight().next_back().expect("writes in flight");
     r.handle(Timestamp(150 * MS), Input::Persisted(PersistId(last))).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(230 * MS)));
@@ -716,21 +717,21 @@ fn a_disk_that_keeps_completing_writes_is_slow_not_stuck() {
     // hedges there only fired them later, still around the slow leader.
     let mut r = with_latency(None);
     let mut out = Vec::new();
-    r.watch.persist = Some(MS);
+    r.watch.disk.assume_usual(MS);
     for (slot, at) in [(0, 2), (1, 3)] {
         let request = Body::RecordRequest { slot: Slot(slot), step: 4, proposal: proposal(1, 0, slot) };
         r.handle(Timestamp(at * MS / 2), from_peer(0, 1, request)).unwrap();
         r.poll_actions(&mut out);
     }
-    assert_eq!(r.watch.unpersisted.len(), 2, "two writes in flight");
+    assert_eq!(r.watch.disk.in_flight().len(), 2, "two writes in flight");
     let id = r.propose(Timestamp(2 * MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 1);
     // The first write completes, late; the second is still in flight past δ.
-    let (first, _) = *r.watch.unpersisted.front().expect("writes in flight");
+    let first = r.watch.disk.in_flight().next().expect("writes in flight");
     r.handle(Timestamp(40 * MS), Input::Persisted(PersistId(first))).unwrap();
     r.poll_actions(&mut out);
-    assert!(!r.watch.unpersisted.is_empty(), "the second write is still in flight");
+    assert!(r.watch.disk.in_flight().len() > 0, "the second write is still in flight");
     assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(82 * MS)), "not held, δ not restarted");
     r.handle_timeout(Timestamp(82 * MS)).unwrap();
     r.poll_actions(&mut out);
@@ -745,7 +746,9 @@ fn a_hedge_stays_scheduled_until_the_disk_is_actually_stuck() {
     // pushing back; holding on it left the entry with no timer at all.
     let (mut r, id) = follower_with_a_stuck_disk();
     let mut out = Vec::new();
-    assert_eq!(r.all_stuck_at(), Some(Timestamp(81 * MS)));
+    let d = r.hedge_delay();
+    assert_eq!(r.watch.disk.health(Timestamp(81 * MS - 1), d), Health::Writing);
+    assert_eq!(r.watch.disk.health(Timestamp(81 * MS), d), Health::SharedStall { since: Timestamp(81 * MS) });
     assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(82 * MS)), "the hedge is scheduled");
     assert!(r.next_deadline().is_some_and(|t| t <= Timestamp(82 * MS)));
     // Still nothing written by then: stuck, and held.
@@ -781,15 +784,15 @@ fn a_repeat_of_a_slot_already_applied_is_not_progress_elsewhere() {
     let decided = Body::Decided { slot: Slot(5), proposal: proposal(1, 1, 0) };
     r.handle(Timestamp(10 * MS), from_peer(1, 0, decided)).unwrap();
     r.poll_actions(&mut out);
-    assert_eq!(r.watch.decided_elsewhere, Timestamp(0));
+    assert_eq!(r.watch.disk.last_decided_elsewhere(), Timestamp(0));
 }
 
 #[test]
 fn an_unknown_persist_id_leaves_the_writes_in_flight_alone() {
     let (mut r, _) = leader_with_a_stuck_disk();
-    let before = r.watch.unpersisted.clone();
+    let before: Vec<u64> = r.watch.disk.in_flight().collect();
     assert!(r.handle(Timestamp(2 * MS), Input::Persisted(PersistId(1 << 40))).is_err());
-    assert_eq!(r.watch.unpersisted, before);
+    assert_eq!(r.watch.disk.in_flight().collect::<Vec<_>>(), before);
 }
 
 #[test]
@@ -798,7 +801,7 @@ fn a_stepped_aside_deputy_hands_on_what_it_is_handed() {
     let mut r = replica_as(1);
     let mut out = Vec::new();
     r.commit_latency = Some(5 * MS);
-    r.watch.persist = Some(MS);
+    r.watch.disk.assume_usual(MS);
     r.watch.suspects.insert(NodeId(0), Timestamp(0));
     r.propose(Timestamp(MS), Bytes::from_static(b"own")).unwrap();
     r.poll_actions(&mut out);
@@ -835,7 +838,7 @@ fn each_suspicion_is_counted_once() {
 fn the_usual_persist_latency_moves_by_an_eighth_of_each_sample() {
     let mut r = replica_as(0);
     let mut out = Vec::new();
-    r.watch.persist = Some(16 * MS);
+    r.watch.disk.assume_usual(16 * MS);
     r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     let last = out
@@ -847,5 +850,5 @@ fn the_usual_persist_latency_moves_by_an_eighth_of_each_sample() {
         .max()
         .expect("the write is persisted");
     r.handle(Timestamp(9 * MS), Input::Persisted(last)).unwrap();
-    assert_eq!(r.watch.persist, Some(16 * MS - 2 * MS + MS), "an 8 ms write");
+    assert_eq!(r.watch.disk.usual(), Some(16 * MS - 2 * MS + MS), "an 8 ms write");
 }

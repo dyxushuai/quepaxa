@@ -5,7 +5,9 @@
 # (dedup.rs, from crates/quepaxa/src/dedup.rs) applies an entry at most once; the leader
 # schedule (schedule.rs, from crates/quepaxa/src/schedule.rs) never changes the order of a
 # slot within LAG of the slots fed, and a change computed from an older generation installs
-# nothing. Uses Verus, fetched
+# nothing; the disk's health (disk_health.rs, from crates/quepaxa/src/replica/disk.rs and
+# watch.rs) is stuck only when no write completed for δ while one was in flight, holds
+# hedges only during a shared stall, and steps aside and back in turn. Uses Verus, fetched
 # (pinned, checksum verified) into target/verus-<digest>, and the Rust toolchain that
 # release requires (installed with rustup if missing). Linux x86_64 only.
 #
@@ -39,6 +41,7 @@ verus() { "$tools/verus" --crate-type=lib "$@"; }
 verus "$here/gate.rs"
 verus "$here/dedup.rs"
 verus "$here/schedule.rs"
+verus "$here/disk_health.rs"
 
 # Each bug: the file, a name, then a sed expression that plants it. The proof must fail on
 # every one.
@@ -59,6 +62,11 @@ bugs=(
   schedule rotation-not-counted         '0,/self\.generation = self\.generation \+ 1;/s///'
   schedule change-not-counted           '/fn reconfigure/,$ s/self\.generation = self\.generation \+ 1;//'
   schedule change-in-a-rotated-slot     's/ \|\| rotated_here//'
+  disk_health stuck-counted-from-the-oldest-write 's/max_exec\(oldest, self\.wrote\)/oldest/'
+  disk_health shared-stall-despite-a-decision     's/self\.decided_elsewhere <= after_exec\(oldest, usual4\)/self.decided_elsewhere <= now/'
+  disk_health hold-on-a-forecast                  's/match disk\.health\(now, d\)/match disk.health(late, d)/'
+  disk_health resumption-not-recorded             's/^            self\.resumed = now;$//'
+  disk_health step-aside-twice                    's/if aside == self\.aside \{/if false \&\& aside == self.aside {/'
 )
 mkdir -p "$work"
 status=0
