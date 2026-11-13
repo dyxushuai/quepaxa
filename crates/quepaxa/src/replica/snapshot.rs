@@ -142,6 +142,8 @@ impl Replica {
                 b.slot = None;
             }
         }
+        #[cfg(feature = "model")]
+        self.probe_released();
         // The snapshot may carry this replica past its last led slot (`advance_committed`).
         if led && !self.leads_now() {
             self.hand_on_unstarted();

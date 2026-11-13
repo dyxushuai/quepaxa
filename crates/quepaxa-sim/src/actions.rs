@@ -32,7 +32,9 @@ impl Sim {
         // no longer need it) and nothing is being written here.
         let n = &mut self.nodes[i];
         if n.retiring && n.pending.is_empty() {
-            n.replica = None;
+            if let Some(r) = n.replica.take() {
+                self.report.entry_probes += r.inspect().entries;
+            }
             n.retired = true;
             n.retiring = false;
             n.generation += 1;

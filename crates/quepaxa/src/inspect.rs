@@ -81,4 +81,35 @@ pub struct Inspection {
     pub decided: Vec<(u64, ProposalView)>,
     /// Batches this replica proposed that are not yet committed.
     pub local_batches: usize,
+    /// Suspected entry combinations this replica has run into since it started.
+    pub entries: EntryProbes,
+}
+
+/// How often a replica ran into each entry combination suspected reachable in #187 (counted,
+/// not asserted).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EntryProbes {
+    /// D1: an own entry newly both handed (or about to be handed) to the target and in a
+    /// local batch in a slot.
+    pub d1: u64,
+    /// D2: an own entry a lost slot queued again while it was already queued or handed on.
+    pub d2: u64,
+    /// Own entries handed on again while still waiting on an earlier hand-off, restarting
+    /// their hedge clock (D2's consequence).
+    pub d2_restarts: u64,
+    /// D3: an own entry of this incarnation handed to this replica by another member.
+    pub d3: u64,
+    /// D4: on installing a snapshot, an entry of a batch released from its slot that another
+    /// local batch still proposes in a slot.
+    pub d4: u64,
+}
+
+impl core::ops::AddAssign for EntryProbes {
+    fn add_assign(&mut self, o: Self) {
+        self.d1 += o.d1;
+        self.d2 += o.d2;
+        self.d2_restarts += o.d2_restarts;
+        self.d3 += o.d3;
+        self.d4 += o.d4;
+    }
 }
