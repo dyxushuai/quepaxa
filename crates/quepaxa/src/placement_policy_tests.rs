@@ -56,6 +56,87 @@ fn lead(p: &mut Policy, from: u64, until: u64, members: &[NodeId], ms: u64) {
     }
 }
 
+fn samples(us: &[u64]) -> Led {
+    let mut l = Led::default();
+    for (k, &us) in us.iter().enumerate() {
+        l.add(us, t(PI + k as u64));
+    }
+    l
+}
+
+#[test]
+fn samples_keep_their_count_sum_squares_and_first_and_latest_round() {
+    let l = samples(&[3, 5]);
+    assert_eq!((l.count, l.sum, l.sum_sq, l.since, l.at), (2, 8, 34, t(PI), t(PI + 1)));
+    assert_eq!(samples(&[0, 30]).mean(), 15);
+}
+
+#[test]
+fn the_variance_of_the_mean_divides_by_the_count_squared() {
+    // Samples 0 and 20: variance (400 - 20² / 2) / 2 = 100, of the mean 100 / 2 = 50.
+    assert_eq!(samples(&[0, 20]).var_of_mean(), 50);
+    assert_eq!(samples(&[7, 7, 7]).var_of_mean(), 0);
+}
+
+#[test]
+fn slower_means_by_more_than_three_standard_errors() {
+    let (alike, slow) = (samples(&[1, 1]), samples(&[3, 6]));
+    // Means 4 and 1, variance of the mean 1: exactly three standard errors apart (and
+    // (4 + 1)·3 is more than 9).
+    assert!(!slow.worse_than(&alike), "three standard errors is not more than three");
+    assert!(!alike.worse_than(&slow), "faster is never worse");
+    assert!(!alike.worse_than(&alike), "alike is never worse");
+    // Means 13 and 3, variances of the mean 4 each: 10² > 9·8, though 10 + 10 is not.
+    let (fast, slower) = (samples(&[0, 6]), samples(&[10, 16]));
+    assert!(slower.worse_than(&fast));
+}
+
+#[test]
+fn samples_span_the_period_counting_the_two_rounds_before_sampling() {
+    let mut l = Led { count: MIN_ROUNDS, since: t(PI), at: t(PI + SUSTAIN - 2 * PI), ..Led::default() };
+    assert!(l.spans(SUSTAIN));
+    l.at = t(l.at.0 - 1);
+    assert!(!l.spans(SUSTAIN));
+}
+
+/// Twenty samples of exactly `us` over the sustained period up to `at`.
+fn flat(us: u128, at: u64) -> Led {
+    Led { count: 20, sum: 20 * us, sum_sq: 20 * us * us, since: t(at - SUSTAIN), at: t(at) }
+}
+
+#[test]
+fn a_gain_of_exactly_the_slack_is_no_gain() {
+    // A fifth off, and exactly `TIE_SLACK` a write less.
+    let slack = u128::from(WRITES) * TIE_SLACK;
+    let mut p = Policy::new(t(0), NodeId(0));
+    decide(&mut p, PI, &[Some(5 * slack), Some(4 * slack), None]);
+    assert_eq!(p.target(), None);
+    decide(&mut p, 2 * PI, &[Some(5 * slack), Some(4 * slack - 1), None]);
+    assert_eq!(p.target().map(|t| t.member), Some(NodeId(1)));
+}
+
+#[test]
+fn members_within_a_tenth_plus_the_slack_a_write_are_tied() {
+    // 10·c = 11·1_000 + 10·WRITES·TIE_SLACK: tied, so explored; a nanosecond more is not.
+    let edge = (11 * 1_000 + 10 * u128::from(WRITES) * TIE_SLACK) / 10;
+    let mut p = measured_leader(0, 5, SUSTAIN);
+    assert_eq!(decide(&mut p, SUSTAIN, &[Some(1_000), Some(edge), None]), Some(NodeId(1)));
+    let mut p = measured_leader(0, 5, SUSTAIN);
+    assert_eq!(decide(&mut p, SUSTAIN, &[Some(1_000), Some(edge + 1), None]), None);
+}
+
+#[test]
+fn a_member_exactly_a_tenth_faster_is_not_worth_a_move() {
+    // 11 ms against 10 ms: clearly slower, but 10·11 is not less than 11·10.
+    let mut p = Policy::new(t(0), NodeId(0));
+    p.insert_led(NodeId(0), flat(11_000, SUSTAIN));
+    p.insert_led(NodeId(1), flat(10_000, SUSTAIN));
+    p.insert_led(NodeId(2), flat(11_000, SUSTAIN));
+    assert_eq!(decide(&mut p, SUSTAIN, &TIED), None);
+    p.insert_led(NodeId(1), flat(9_999, SUSTAIN));
+    assert_eq!(decide(&mut p, SUSTAIN, &TIED), Some(NodeId(1)));
+}
+
 #[test]
 fn a_new_policy_is_idle_and_its_tenure_starts_at_the_given_time() {
     let p = Policy::new(t(7 * PI), NodeId(2));
@@ -105,6 +186,8 @@ fn a_round_samples_only_two_rounds_into_a_tenure_and_only_a_reported_tail() {
     let mut p = Policy::new(t(10 * PI), NodeId(0));
     p.sample(t(11 * PI), HOLD, &ORDER, Some(5));
     assert_eq!(p.led(NodeId(0)), None, "the writers report their previous round");
+    p.sample(t(12 * PI - 1), HOLD, &ORDER, Some(5));
+    assert_eq!(p.led(NodeId(0)), None, "not yet two whole rounds");
     p.sample(t(12 * PI), HOLD, &ORDER, None);
     assert_eq!(p.led(NodeId(0)), None);
     p.sample(t(12 * PI), HOLD, &ORDER, Some(5));
