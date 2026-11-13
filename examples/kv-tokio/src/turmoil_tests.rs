@@ -58,13 +58,14 @@ impl AsyncWrite for SendBuffer {
 }
 
 /// Runs `outbound` from "sender" to "receiver", fed by the returned queue.
-fn sender(sim: &mut turmoil::Sim<'_>, cap: usize) -> tmpsc::Sender<Vec<u8>> {
+fn sender(sim: &mut turmoil::Sim<'_>, cap: usize, bulk: bool) -> tmpsc::Sender<Vec<u8>> {
     let (tx, rx) = tmpsc::channel(cap);
     let rx = RefCell::new(Some(rx));
     sim.host("sender", move || {
         let rx = rx.borrow_mut().take().expect("the sender is not restarted");
         async move {
-            outbound(0, async || Ok(SendBuffer(TcpStream::connect(("receiver", PORT)).await?)), rx).await;
+            outbound(0, async || Ok(SendBuffer(TcpStream::connect(("receiver", PORT)).await?)), rx, bulk)
+                .await;
             Ok(())
         }
     });
@@ -92,7 +93,7 @@ fn draining_receiver(sim: &mut turmoil::Sim<'_>) -> Rc<RefCell<Vec<Duration>>> {
 #[test]
 fn a_held_link_is_redialed() -> turmoil::Result {
     let mut sim = sim(Some(Duration::from_millis(1)), 64);
-    let tx = sender(&mut sim, 4096);
+    let tx = sender(&mut sim, 4096, false);
     let accepted = draining_receiver(&mut sim);
     sim.client("driver", async move {
         tokio::spawn(async move { while tx.send(vec![0; 64 << 10]).await.is_ok() {} });
@@ -118,7 +119,7 @@ fn a_held_link_is_redialed() -> turmoil::Result {
 #[test]
 fn frames_flow_again_soon_after_a_partition_heals() -> turmoil::Result {
     let mut sim = sim(Some(Duration::from_millis(1)), 64);
-    let tx = sender(&mut sim, 4096);
+    let tx = sender(&mut sim, 4096, false);
     let marker = b"after the repair".as_slice();
     let arrived = Rc::new(RefCell::new(None));
     let log = arrived.clone();
@@ -175,7 +176,7 @@ fn a_large_frame_on_a_slow_draining_link_is_not_cut_off() -> turmoil::Result {
     const LEN: usize = 16 << 20;
     // Four 64 KiB segments in flight: the sender waits on the reader for every chunk.
     let mut sim = sim(Some(Duration::from_millis(1)), 4);
-    let tx = sender(&mut sim, 4);
+    let tx = sender(&mut sim, 4, true);
     sim.client("receiver", async move {
         let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
         tx.send(vec![7; LEN]).await?;
@@ -244,12 +245,10 @@ fn a_client_that_stops_reading_is_bounded_and_answered_in_order() -> turmoil::Re
     sim.run()
 }
 
-/// The slow link of `a_snapshot_on_a_slow_link_delays_no_consensus_message`: bytes per
-/// second, and one-way latency (a WAN path). The bulk connection's chunks still queue ahead
-/// of messages on the link itself; a chunk (about 21 ms here) stays well under the commit
-/// latency over such a path, which is what the replicas' timers scale with.
+/// Bytes per second of the slow link in `snapshot_on_a_slow_link`.
 const LINK_RATE: f64 = (3 << 20) as f64;
-const LINK_LATENCY: Duration = Duration::from_millis(25);
+/// The snapshot `snapshot_on_a_slow_link` sends.
+const SNAPSHOT_LEN: usize = 16 << 20;
 
 /// A slow link shared by every connection between two hosts: each write (at most 64 KiB)
 /// waits until the bytes written before it on the link, on any connection, have gone out.
@@ -287,7 +286,7 @@ impl AsyncWrite for SlowLink {
     }
 }
 
-/// What the replicas of `a_snapshot_on_a_slow_link_delays_no_consensus_message` report.
+/// What the replicas of `snapshot_on_a_slow_link` report.
 #[derive(Default)]
 struct Seen {
     /// Per replica: its `suspicions` and `hedged` metrics.
@@ -357,7 +356,7 @@ fn replica_host(sim: &mut turmoil::Sim<'_>, id: u32, seen: Arc<Mutex<Seen>>) {
                 }
                 if id == 0 && !snapshot_sent && now() >= SNAPSHOT_AT {
                     snapshot_sent = true;
-                    peers[&1].send(PeerFrame::Snapshot(vec![7; 16 << 20].into()));
+                    peers[&1].send(PeerFrame::Snapshot(vec![7; SNAPSHOT_LEN].into()));
                 }
                 let m = replica.metrics();
                 seen.lock().unwrap().metrics[id as usize] = (m.suspicions, m.hedged);
@@ -397,8 +396,19 @@ fn drive(replica: &mut Replica, peers: &HashMap<u32, PeerLink>, seen: &Mutex<See
 }
 
 #[test]
-fn a_snapshot_on_a_slow_link_delays_no_consensus_message() -> turmoil::Result {
-    let mut sim = sim(Some(LINK_LATENCY), 64);
+fn a_snapshot_on_a_slow_link_in_one_region_delays_no_consensus_message() -> turmoil::Result {
+    snapshot_on_a_slow_link(Duration::from_millis(1))
+}
+
+#[test]
+fn a_snapshot_on_a_slow_wan_link_delays_no_consensus_message() -> turmoil::Result {
+    snapshot_on_a_slow_link(Duration::from_millis(25))
+}
+
+/// While a 16 MiB snapshot crosses a `SlowLink` with one-way `latency`, no replica suspects
+/// the leader or hedges, and the snapshot still arrives within 2.5 times the link's time.
+fn snapshot_on_a_slow_link(latency: Duration) -> turmoil::Result {
+    let mut sim = sim(Some(latency), 64);
     let seen = Arc::new(Mutex::new(Seen::default()));
     for id in 0..3 {
         replica_host(&mut sim, id, seen.clone());
@@ -419,6 +429,8 @@ fn a_snapshot_on_a_slow_link_delays_no_consensus_message() -> turmoil::Result {
         let s = watch.lock().unwrap();
         let took = s.snapshot_at.map(|t| t - SNAPSHOT_AT);
         assert!(took.is_some_and(|t| t > STALL), "the link was not slow enough to test anything: {took:?}");
+        let bound = Duration::from_secs_f64(2.5 * SNAPSHOT_LEN as f64 / LINK_RATE);
+        assert!(took.is_some_and(|t| t <= bound), "pacing starved the snapshot: {took:?} > {bound:?}");
         let grew: Vec<_> = before.iter().zip(&s.metrics).map(|(b, a)| (a.0 - b.0, a.1 - b.1)).collect();
         let committed = s.committed - committed;
         eprintln!("snapshot took {took:?}; (suspicions, hedged) grew by {grew:?}; {committed} committed");
