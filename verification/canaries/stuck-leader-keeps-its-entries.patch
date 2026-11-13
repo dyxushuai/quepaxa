@@ -1,13 +1,11 @@
-diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
-index 4cf7499..3919844 100644
---- a/crates/quepaxa/src/replica/watch.rs
-+++ b/crates/quepaxa/src/replica/watch.rs
-@@ -91,7 +91,7 @@ impl Replica {
-         }
-         let (d, usual) = (self.hedge_delay(), self.watch.persist?);
-         let (_, oldest) = self.watch.unpersisted.front()?;
--        if self.watch.decided_elsewhere <= *oldest {
-+        if self.watch.decided_elsewhere <= *oldest || oldest.0 < u64::MAX {
-             return None;
-         }
-         Some(oldest.after(d.saturating_mul(4).min(self.cfg.hedge_max).max(d).max(usual.saturating_mul(4))))
+--- a/crates/quepaxa/src/replica/disk.rs
++++ b/crates/quepaxa/src/replica/disk.rs
+@@ -100,7 +100,7 @@
+     pub(super) fn alone_at(&self, wait: u64) -> Option<Timestamp> {
+         let usual = self.usual?;
+         let &(_, oldest) = self.writes.front()?;
+-        (self.decided_elsewhere > oldest).then(|| oldest.after(wait.max(usual.saturating_mul(4))))
++        (self.decided_elsewhere > oldest && oldest.0 == u64::MAX).then(|| oldest.after(wait.max(usual.saturating_mul(4))))
+     }
+ }
+ 

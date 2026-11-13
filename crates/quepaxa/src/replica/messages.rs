@@ -137,7 +137,7 @@ impl Replica {
                         // New to this replica (`learn` ignores emitted or known slots).
                         if slot.0 >= self.emitted && !self.log.contains_key(&slot) {
                             // A majority made a value durable without this replica (`aside_at`).
-                            self.watch.decided_elsewhere = self.now;
+                            self.watch.disk.decided_elsewhere(self.now);
                             if from == self.target() && !self.proposers.contains_key(&slot) {
                                 self.watch.progressed = self.now;
                             }

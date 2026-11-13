@@ -77,6 +77,27 @@ What the paper leaves open, the crate fixes as follows (the repository's
 - **Durability.** Recorder state is written before any reply that reports it leaves.
 - **Snapshots, catch-up, membership.** See the other chapters.
 
+### Disk health
+
+Each replica judges its own disk (`replica/disk.rs`) from three events: a write issued, writes
+completed, and a slot another replica decided. δ is the hedge delay; *quiet* means no write
+completed for max(δ, four usual write times) while one was in flight; *due* is four usual
+write times after the oldest write in flight was issued.
+
+| Phase | Becomes | When |
+|---|---|---|
+| Idle | Writing | a write is issued |
+| Writing | Idle | every write in flight completes |
+| Writing | Stuck | time passes: quiet, and someone decided after due |
+| Writing | SharedStall | time passes: quiet, and nobody decided after due |
+| SharedStall | Stuck | a decision arrives after due |
+| Stuck, SharedStall | Writing, Idle | a write completes (from SharedStall: δ for held hedges restarts) |
+
+Followers hold hedges only in SharedStall. The replica others hand their entries to steps
+aside once its oldest write has waited 4δ (at most `hedge_max`, at least four usual write
+times) with a decision since it was issued, and comes back when that no longer holds; the
+two alternate.
+
 ## Glossary
 
 - **Replica** — one member of the cluster; runs a proposer and a recorder for every slot.

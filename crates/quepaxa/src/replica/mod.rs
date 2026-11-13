@@ -5,6 +5,7 @@
 //! sending, receiving and catching up, `proposing` the proposer side (batching,
 //! forwarding to the leader, hedging, stalled slots).
 
+mod disk;
 mod gate;
 mod log;
 mod messages;
@@ -636,23 +637,14 @@ impl Replica {
         let before = self.gate.issued();
         self.gate.flush(&mut self.actions);
         if self.gate.issued() > before {
-            self.watch.unpersisted.push_back((before, self.now));
+            self.watch.disk.issued(before, self.now);
         }
     }
 
     fn on_persisted(&mut self, id: PersistId) -> Result<(), Error> {
         let effects = self.gate.persisted(id, &mut self.actions)?;
-        if self.all_stuck_at().is_some_and(|s| s <= self.now) {
-            self.watch.resumed = self.now;
-        }
-        self.watch.wrote = self.now;
-        while let Some(&(p, at)) = self.watch.unpersisted.front()
-            && p <= id.0
-        {
-            self.watch.unpersisted.pop_front();
-            let sample = self.now.0.saturating_sub(at.0);
-            self.watch.persist = Some(self.watch.persist.map_or(sample, |avg| avg - avg / 8 + sample / 8));
-        }
+        let d = self.hedge_delay();
+        self.watch.disk.completed(id.0, self.now, d);
         for e in effects {
             self.apply(e);
         }
@@ -720,6 +712,8 @@ impl Replica {
     }
 }
 
+#[cfg(test)]
+mod disk_tests;
 #[cfg(test)]
 mod placement_tests;
 #[cfg(test)]
