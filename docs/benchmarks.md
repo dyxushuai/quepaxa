@@ -548,6 +548,13 @@ probes and `io.stat` samples in `target/eval-results/slow-follower-ab/`. The ear
 heterogeneous runs (PR #194, #203) show the same two regimes, switching mid-run under
 one leader.
 
+Since #209 `wan.sh` runs this probe in every run (`*-disk.txt`) and `summary.md` gives
+each case the probe's `fsync` p50 and max over the latency's window and a disk regime:
+`slow` from a p50 of 6 ms (`DISK_SLOW_MS`), between the 4.5-4.6 ms and 8.0-8.6 ms of the
+table above, `fast` below, `mixed` when a case's runs fall on both sides. A comparison
+holds only between rows of the same regime; `DATA_TMPFS=1` takes the disk out entirely,
+at the cost of durability.
+
 ## Not measured
 
 - No comparison against the Go reference implementation: running the Go code was out of

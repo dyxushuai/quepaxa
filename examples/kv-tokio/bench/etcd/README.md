@@ -101,6 +101,19 @@ generator reaches its local replica in under 1 ms.
   the jitter rather than spreading ±50 ms: the case is mostly extra, uneven delay plus
   loss. The harness counts TCP reordering events on every replica during the run
   (`reorders=` in `*-leader.txt`); a handful come from the loss.
+- **Disk regime.** Throughout every run a container appends 512 bytes with `fsync` to the
+  replicas' data disk once a second (`*-disk.txt`: second, microseconds of one `dd`,
+  process start included), on `PROBE_CPUS` (the generators' by default: the default
+  cpusets use all 16 CPUs, and one `dd` a second is far below the generators' slack). The
+  summary gives each case the probe's `fsync` p50 and max over the latency's window and a
+  regime: `fast` or `slow` from a p50 of `DISK_SLOW_MS` (6 ms), `mixed` when its runs
+  fall on both sides, and says whether all cases ran in one regime. A shared virtual disk
+  can switch regimes mid-run and move every commit latency with it (see
+  `docs/benchmarks.md`, "A slow member"): compare only rows of the same regime.
+- **`DATA_TMPFS=1`** puts each replica's data directory on its own tmpfs, taking the disk
+  out of a comparison (for leader policies, say). `fsync` costs nothing there, so latency
+  no longer includes durability and is no measure of either system on a real disk; the
+  probe does not run and the regime reads `tmpfs`.
 - **Faults change links in place** (`tc qdisc change`): replacing a link's qdisc would
   drop the packets queued in it.
 
@@ -126,4 +139,5 @@ follower under a full-CPU leader, pin the leader and move the quota:
 `SYSTEMS=quepaxa POLICY="--placement off" SLOW_REGION=us-west wan.sh heterogeneous`. The
 data disk is shared by all five replicas, and on a shared virtual disk its `fsync` latency
 can double mid-run, which moves every region's commit latency together (see
-`docs/benchmarks.md`, "A slow member").
+`docs/benchmarks.md`, "A slow member"); check the summary's disk regime, or run with
+`DATA_TMPFS=1`.
