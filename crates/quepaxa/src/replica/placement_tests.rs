@@ -64,10 +64,15 @@ fn apply_writes(r: &mut Replica, at: Timestamp, origins: &[u32]) {
             kind: Kind::App,
         })
         .collect();
+    apply_items(r, at, &items);
+}
+
+/// Applies one decided slot holding `items`.
+fn apply_items(r: &mut Replica, at: Timestamp, items: &[Item]) {
     let decided = Proposal {
         priority: 1,
         key: ValueKey { origin: NodeId(1), incarnation: 1, seq: r.committed },
-        value: batch::encode(&items),
+        value: batch::encode(items),
     };
     let slot = Slot(r.committed);
     r.handle(at, from_peer(1, r.me.0, Body::Decided { slot, proposal: decided })).unwrap();
@@ -327,6 +332,65 @@ fn the_tail_spans_the_whole_round_however_many_commits() {
         r.placement.latencies.is_empty() && r.placement.latency_stride == 1,
         "the next round starts over"
     );
+}
+
+#[test]
+fn a_probe_without_a_tail_drops_the_one_reported_before() {
+    let mut r = placed(0);
+    let mut out = Vec::new();
+    let probe =
+        |commit| from_peer(1, 0, Body::RttProbe { incarnation: 7, sent: 1, commit, table: Vec::new() });
+    r.handle(Timestamp(3 * MS), probe(5 * MS)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.placement.observed.get(&NodeId(1)), Some(&(5 * MS, Timestamp(3 * MS))));
+    r.handle(Timestamp(4 * MS), probe(0)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.placement.observed.get(&NodeId(1)), None, "a round without own commits reports none");
+}
+
+#[test]
+fn the_tail_is_the_ninetieth_percentile() {
+    let mut r = placed(0);
+    let l: Vec<u64> = (1..=10).rev().map(|k| k * MS).collect();
+    assert_eq!(round_with(&mut r, PROBE_INTERVAL, &l), Some(9 * MS));
+}
+
+#[test]
+fn past_the_cap_every_other_sample_goes_and_the_stride_doubles() {
+    // Latency k ns for the k-th commit from 0, so a sample names its commit.
+    let mut r = placed(0);
+    for k in 0..1024 {
+        r.note_commit_latency(k);
+    }
+    let evens: Vec<u64> = (0..1024).step_by(2).collect();
+    assert_eq!((&r.placement.latencies, r.placement.latency_stride), (&evens, 2));
+    r.note_commit_latency(1024);
+    r.note_commit_latency(1025);
+    assert_eq!(r.placement.latencies[512..], [1024], "one in two from then on, starting at once");
+    for k in 1026..=2048 {
+        r.note_commit_latency(k);
+    }
+    assert_eq!(r.placement.latency_stride, 4);
+    assert_eq!(r.placement.latencies.last(), Some(&2048), "one in four, starting at once");
+}
+
+#[test]
+fn only_own_application_entries_feed_the_tail() {
+    let mut r = placed(0);
+    let own = |id: u64, kind: Kind| Item {
+        entry: Entry {
+            origin: NodeId(0),
+            incarnation: r.incarnation,
+            id: ProposalId(id),
+            payload: Bytes::new(),
+        },
+        kind,
+    };
+    let items = [own(1, Kind::App), own(2, Kind::Reconfigure)];
+    r.outstanding.insert(ProposalId(1), (Timestamp(MS), Kind::App, false));
+    r.outstanding.insert(ProposalId(2), (Timestamp(2 * MS), Kind::Reconfigure, false));
+    apply_items(&mut r, Timestamp(10 * MS), &items);
+    assert_eq!(r.placement.latencies, [9 * MS], "an order change's latency counted");
 }
 
 #[test]

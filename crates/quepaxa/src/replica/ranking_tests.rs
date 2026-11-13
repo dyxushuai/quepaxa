@@ -755,6 +755,29 @@ fn the_writers_tail_is_sampled_under_the_leader_in_force() {
 }
 
 #[test]
+fn the_writers_tail_needs_writers_with_half_the_writes() {
+    // Only this replica (1) reports a tail: exactly half the writes is enough.
+    let mut r = leader(1, &[0, 1, 2]);
+    r.note_commit_latency(4 * MS);
+    round(&mut r, 3 * PROBE_INTERVAL, &rows(&LAN), &[(0, 8), (1, 8)]);
+    let l = r.placement.policy.led(NodeId(0)).map(|l| (l.count, l.sum));
+    assert_eq!(l, Some((1, 4_000)));
+    let mut r = leader(1, &[0, 1, 2]);
+    r.note_commit_latency(4 * MS);
+    round(&mut r, 3 * PROBE_INTERVAL, &rows(&LAN), &[(0, 9), (1, 8)]);
+    assert_eq!(r.placement.policy.led(NodeId(0)), None, "less than half the writes");
+}
+
+#[test]
+fn an_application_write_on_its_way_holds_nothing_back() {
+    let writes = [(0, 10), (1, 10)];
+    let mut r = leader(0, &[0, 1, 2]);
+    r.outstanding.insert(ProposalId(99), (Timestamp(0), Kind::App, false));
+    rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
+    assert_eq!(first(&r), Some(1));
+}
+
+#[test]
 fn a_membership_change_without_an_order_puts_the_best_placed_member_first() {
     // ap-ne leads; us-east (0) is best placed: removing sa-east (4) also reorders.
     let mut r = leader(3, &[3, 0, 1, 2, 4]);
