@@ -149,7 +149,8 @@ for system in $systems; do
   done
 done
 echo
-seen=$(tr ' ' '\n' <<< "$all_regimes" | grep -vx -e '' -e - | sort -u | paste -sd' ')
+# No probe anywhere (results from before the probe) selects nothing: grep's status 1.
+seen=$(tr ' ' '\n' <<< "$all_regimes" | { grep -vx -e '' -e - || [ $? = 1 ]; } | sort -u | paste -sd' ')
 case $seen in
   "") echo "No disk probe in these runs." ;;
   fast | slow | tmpfs) echo "Every case ran in the $seen disk regime." ;;
