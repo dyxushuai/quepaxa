@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/placement_policy.rs b/crates/quepaxa/src/placement_policy.rs
+index d84ad1a..be20ce4 100644
+--- a/crates/quepaxa/src/placement_policy.rs
++++ b/crates/quepaxa/src/placement_policy.rs
+@@ -198,7 +198,7 @@ impl Policy {
+     fn start_tenure(&mut self, leader: NodeId, now: Timestamp) {
+         self.tenure = Tenure { leader, since: now };
+         // A new tenure is measured afresh.
+-        self.led.remove(&leader);
++
+     }
+ 
+     fn untrack(&mut self) {

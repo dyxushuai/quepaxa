@@ -1,7 +1,8 @@
 //! Leader placement decisions, from injected round trips and write counts.
 
-use super::placement::{Led, PROBE_INTERVAL};
+use super::placement::PROBE_INTERVAL;
 use super::*;
+use crate::placement_policy::{Exclusion, Led, Periods, Target, WRITE_FLOOR};
 
 const MS: u64 = 1_000_000;
 const SUSTAIN: u64 = 180 * PROBE_INTERVAL;
@@ -73,7 +74,7 @@ fn rounds(r: &mut Replica, from: u64, secs: u64, rtt: &[&[u64]], writes: &[(u32,
 
 /// The order placement submitted, if any.
 fn moved(r: &Replica) -> Option<Vec<u32>> {
-    let id = r.placement.moving?;
+    let id = r.placement.policy.moving()?;
     let item = r
         .pending
         .iter()
@@ -109,9 +110,9 @@ fn the_leader_moves_to_the_best_placed_member_after_the_sustained_period() {
     round(&mut r, t, &wan(), &all);
     assert_eq!(moved(&r), Some(alloc::vec![0, 1, 2, 4, 3]));
     // One move at a time.
-    let id = r.placement.moving;
+    let id = r.placement.policy.moving();
     rounds(&mut r, t + PROBE_INTERVAL, 5, &wan(), &all);
-    assert_eq!(r.placement.moving, id);
+    assert_eq!(r.placement.policy.moving(), id);
     assert_eq!(r.outstanding.values().filter(|(_, k, _)| *k == Kind::Reconfigure).count(), 1);
 }
 
@@ -202,11 +203,11 @@ fn only_the_leader_in_force_evaluates() {
     // Stepped aside when the move would be due.
     let mut r = leader(0, &[0, 1, 2]);
     let t = rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL, &rows(&three(50)), &writes);
-    assert!(r.placement.target.is_some());
+    assert!(r.placement.policy.target().is_some());
     r.now = Timestamp(t);
     r.watch.aside = true;
     r.evaluate_placement();
-    assert_eq!((moved(&r), r.placement.target), (None, None));
+    assert_eq!((moved(&r), r.placement.policy.target()), (None, None));
 }
 
 #[test]
@@ -219,7 +220,7 @@ fn a_change_on_its_way_holds_placement_back() {
         kind: Kind::Reconfigure,
     });
     rounds(&mut r, PROBE_INTERVAL, 2 * SUSTAIN / PROBE_INTERVAL, &rows(&three(50)), &writes);
-    assert_eq!(r.placement.moving, None);
+    assert_eq!(r.placement.policy.moving(), None);
 }
 
 #[test]
@@ -227,7 +228,7 @@ fn a_recent_order_change_holds_placement_back() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
     // The order changed five minutes before the gain appears; the hold is ten.
-    r.placement.changed_at = Some(Timestamp(PROBE_INTERVAL));
+    r.placement.policy.on_order_applied(Timestamp(PROBE_INTERVAL), HOLD, NodeId(0), NodeId(0), true);
     let t = rounds(&mut r, 300 * PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 10, &rows(&three(50)), &writes);
     assert_eq!(moved(&r), None, "within the hold");
     let until = PROBE_INTERVAL + HOLD;
@@ -247,9 +248,9 @@ fn a_rotated_out_leader_is_not_placed_first_and_twice_as_long_the_next_time() {
     r.now = Timestamp(PROBE_INTERVAL);
     let first = 7 + crate::schedule::LAG;
     r.note_applied(Slot(first - 1));
-    let e = r.placement.excluded[&NodeId(0)];
+    let e = r.placement.policy.exclusion(NodeId(0)).unwrap();
     assert_eq!((e.factor, e.until), (1, Timestamp(PROBE_INTERVAL + HOLD)));
-    assert_eq!(r.placement.changed_at, Some(Timestamp(PROBE_INTERVAL)));
+    assert_eq!(r.placement.policy.changed_at(), Some(Timestamp(PROBE_INTERVAL)));
     // Restored by a change and rotated out again before it led for a whole hold.
     let back = first;
     s.reconfigure(Slot(back), s.generation(), alloc::vec![NodeId(0), NodeId(1), NodeId(2)]).unwrap();
@@ -260,10 +261,10 @@ fn a_rotated_out_leader_is_not_placed_first_and_twice_as_long_the_next_time() {
     r.applied_schedule = s;
     r.now = Timestamp(3 * PROBE_INTERVAL);
     r.note_applied(Slot(from - 1));
-    assert_eq!(r.placement.excluded[&NodeId(0)].factor, 1, "a decided change is no demotion");
+    assert_eq!(r.placement.policy.exclusion(NodeId(0)).unwrap().factor, 1, "a decided change is no demotion");
     r.now = Timestamp(4 * PROBE_INTERVAL);
     r.note_applied(Slot(from + 7 + crate::schedule::LAG - 1));
-    let e = r.placement.excluded[&NodeId(0)];
+    let e = r.placement.policy.exclusion(NodeId(0)).unwrap();
     assert_eq!((e.factor, e.until), (2, Timestamp(4 * PROBE_INTERVAL + 2 * HOLD)));
 }
 
@@ -272,7 +273,7 @@ fn an_excluded_member_is_not_placed_first() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
     let until = Timestamp(10 * HOLD);
-    r.placement.excluded.insert(NodeId(1), placement::Exclusion { until, factor: 1 });
+    r.placement.policy.insert_exclusion(NodeId(1), Exclusion { until, factor: 1 });
     rounds(&mut r, PROBE_INTERVAL, 2 * SUSTAIN / PROBE_INTERVAL, &rows(&three(50)), &writes);
     assert_eq!(moved(&r), None);
 }
@@ -282,7 +283,7 @@ fn the_move_never_reaches_the_application() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
     rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
-    let id = r.placement.moving.expect("a move");
+    let id = r.placement.policy.moving().expect("a move");
     assert_eq!(
         r.propose_reconfiguration(r.now, alloc::vec![NodeId(0), NodeId(1), NodeId(2)], Vec::new()),
         Err(Error::ReconfigurationPending)
@@ -305,7 +306,7 @@ fn the_move_never_reaches_the_application() {
             |a| matches!(a, Action::Committed { id: c, .. } | Action::Dropped { id: c, .. } if *c == id)
         )
     );
-    assert_eq!(r.placement.moving, None);
+    assert_eq!(r.placement.policy.moving(), None);
     assert!(!r.outstanding.contains_key(&id));
 }
 
@@ -335,8 +336,8 @@ fn placements_own_move_is_no_demotion() {
     r.applied_schedule = s;
     r.now = Timestamp(PROBE_INTERVAL);
     r.note_applied(Slot(crate::schedule::LAG - 1));
-    assert!(r.placement.excluded.is_empty());
-    assert_eq!(r.placement.changed_at, Some(Timestamp(PROBE_INTERVAL)));
+    assert!((0..5).all(|n| r.placement.policy.exclusion(NodeId(n)).is_none()));
+    assert_eq!(r.placement.policy.changed_at(), Some(Timestamp(PROBE_INTERVAL)));
 }
 
 #[test]
@@ -348,7 +349,7 @@ fn a_rotation_not_yet_in_force_holds_placement_back() {
         r.schedule.observe(Slot(slot), NodeId(1));
     }
     rounds(&mut r, PROBE_INTERVAL, 2 * SUSTAIN / PROBE_INTERVAL, &rows(&three(50)), &writes);
-    assert_eq!(r.placement.moving, None);
+    assert_eq!(r.placement.policy.moving(), None);
 }
 
 #[test]
@@ -365,16 +366,16 @@ fn a_fenced_or_snapshot_resolved_move_is_never_reported() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
     rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
-    let id = r.placement.moving.expect("a move");
+    let id = r.placement.policy.moving().expect("a move");
     r.fence();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
     assert!(!out.iter().any(|a| matches!(a, Action::Dropped { id: d, .. } if *d == id)), "{out:?}");
-    assert_eq!(r.placement.moving, None);
+    assert_eq!(r.placement.policy.moving(), None);
 
     let mut r = leader(0, &[0, 1, 2]);
     rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
-    let id = r.placement.moving.expect("a move");
+    let id = r.placement.policy.moving().expect("a move");
     let mut dedup = crate::dedup::Dedup::default();
     dedup.first_time(NodeId(0), r.incarnation, id);
     let members = [NodeId(0), NodeId(1), NodeId(2)];
@@ -393,7 +394,7 @@ fn a_fenced_or_snapshot_resolved_move_is_never_reported() {
         ),
         "{out:?}"
     );
-    assert_eq!(r.placement.moving, None);
+    assert_eq!(r.placement.policy.moving(), None);
 }
 
 #[test]
@@ -406,7 +407,7 @@ fn the_best_member_is_placed_even_if_another_started_the_period() {
     silent[0] = [0, UNKNOWN, UNKNOWN, UNKNOWN, UNKNOWN];
     let silent: Vec<&[u64]> = silent.iter().map(|r| &r[..]).collect();
     let t = rounds(&mut r, PROBE_INTERVAL, 5, &silent, &all);
-    assert_eq!(r.placement.target.map(|t| t.member), Some(NodeId(1)));
+    assert_eq!(r.placement.policy.target().map(|t| t.member), Some(NodeId(1)));
     rounds(&mut r, t, SUSTAIN / PROBE_INTERVAL, &wan(), &all);
     assert_eq!(moved(&r).map(|o| o[0]), Some(0));
 }
@@ -484,27 +485,31 @@ fn a_member_whose_table_went_stale_is_not_placed_first() {
 #[test]
 fn a_leader_that_led_for_exactly_a_whole_hold_is_no_longer_excluded() {
     let mut r = leader(0, &[0, 1, 2]);
-    r.placement.led_since = Timestamp(PROBE_INTERVAL);
+    r.placement.policy.on_restart(Timestamp(PROBE_INTERVAL), NodeId(0), false);
     let until = Timestamp(10 * HOLD);
-    r.placement.excluded.insert(NodeId(0), placement::Exclusion { until, factor: 4 });
+    r.placement.policy.insert_exclusion(NodeId(0), Exclusion { until, factor: 4 });
     r.now = Timestamp(PROBE_INTERVAL + HOLD - 1);
     r.close_round();
-    assert!(r.placement.excluded.contains_key(&NodeId(0)), "not yet a whole hold");
+    assert!(r.placement.policy.exclusion(NodeId(0)).is_some(), "not yet a whole hold");
     r.now = Timestamp(PROBE_INTERVAL + HOLD);
     r.close_round();
-    assert!(!r.placement.excluded.contains_key(&NodeId(0)));
+    assert!(r.placement.policy.exclusion(NodeId(0)).is_none());
 }
 
 #[test]
 fn a_snapshot_after_an_order_change_restarts_the_hold() {
     let members = [NodeId(0), NodeId(1), NodeId(2)];
-    let target = placement::Target { member: NodeId(1), leader: NodeId(0), since: Timestamp(1) };
+    let target = Target { member: NodeId(1), leader: NodeId(0), since: Timestamp(1) };
     let install = |schedule: Schedule| {
         let mut r = leader(0, &[0, 1, 2]);
-        r.placement.target = Some(target);
+        // Member 1 gains over 0 from time 1 on.
+        let periods = Periods { sustain: SUSTAIN, hold: HOLD };
+        let costs = [Some(1_000 * u128::from(MS)), Some(u128::from(MS)), None];
+        r.placement.policy.decide(Timestamp(1), periods, WRITE_FLOOR, Some((&members, &costs)));
+        assert_eq!(r.placement.policy.target(), Some(target));
         let state = CoreState { next: 10, leaders: members.to_vec(), schedule, dedup: Default::default() };
         assert_eq!(r.install_snapshot(Timestamp(PROBE_INTERVAL), Slot(9), state.encode()), Ok(true));
-        (r.placement.changed_at, r.placement.target)
+        (r.placement.policy.changed_at(), r.placement.policy.target())
     };
     let mut changed = Schedule::with_order(members.to_vec());
     changed.reconfigure(Slot(0), 0, alloc::vec![NodeId(1), NodeId(0), NodeId(2)]).unwrap();
@@ -548,7 +553,7 @@ fn an_exclusion_ends_at_its_deadline() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
     let until = Timestamp(PROBE_INTERVAL);
-    r.placement.excluded.insert(NodeId(1), placement::Exclusion { until, factor: 1 });
+    r.placement.policy.insert_exclusion(NodeId(1), Exclusion { until, factor: 1 });
     rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
     assert_eq!(moved(&r).map(|o| o[0]), Some(1));
 }
@@ -557,7 +562,7 @@ fn an_exclusion_ends_at_its_deadline() {
 fn the_hold_ends_exactly_a_hold_after_the_last_order_change() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
-    r.placement.changed_at = Some(Timestamp(PROBE_INTERVAL));
+    r.placement.policy.on_order_applied(Timestamp(PROBE_INTERVAL), HOLD, NodeId(0), NodeId(0), true);
     let t = rounds(&mut r, PROBE_INTERVAL, HOLD / PROBE_INTERVAL, &rows(&three(50)), &writes);
     assert_eq!(moved(&r), None, "within the hold");
     assert_eq!(t, PROBE_INTERVAL + HOLD);
@@ -578,7 +583,7 @@ fn led(r: &mut Replica, member: u32, ms: u64, rounds: u64, at: u64) {
         l.add(ms * 1_000 + if k % 2 == 0 { 1_000 } else { 0 }, Timestamp(at));
     }
     l.add(ms * 1_000 - 1_000, Timestamp(at));
-    r.placement.led.insert(NodeId(member), l);
+    r.placement.policy.insert_led(NodeId(member), l);
 }
 
 /// The member a trial or move put first, if any.
@@ -602,7 +607,7 @@ fn a_measured_leader_explores_a_member_the_round_trips_cannot_tell_apart() {
     let mut r = explored(5, &[]);
     // A recent order change does not hold exploration back: each tenure took a sustained
     // period already.
-    r.placement.changed_at = Some(Timestamp(SUSTAIN));
+    r.placement.policy.on_order_applied(Timestamp(SUSTAIN), HOLD, NodeId(0), NodeId(0), true);
     round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
     assert_eq!(first(&r), Some(1));
 }
@@ -613,8 +618,9 @@ fn no_exploration_before_the_tenure_is_measured() {
     led(&mut r, 0, 5, 5, SUSTAIN);
     round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
     assert_eq!(first(&r), None, "too few rounds");
-    let mut r = explored(5, &[]);
-    r.placement.led_since = Timestamp(PROBE_INTERVAL);
+    let mut r = leader(0, &[0, 1, 2]);
+    r.placement.policy.on_restart(Timestamp(PROBE_INTERVAL), NodeId(0), false);
+    led(&mut r, 0, 5, 20, SUSTAIN);
     round(&mut r, SUSTAIN, &rows(&LAN), &ALL);
     assert_eq!(first(&r), None, "not a sustained period");
 }
@@ -655,7 +661,7 @@ fn a_tenure_that_began_idle_explores_only_once_its_writes_span_the_period() {
     for k in 0..20 {
         l.add(5_000, Timestamp(t - 10 * PROBE_INTERVAL + k * PROBE_INTERVAL / 2));
     }
-    r.placement.led.insert(NodeId(0), l);
+    r.placement.policy.insert_led(NodeId(0), l);
     round(&mut r, t, &rows(&LAN), &ALL);
     assert_eq!(first(&r), None);
 }
@@ -669,8 +675,8 @@ fn a_tenure_cut_short_is_not_a_measurement() {
     for k in 0..20 {
         l.add(1_000, Timestamp(SUSTAIN - 10 * PROBE_INTERVAL + k * PROBE_INTERVAL / 2));
     }
-    r.placement.led.insert(NodeId(1), l);
-    r.placement.changed_at = Some(Timestamp(SUSTAIN));
+    r.placement.policy.insert_led(NodeId(1), l);
+    r.placement.policy.on_order_applied(Timestamp(SUSTAIN), HOLD, NodeId(0), NodeId(0), true);
     round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
     assert_eq!(first(&r), Some(1), "explored, though within a hold");
 }
@@ -682,7 +688,7 @@ fn once_every_tied_member_is_measured_the_fastest_leads() {
     assert_eq!(first(&r), Some(1));
     // Not within a hold of the last change.
     let mut r = explored(9, &[(1, 5, SUSTAIN), (2, 7, SUSTAIN)]);
-    r.placement.changed_at = Some(Timestamp(SUSTAIN));
+    r.placement.policy.on_order_applied(Timestamp(SUSTAIN), HOLD, NodeId(0), NodeId(0), true);
     round(&mut r, SUSTAIN + PROBE_INTERVAL, &rows(&LAN), &ALL);
     assert_eq!(first(&r), None);
 }
@@ -703,13 +709,13 @@ fn a_member_demoted_within_four_holds_is_not_explored() {
     let t = 5 * HOLD;
     let mut r = leader(0, &[0, 1, 2]);
     led(&mut r, 0, 5, 20, t);
-    r.placement.excluded.insert(NodeId(1), placement::Exclusion { until: Timestamp(t - HOLD), factor: 1 });
+    r.placement.policy.insert_exclusion(NodeId(1), Exclusion { until: Timestamp(t - HOLD), factor: 1 });
     round(&mut r, t, &rows(&LAN), &ALL);
     assert_eq!(first(&r), Some(2), "1 was demoted too recently");
     // Four holds after its exclusion ended, it may be explored again.
     let mut r = leader(0, &[0, 1, 2]);
     led(&mut r, 0, 5, 20, t);
-    r.placement.excluded.insert(NodeId(1), placement::Exclusion { until: Timestamp(0), factor: 1 });
+    r.placement.policy.insert_exclusion(NodeId(1), Exclusion { until: Timestamp(0), factor: 1 });
     round(&mut r, t, &rows(&LAN), &ALL);
     assert_eq!(first(&r), Some(1));
 }
@@ -744,7 +750,7 @@ fn the_writers_tail_is_sampled_under_the_leader_in_force() {
     r.placement.observed.insert(NodeId(0), (6 * MS, Timestamp(3 * PROBE_INTERVAL)));
     r.placement.observed.insert(NodeId(2), (8 * MS, Timestamp(3 * PROBE_INTERVAL)));
     round(&mut r, 3 * PROBE_INTERVAL, &rows(&LAN), &ALL);
-    let l = r.placement.led[&NodeId(0)];
+    let l = r.placement.policy.led(NodeId(0)).unwrap();
     assert_eq!((l.count, l.sum), (1, 6_000));
 }
 

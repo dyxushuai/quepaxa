@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/placement_policy.rs b/crates/quepaxa/src/placement_policy.rs
+index d84ad1a..a14a358 100644
+--- a/crates/quepaxa/src/placement_policy.rs
++++ b/crates/quepaxa/src/placement_policy.rs
+@@ -320,7 +320,7 @@ impl Policy {
+         let may_lead = |i: usize| {
+             costs[i].is_some_and(|c| {
+                 c.saturating_mul(5) <= current.saturating_mul(4) && current.saturating_sub(c) > slack
+-            }) && !self.excluded(order[i], now)
++            })
+         };
+         let best = (1..order.len()).filter(|&i| may_lead(i)).min_by_key(|&i| (costs[i], i));
+         let tracked = self.target().filter(|t| {

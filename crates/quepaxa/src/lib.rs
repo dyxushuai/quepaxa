@@ -107,6 +107,7 @@ pub mod guide;
 #[cfg(feature = "model")]
 #[doc(hidden)]
 pub mod inspect;
+mod placement_policy;
 mod proposal;
 mod proposer;
 mod recorder;

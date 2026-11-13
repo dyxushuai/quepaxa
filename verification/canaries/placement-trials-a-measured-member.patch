@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/placement_policy.rs b/crates/quepaxa/src/placement_policy.rs
+index d84ad1a..7dbe400 100644
+--- a/crates/quepaxa/src/placement_policy.rs
++++ b/crates/quepaxa/src/placement_policy.rs
+@@ -374,7 +374,7 @@ impl Policy {
+         // Exploring: the next tied member not measured, best placed first; no hold between
+         // steps, each tenure already took a sustained period.
+         if let Some(&i) =
+-            tied.iter().filter(|&&i| measured(order[i]).is_none()).min_by_key(|&&i| (costs[i], i))
++            tied.iter().min_by_key(|&&i| (costs[i], i))
+         {
+             return Some(order[i]);
+         }

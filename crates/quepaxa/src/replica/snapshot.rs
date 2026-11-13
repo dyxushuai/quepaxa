@@ -102,12 +102,12 @@ impl Replica {
         let led = self.leads_now();
         self.applied_schedule = state.schedule.clone();
         self.schedule = state.schedule;
-        if self.cfg.placement {
-            self.restart_hold();
-        }
         self.dedup = state.dedup;
         self.emitted = state.next;
         self.committed = state.next;
+        if self.cfg.placement {
+            self.restart_hold();
+        }
         // Local work the snapshot already contains is resolved from its dedup state.
         let me = self.me;
         let inc = self.incarnation;
@@ -124,8 +124,7 @@ impl Replica {
                 self.confirm_retired();
                 continue;
             }
-            if self.placement.moving == Some(id) {
-                self.placement.moving = None;
+            if self.placement.policy.on_resolved(id) {
                 continue;
             }
             // A decided change enters dedup whether it was applied or ignored.

@@ -39,3 +39,10 @@ placement-ignores-the-hold	-	cargo nextest run --no-fail-fast -p quepaxa ranking
 hedge-on-a-shared-disk-stall	-	cargo nextest run --no-fail-fast -p quepaxa watch_tests	not hedged past
 quorum-of-the-configured-size	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership_changes	G[1345] |agreement|did not converge|no progress
 change-keeps-the-cluster-size	-	cargo nextest run --release -p quepaxa-sim --test model_check a_cluster_grown	which no change asked for
+placement-excluded-member-tracked	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	an excluded member is never tracked
+placement-explores-a-demoted-member	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	1 was demoted too recently
+placement-measures-an-idle-tenure	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	an idle stretch counted as measured
+placement-counts-a-past-tenure	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	a sample from a past tenure counted
+placement-trials-a-measured-member	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	1 is measured, 2 is next
+placement-move-never-resolves	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	a resolved move leaves nothing pending
+placement-tenure-from-clock-zero	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	not a sustained tenure yet

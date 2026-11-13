@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/placement_policy.rs b/crates/quepaxa/src/placement_policy.rs
+index d84ad1a..5c42526 100644
+--- a/crates/quepaxa/src/placement_policy.rs
++++ b/crates/quepaxa/src/placement_policy.rs
+@@ -367,7 +367,7 @@ impl Policy {
+         // measurement too, and its tenure's samples from before whatever slowed it no longer
+         // describe it.
+         let demoted =
+-            |n: NodeId| self.excluded.get(&n).is_some_and(|e| e.until.after(hold.saturating_mul(4)) > now);
++            |n: NodeId| self.excluded(n, now);
+         let measured = |n: NodeId| self.led(n).filter(|l| l.measured(now, sustain, stale));
+         let tied: Vec<usize> =
+             (1..order.len()).filter(|&i| costs[i].is_some_and(alike) && !demoted(order[i])).collect();

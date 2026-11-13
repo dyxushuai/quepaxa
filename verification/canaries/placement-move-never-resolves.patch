@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/placement_policy.rs b/crates/quepaxa/src/placement_policy.rs
+index d84ad1a..f781913 100644
+--- a/crates/quepaxa/src/placement_policy.rs
++++ b/crates/quepaxa/src/placement_policy.rs
+@@ -280,7 +280,7 @@ impl Policy {
+         if self.pending != Pending::Moving(id) {
+             return false;
+         }
+-        self.pending = Pending::Idle;
++
+         true
+     }
+ 
