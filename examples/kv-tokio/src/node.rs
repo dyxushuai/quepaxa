@@ -3,18 +3,20 @@
 //! fsync (group commit); their gated messages leave only after it.
 
 use std::collections::HashMap;
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use quepaxa::{Action, Input, PersistId, ProposalId, Replica, Slot, Timestamp};
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::{self as tmpsc, Sender};
 use tokio::sync::oneshot;
 
 use crate::client::{Cmd, Failure, Pending, Reply};
 use crate::kv::Kv;
 use crate::ops::{self, RangeReq, Request};
 use crate::storage::{Disk, Log, SnapshotWriter, decode_snapshot, encode_snapshot};
-use crate::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use crate::sync::mpsc::{self, Receiver};
 use crate::sync::{Arc, Condvar, Mutex, MutexGuard, thread};
 
 /// Largest frame on a peer link; snapshots larger than this are not taken (see `maybe_snapshot`).
@@ -168,7 +170,7 @@ pub struct Node {
     /// A snapshot is being written in the background.
     snapshotting: bool,
     /// For background work to report back to the event loop.
-    events: SyncSender<Ev>,
+    events: Sender<Ev>,
     /// The peer a snapshot was requested from; snapshots from anyone else are ignored.
     snapshot_from: Option<u32>,
     peers: HashMap<u32, PeerLink>,
@@ -183,13 +185,104 @@ pub struct Node {
 /// How many queued events are handled before their persists are flushed together.
 const GROUP: usize = 512;
 
+/// The event loop's end of the bounded event queue. IO tasks await room in it (`send`), so
+/// a busy loop holds them back without polling; the loop sleeps while the queue is empty,
+/// and the queue's waker rings the bell to wake it.
+struct Inbox {
+    rx: tmpsc::Receiver<Ev>,
+    bell: std::sync::Arc<Bell>,
+    waker: Waker,
+}
+
+enum Received {
+    /// At least one event, in the batch.
+    Events,
+    Timeout,
+    /// Every sender is gone.
+    Closed,
+}
+
+/// A wake-up that outlives the moment it is rung: one rung between the loop's poll and its
+/// wait ends that wait at once. A lock and a condition variable rather than thread parking,
+/// whose spurious wake-ups shuttle would explore as an endless poll loop.
+#[derive(Default)]
+struct Bell {
+    state: Mutex<BellState>,
+    rung: Condvar,
+}
+
+#[derive(Default)]
+struct BellState {
+    rung: bool,
+    /// The loop waits: only then does a ring notify (a system call).
+    waiting: bool,
+}
+
+impl Wake for Bell {
+    fn wake(self: std::sync::Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &std::sync::Arc<Self>) {
+        let waiting = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.rung = true;
+            state.waiting
+        };
+        // After unlocking: the woken loop would otherwise block on the lock at once.
+        if waiting {
+            self.rung.notify_one();
+        }
+    }
+}
+
+impl Bell {
+    /// Waits until rung or `until` (for ever if `None`), and unrings.
+    fn wait(&self, until: Option<Instant>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.waiting = true;
+        while !state.rung {
+            state = match until.map(|t| t.saturating_duration_since(Instant::now())) {
+                None => self.rung.wait(state).unwrap_or_else(|e| e.into_inner()),
+                Some(Duration::ZERO) => break,
+                Some(wait) => self.rung.wait_timeout(state, wait).unwrap_or_else(|e| e.into_inner()).0,
+            };
+        }
+        *state = BellState::default();
+    }
+}
+
+impl Inbox {
+    fn new(rx: tmpsc::Receiver<Ev>) -> Self {
+        let bell = std::sync::Arc::new(Bell::default());
+        Self { rx, waker: Waker::from(bell.clone()), bell }
+    }
+
+    /// Up to `GROUP + 1` queued events into `batch`, waiting for the first until `until`
+    /// (for ever if `None`). Taken together, their queue slots are released at once: one
+    /// wake-up of the senders waiting for room rather than one per event.
+    fn recv(&mut self, until: Option<Instant>, batch: &mut Vec<Ev>) -> Received {
+        let mut cx = Context::from_waker(&self.waker);
+        // No spinning before the wait: measured, it cost CPU at low load and throughput at
+        // overload, where the loop shares its CPUs with the IO workers it waits on.
+        loop {
+            match self.rx.poll_recv_many(&mut cx, batch, GROUP + 1) {
+                Poll::Ready(0) => return Received::Closed,
+                Poll::Ready(_) => return Received::Events,
+                Poll::Pending if until.is_some_and(|t| t <= Instant::now()) => return Received::Timeout,
+                Poll::Pending => self.bell.wait(until),
+            }
+        }
+    }
+}
+
 impl Node {
     pub fn new(
         replica: Replica,
         disk: Disk,
         peers: HashMap<u32, PeerLink>,
         every: u64,
-        events: SyncSender<Ev>,
+        events: Sender<Ev>,
     ) -> Self {
         let snapshots = disk.snapshots();
         Self::with(replica, Some(disk), snapshots, peers, every, events)
@@ -202,7 +295,7 @@ impl Node {
         snapshots: SnapshotWriter,
         peers: HashMap<u32, PeerLink>,
         every: u64,
-        events: SyncSender<Ev>,
+        events: Sender<Ev>,
     ) -> Self {
         Self {
             replica,
@@ -255,7 +348,10 @@ impl Node {
         Ok(())
     }
 
-    pub fn run(mut self, rx: Receiver<Ev>) {
+    /// Runs the event loop on the calling thread, which sleeps in `Inbox::recv` between events.
+    pub fn run(mut self, rx: tmpsc::Receiver<Ev>) {
+        let mut inbox = Inbox::new(rx);
+        let mut batch = Vec::with_capacity(GROUP + 1);
         if let Some(disk) = self.disk.take() {
             self.start_writer(disk);
         }
@@ -273,18 +369,17 @@ impl Node {
             let wait = self.replica.next_deadline().map_or(Duration::from_secs(1), |Timestamp(t)| {
                 Duration::from_nanos(t.saturating_sub(self.now().0))
             });
-            match rx.recv_timeout(wait) {
-                Ok(ev) => {
-                    self.on_event(ev);
-                    for ev in rx.try_iter().take(GROUP) {
+            match inbox.recv(Some(Instant::now() + wait), &mut batch) {
+                Received::Events => {
+                    for ev in batch.drain(..) {
                         self.on_event(ev);
                         if self.pending > self.max_unwritten / 8 {
                             self.flush();
                         }
                     }
                 }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return,
+                Received::Timeout => {}
+                Received::Closed => return,
             }
             self.on_written();
             self.flush();
@@ -550,7 +645,7 @@ impl Node {
             } else {
                 writer.save(through, &bytes).map_err(|e| e.to_string())
             };
-            let _ = events.send(Ev::SnapshotSaved { through, core, bytes, saved });
+            let _ = events.blocking_send(Ev::SnapshotSaved { through, core, bytes, saved });
         });
     }
 }
@@ -564,7 +659,7 @@ fn batch_bytes(batch: &[PendingPersist]) -> u64 {
 fn write_persists(
     mut disk: impl Log,
     queue: &Receiver<Vec<PendingPersist>>,
-    events: &SyncSender<Ev>,
+    events: &Sender<Ev>,
     written: &Written,
 ) {
     let mut total = 0;
@@ -593,7 +688,7 @@ fn write_persists(
         written.advance(total, Some(Report { id, then, ok }));
         // A full queue needs no wake-up: the event loop has events to handle and takes
         // the reports with them.
-        if matches!(events.try_send(Ev::Written), Err(TrySendError::Disconnected(_))) || !ok {
+        if matches!(events.try_send(Ev::Written), Err(TrySendError::Closed(_))) || !ok {
             return;
         }
     }
@@ -615,7 +710,7 @@ mod tests {
         let (disk, records) = Disk::open(&dir).unwrap();
         let cfg = quepaxa::Config::new([1; 16], quepaxa::NodeId(0), vec![quepaxa::NodeId(0)], [2; 32]);
         let replica = Replica::new(cfg, records, Timestamp(0)).unwrap();
-        let (events, _) = std::sync::mpsc::sync_channel(16);
+        let (events, _) = tmpsc::channel(16);
         let mut n = Node::new(replica, disk, HashMap::new(), u64::MAX, events);
         n.drain();
         n

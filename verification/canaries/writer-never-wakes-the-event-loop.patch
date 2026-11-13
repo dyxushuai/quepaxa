@@ -1,14 +1,14 @@
 diff --git a/examples/kv-tokio/src/node.rs b/examples/kv-tokio/src/node.rs
-index b889824..08a63eb 100644
+index 213a9e4..107f50e 100644
 --- a/examples/kv-tokio/src/node.rs
 +++ b/examples/kv-tokio/src/node.rs
-@@ -565,7 +565,8 @@ fn write_persists(
+@@ -674,7 +674,8 @@ fn write_persists(
          written.advance(total, Some(Report { id, then, ok }));
          // A full queue needs no wake-up: the event loop has events to handle and takes
          // the reports with them.
--        if matches!(events.try_send(Ev::Written), Err(TrySendError::Disconnected(_))) || !ok {
+-        if matches!(events.try_send(Ev::Written), Err(TrySendError::Closed(_))) || !ok {
 +        let _ = events;
-+        if matches!(Ok::<(), TrySendError<Ev>>(()), Err(TrySendError::Disconnected(_))) || !ok {
++        if matches!(Ok::<(), TrySendError<Ev>>(()), Err(TrySendError::Closed(_))) || !ok {
              return;
          }
      }

@@ -1,0 +1,15 @@
+diff --git a/examples/kv-tokio/src/node.rs b/examples/kv-tokio/src/node.rs
+index c840908..f8ff9b7 100644
+--- a/examples/kv-tokio/src/node.rs
++++ b/examples/kv-tokio/src/node.rs
+@@ -232,9 +232,7 @@ impl Wake for Bell {
+             state.waiting
+         };
+         // After unlocking: the woken loop would otherwise block on the lock at once.
+-        if waiting {
+-            self.rung.notify_one();
+-        }
++        let _ = waiting;
+     }
+ }
+ 

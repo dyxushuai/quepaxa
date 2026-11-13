@@ -56,7 +56,7 @@ fn restarted_request_gets_its_own_result_when_incarnations_share_a_slot() {
             .enumerate()
             .map(|(id, tx)| (id as u32, PeerLink::new(tx.clone(), tokio::sync::mpsc::channel(1).0)))
             .collect();
-        let (events, _) = std::sync::mpsc::sync_channel(16);
+        let (events, _) = tokio::sync::mpsc::channel(16);
         let mut node = Node::new(replica, disk, peers, u64::MAX, events);
         node.drain();
         persist(&mut node);
