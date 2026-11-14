@@ -157,19 +157,7 @@ pub struct Replica {
     snapshot_state: Option<Bytes>,
     snapshot_asked: Option<Timestamp>,
 
-    // Retirement, while this replica is removed from the latest epoch.
-    /// Durable progress each member of that epoch reported in catch-up replies.
-    member_progress: BTreeMap<NodeId, u64>,
-    /// When to ask the members still behind again.
-    retire_probe: Option<Timestamp>,
-    /// The epoch `Action::Retired` was reported for.
-    retired: Option<u64>,
-    /// A barrier entry of this replica's own (through the log), confirming retirement from this epoch once
-    /// committed (a later change may have added it back); never reported to the caller.
-    retire_barrier: Option<(u64, ProposalId)>,
-    /// That barrier committed; retirement is decided once everything learned with it is
-    /// applied (the same page may add the replica back).
-    retire_committed: Option<u64>,
+    retirement: retire::Retirement,
     /// Steps at which this replica's proposers decided, for verification only.
     #[cfg(feature = "model")]
     decided_steps: BTreeMap<Slot, (Proposal, u32)>,
@@ -307,11 +295,7 @@ impl Replica {
             floor,
             snapshot_state: snapshot.map(|(_, b)| b),
             snapshot_asked: None,
-            member_progress: BTreeMap::new(),
-            retire_probe: None,
-            retired: None,
-            retire_barrier: None,
-            retire_committed: None,
+            retirement: retire::Retirement::default(),
             #[cfg(feature = "model")]
             decided_steps: BTreeMap::new(),
             #[cfg(feature = "model")]
@@ -675,7 +659,7 @@ impl Replica {
         if let Some(id) = moving {
             self.placement.policy.on_resolved(id);
         }
-        let internal = [self.retire_barrier.take().map(|(_, id)| id), moving];
+        let internal = [self.retirement.fence(), moving];
         for id in mem::take(&mut self.outstanding).into_keys().filter(|id| !internal.contains(&Some(*id))) {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }
