@@ -133,6 +133,7 @@ settled, plus how often the leading region changed and when it last did (sampled
 | `heterogeneous` | no WAN delay; the first leader's container (or `SLOW_REGION`'s) runs on a `SLOW_CPUS` (0.5) CPU quota |
 | `shift` | the leader starts in us-east; us-east, eu-west and sa-east write until 150 s, then only ap-ne and us-west, for good |
 | `burst` | the leader starts in us-east; ap-ne and sa-east write five times as much from 150 s to 160 s |
+| `speedup` | as `heterogeneous`, and the quota is lifted at 150 s; `*-leader.txt` gives `back_to_fast_s`, when the lead first went back to that member (`-`: not within the run). Use `SLOW_CPUS=0.2`: at 0.5 a leader is not measurably slower |
 
 `POLICY_EVERYWHERE=1` applies the policy flags to the fault cases too. To keep a slow
 follower under a full-CPU leader, pin the leader and move the quota:

@@ -555,6 +555,50 @@ table above, `fast` below, `mixed` when a case's runs fall on both sides. A comp
 holds only between rows of the same regime; `DATA_TMPFS=1` takes the disk out entirely,
 at the cost of durability.
 
+### A member that gets faster (`wan.sh speedup`, #206)
+
+Paper §5.3 footnote 7 suggests measuring a non-leader again when its conditions change,
+rather than only once its measurement goes stale (`STALE_HOLDS`, eight holds: 960 s at
+`--placement-periods 30000,120000`). The cheap trigger considered: a tied member's own
+commit tail, which it reports in its probes as a follower, drops clearly below what it
+was. The `speedup` scenario tests whether that signal exists: `heterogeneous` with the
+first leader (ap-ne) on a quota that is lifted at 150 s.
+
+Three back-to-back 300 s runs at `ebc4f34` (`SYSTEMS=quepaxa SLOW_CPUS=0.2`; 0.5 CPU, the
+default, leaves a leader indistinguishable even while it leads, see above). Commit p90 in
+ms of ap-ne's own writes as a follower under the quota (the last tenure before 150 s) and
+after the lift, against the other regions' over the same windows:
+
+| Run | Disk regime | ap-ne quota, p90 | others, p90 | ap-ne lifted, p90 | others, p90 | ap-ne leading under quota, p90 / p99 | others leading, p90 / p99 |
+|---|---|---|---|---|---|---|---|
+| 1 | fast | 8.9 | 8.6-8.7 | 8.7 | 8.5-8.8 | 9.4 / 18.9 | 8.4-8.8 / 10.6-12.2 (one 186) |
+| 2 | fast, slow from about 150 s | 8.6 | 8.4-8.7 | 27.3 | 27.0-27.9 | 9.3 / 16.6 | 8.4-8.8 / 10.8-12.2 (one 178) |
+| 3 | slow | 29.5 | 29.3-30.1 | 29.5 | 29.5-29.9 | 27.4 / 33.4 | 28.2-32.0 / 33.5-226 |
+
+- **There is no signal to trigger on.** A throttled follower's own writes commit like
+  everyone else's (within 0.3 ms of p90), before and after the lift: the commit path runs
+  through the leader and the disk, and a follower's CPU is off it (as "A slow member"
+  found at 0.5 CPU). The tail it reports cannot drop when it gets faster, because it never
+  rose while it was slow. Only a tenure measures a member's speed as a leader.
+- **The disk moves every tail at once**, 8.6 to 27.7 ms in run 2: a trigger on absolute
+  tails would re-explore on every regime switch, and one relative to the other members'
+  would never fire.
+- **Nothing to gain in this scenario anyway.** At 0.2 CPU the throttled leader's p90 was
+  about 10% above the others' in the fast regime and indistinguishable in the slow one;
+  once lifted, every member is alike, so the lead going back to it (`back_to_fast_s`: not
+  within the run in any of the three) would gain nothing. Run 3 shows the existing
+  mechanism's bound instead: ap-ne's first tenure (25 s) did not span the sustained
+  period, so it was explored again at 116 s and rotation demoted it after 13 s.
+
+So the age bound stays: a measurement is retaken once it is older than eight holds, and no
+cheaper trigger is added (the policy and its Verus port are unchanged). A signal that
+could see a follower's speed as a leader would need the follower to time its own leader
+work (say, how long it takes to process a proposal), which it does not do as a follower.
+
+The data: `target/bench-etcd/wan-20261114-094533/` (the three runs) and
+`wan-20261114-004901/` (one earlier run in the fast regime: ap-ne as follower p90 10.2 ms
+against 9.7 ms for us-east; as leader 14.6 against 9.7-9.8).
+
 ## Not measured
 
 - No comparison against the Go reference implementation: running the Go code was out of
