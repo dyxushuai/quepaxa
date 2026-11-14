@@ -1,7 +1,7 @@
-//! The writer handoff and snapshot saves under shuttle's schedulers: DFS explores every
-//! interleaving of the handoff alone and of snapshot saves; PCT samples a whole node's,
-//! whose replica adds too many steps for DFS to finish. A failure prints a schedule that
-//! `shuttle::replay` reproduces.
+//! The writer and apply handoffs and snapshot saves under shuttle's schedulers: DFS explores
+//! every interleaving of each handoff alone and of snapshot saves; PCT samples a whole
+//! node's, whose replica adds too many steps for DFS to finish. A failure prints a schedule
+//! that `shuttle::replay` reproduces.
 
 use std::io;
 
@@ -10,7 +10,8 @@ use tokio::sync::oneshot;
 
 use super::*;
 use crate::client::{Cmd, Reply};
-use crate::ops::Request;
+use crate::kv::Kv;
+use crate::ops::{Applied, Request, Response};
 
 /// Runs `f` under every interleaving.
 fn dfs(f: impl Fn() + Send + Sync + 'static) {
@@ -58,15 +59,40 @@ impl Log for MemLog {
 /// What a run of `writes` produced.
 struct Outcome {
     replies: Vec<Option<Reply>>,
+    /// A linearizable read of the first write's key, made once every write was decided.
+    read: Option<Reply>,
     /// Appends the writer attempted.
     appends: usize,
     fenced: bool,
 }
 
-/// A single-member node writing through `log`, as its event loop would: `writes` client
-/// writes, each flushed at once, then events taken until every write is answered or the
-/// storage failure has fenced the replica. The event queue holds one event, and one other
-/// event is queued at the start, so the writer may find it full when it reports.
+/// Takes events, as the event loop does, until every persist handed to the writer is
+/// reported (in a single-member cluster, every proposal is then decided) or the storage
+/// failure has fenced the replica. Hands each turn's jobs to the apply thread.
+fn settle(n: &mut Node, inbox: &mut Inbox) {
+    loop {
+        n.on_written();
+        n.flush();
+        n.hand_off();
+        let done = || {
+            let written = n.written.lock();
+            n.persists.is_empty() && written.0 >= n.handed && written.1.is_empty()
+        };
+        if n.jobs.is_none() || done() {
+            return;
+        }
+        // Parks until the writer reports or the queued event is taken; a lost wake-up
+        // leaves this thread parked for good, which shuttle reports as a deadlock.
+        let _ = inbox.recv(None, &mut Vec::new());
+    }
+}
+
+/// A single-member node writing through `log`, with its writer and apply threads, as its
+/// event loop would: `writes` client writes, each flushed at once, then events taken until
+/// every write is decided or the storage failure has fenced the replica, then a
+/// linearizable read. The event queue holds one event, and one other event is queued at
+/// the start, so the writer may find it full when it reports. The replies are taken once
+/// the apply thread has stopped.
 fn writes(count: usize, max_unwritten: u64, log: MemLog) -> Outcome {
     let cfg = Config::new([1; 16], NodeId(0), vec![NodeId(0)], [2; 32]);
     let replica = Replica::new(cfg, [], Timestamp(0)).unwrap();
@@ -79,6 +105,8 @@ fn writes(count: usize, max_unwritten: u64, log: MemLog) -> Outcome {
     n.drain();
     let state = log.state.clone();
     n.start_writer(log);
+    let (applier, jobs) = n.applier.take().unwrap();
+    let apply = thread::spawn(move || applier.run(&jobs));
     let mut answers = Vec::new();
     for i in 0..count {
         let (reply, answer) = oneshot::channel();
@@ -86,26 +114,22 @@ fn writes(count: usize, max_unwritten: u64, log: MemLog) -> Outcome {
         n.on_client(n.now(), Cmd::Write(put), reply);
         n.drain();
         n.flush();
+        n.hand_off();
         answers.push(answer);
     }
-    let mut replies: Vec<Option<Reply>> = (0..count).map(|_| None).collect();
-    loop {
-        for (r, a) in replies.iter_mut().zip(&mut answers) {
-            if r.is_none() {
-                *r = a.try_recv().ok();
-            }
-        }
-        let fenced = n.jobs.is_none();
-        if fenced || replies.iter().all(Option::is_some) {
-            let appends = state.lock().unwrap().1;
-            return Outcome { replies, appends, fenced };
-        }
-        // Parks until the writer reports or the queued event is taken; a lost wake-up
-        // leaves this thread parked for good, which shuttle reports as a deadlock.
-        let _ = inbox.recv(None, &mut Vec::new());
-        n.on_written();
-        n.flush();
-    }
+    settle(&mut n, &mut inbox);
+    let fenced = n.jobs.is_none();
+    let (reply, mut read) = oneshot::channel();
+    n.on_client(n.now(), Cmd::Read { range: RangeReq::key(b"k0"), linearizable: true }, reply);
+    n.drain();
+    n.flush();
+    settle(&mut n, &mut inbox);
+    // Closes the apply queue: the apply thread stops once it has taken every job.
+    drop(n);
+    apply.join().unwrap();
+    let replies = answers.iter_mut().map(|a| a.try_recv().ok()).collect();
+    let appends = state.lock().unwrap().1;
+    Outcome { replies, read: read.try_recv().ok(), appends, fenced }
 }
 
 /// The handoff alone: the event loop flushes `persists` persists of 10 bytes each, waiting
@@ -179,7 +203,8 @@ fn a_failed_append_stops_the_writer_and_releases_a_waiting_flush() {
     });
 }
 
-/// Every write is answered, in order, and no event-loop wait outlives the writer.
+/// Every write is answered, in order, a read after them sees them, and no event-loop wait
+/// outlives the writer.
 fn every_write_commits(max_unwritten: u64) {
     let out = writes(2, max_unwritten, MemLog::default());
     assert!(!out.fenced);
@@ -187,6 +212,10 @@ fn every_write_commits(max_unwritten: u64) {
         let Some(Reply::Done(applied)) = r else { panic!("write {i} answered {r:?}") };
         assert_eq!(applied.revision, i as u64 + 1, "writes commit in order");
     }
+    let Some(Reply::Done(Applied { revision: 2, response: Response::Range { kvs, .. } })) = &out.read else {
+        panic!("the read after both writes answered {:?}", out.read)
+    };
+    assert_eq!(kvs.len(), 1, "the read missed a decided write");
     assert!(out.appends > 0);
 }
 
@@ -225,5 +254,55 @@ fn concurrent_snapshot_saves_keep_the_newest() {
         assert!(w.save(20, b"through 20").unwrap(), "nothing newer was saved");
         older.join().unwrap();
         assert_eq!(std::fs::read(dir.join("snapshot.bin")).unwrap(), b"through 20");
+    });
+}
+
+/// The apply handoff alone: the event loop hands over one job per batch through a queue of
+/// one batch, so it waits for the apply thread whenever the queue is full. A write, its
+/// commit, a read released after it, a snapshot install and a commit on top of that.
+#[test]
+fn the_apply_handoff_keeps_the_order_under_every_schedule() {
+    dfs(|| {
+        let me = NodeId(0);
+        let entry = |id, value: &[u8]| quepaxa::Entry {
+            origin: me,
+            incarnation: 1,
+            id: ProposalId(id),
+            payload: Bytes::from(
+                Request::Put { key: b"k".to_vec(), value: value.to_vec(), prev_kv: false }.encode(),
+            ),
+        };
+        let (events, _rx) = tmpsc::channel(1);
+        let applier = Applier::new(me, 1, SnapshotWriter::new(&std::env::temp_dir()), events);
+        let (applies, jobs) = mpsc::sync_channel(1);
+        let apply = thread::spawn(move || applier.run(&jobs));
+        let (write, mut written) = oneshot::channel();
+        let (read, mut first) = oneshot::channel();
+        let (read2, mut second) = oneshot::channel();
+        let mut installed = Kv::default();
+        for _ in 0..5 {
+            installed.next_revision();
+        }
+        let payload = entry(1, b"1").payload.to_vec();
+        for job in [
+            Job::Proposed { id: ProposalId(1), payload, reply: write },
+            Job::Commit { slot: 0, entries: vec![entry(1, b"1")] },
+            Job::Committed { id: ProposalId(1), slot: 0 },
+            Job::Read { range: RangeReq::key(b"k"), reply: read },
+            Job::Install(installed),
+            Job::Commit { slot: 9, entries: vec![entry(2, b"2")] },
+            Job::Read { range: RangeReq::key(b"k"), reply: read2 },
+        ] {
+            applies.send(vec![job]).unwrap();
+        }
+        drop(applies);
+        apply.join().unwrap();
+        let revision = |r: Result<Reply, _>| match r {
+            Ok(Reply::Done(a)) => a.revision,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(revision(written.try_recv()), 1, "the write's own result");
+        assert_eq!(revision(first.try_recv()), 1, "the read saw the commit before it");
+        assert_eq!(revision(second.try_recv()), 6, "the commit after the install applied on top of it");
     });
 }

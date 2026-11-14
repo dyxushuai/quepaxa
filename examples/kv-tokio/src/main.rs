@@ -35,6 +35,7 @@
 //! peer id is whatever the connecting side claims. Put replicas on a private network or
 //! behind mTLS (e.g. a mesh sidecar) before exposing them.
 
+mod apply;
 mod client;
 mod grpc;
 mod kv;

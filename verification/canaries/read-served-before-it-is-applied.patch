@@ -1,0 +1,11 @@
+--- a/examples/kv-tokio/src/node.rs
++++ b/examples/kv-tokio/src/node.rs
+@@ -596,7 +596,7 @@
+                 // Queued behind every commit emitted before it, so it reads their effects.
+                 Action::ReadReady { id, .. } => {
+                     if let Some((range, reply)) = self.reads.remove(&id) {
+-                        self.to_apply.push(Job::Read { range, reply });
++                        let _ = self.applies.send(vec![Job::Read { range, reply }]);
+                     }
+                 }
+                 Action::SnapshotNeeded { peer, .. } => {
