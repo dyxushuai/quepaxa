@@ -231,6 +231,12 @@ impl Sim {
                     .filter_map(|n| n.replica.as_ref().map(|r| r.inspect().local_batches))
                     .max()
                     .unwrap_or(0);
+                for r in self.nodes.iter().filter_map(|n| n.replica.as_ref()) {
+                    self.report.entry_probes += r.inspect().entries;
+                }
+                if std::env::var_os("QPX_SIM_PROBES").is_some() {
+                    eprintln!("entry probes: seed {} {:?}", self.cfg.seed, self.report.entry_probes);
+                }
                 self.report.metrics = self
                     .nodes
                     .iter()
@@ -370,9 +376,8 @@ impl Sim {
 
     fn crash(&mut self, i: usize) {
         let node = &mut self.nodes[i];
-        if node.replica.take().is_none() {
-            return;
-        }
+        let Some(r) = node.replica.take() else { return };
+        self.report.entry_probes += r.inspect().entries;
         self.history.forget(&self.epochs, i);
         // The write in progress may be torn: a prefix of its records reaches the disk.
         let pending = std::mem::take(&mut node.pending);
@@ -535,15 +540,18 @@ impl Sim {
         Ok(())
     }
 
-    /// G1, G3–G5 across every live replica's protocol state.
+    /// G1, G3–G5 across every live replica's protocol state, and where each keeps its
+    /// entries (`Replica::check_entries`).
     fn check_internal(&mut self) -> Result<(), String> {
+        let entries =
+            self.nodes.iter().filter_map(|n| n.replica.as_ref()).try_for_each(Replica::check_entries);
         let live: Vec<_> = self
             .nodes
             .iter()
             .enumerate()
             .filter_map(|(i, n)| n.replica.as_ref().map(|r| (i, r.inspect())))
             .collect();
-        let result = self.history.observe(&self.epochs, &live);
+        let result = entries.and_then(|()| self.history.observe(&self.epochs, &live));
         result.map_err(|e| self.fail(&e))
     }
 

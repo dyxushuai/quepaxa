@@ -189,5 +189,7 @@ impl Replica {
                 break;
             }
         }
+        #[cfg(feature = "model")]
+        self.probe_entries();
     }
 }

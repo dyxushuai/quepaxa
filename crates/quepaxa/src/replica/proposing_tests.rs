@@ -115,3 +115,68 @@ fn a_leader_decision_at_the_instant_a_batch_starts_is_not_progress_since() {
         "proposed again in a slot of this replica's own"
     );
 }
+
+const MS: u64 = 1_000_000;
+
+/// Leader 0 proposing replica 2's entry in slot 0 and its own in slot 1, steps aside once a
+/// write has waited 4δ on its stuck disk while the others decide: both batches keep their
+/// slots, and their entries go to replica 1 too. Returns the replica, its own entry, and
+/// when it stepped aside. `check_entries` holds after every call.
+fn aside_with_slots_in_flight() -> (Replica, ProposalId, Timestamp) {
+    let mut r = replica_as(0);
+    let mut out = Vec::new();
+    r.commit_latency = Some(5 * MS);
+    r.watch.disk.assume_usual(MS);
+    let theirs = [item(2, 7, Bytes::from_static(b"theirs"))];
+    r.handle(Timestamp(MS), from_peer(2, 0, Body::Forward { batch: batch::encode(&theirs) })).unwrap();
+    r.poll_actions(&mut out);
+    r.check_entries().unwrap();
+    let own = r.propose(Timestamp(MS), Bytes::from_static(b"own")).unwrap();
+    r.poll_actions(&mut out);
+    r.check_entries().unwrap();
+    let slots: Vec<_> = r.batches.values().filter_map(|b| b.slot).collect();
+    assert_eq!(slots, [Slot(0), Slot(1)], "each in a slot of its own");
+    let elsewhere = Body::Decided { slot: Slot(9), proposal: proposal(1, 1, 9) };
+    r.handle(Timestamp(10 * MS), from_peer(1, 0, elsewhere)).unwrap();
+    r.poll_actions(&mut out);
+    let aside = Timestamp(MS + 80 * MS);
+    r.handle_timeout(aside).unwrap();
+    r.poll_actions(&mut out);
+    r.check_entries().unwrap();
+    assert_eq!(r.target(), NodeId(1), "stepped aside");
+    assert_eq!(r.forwarded.get(&own).map(|(_, at)| *at), Some(aside), "its own entry handed on");
+    assert_eq!(r.batches.values().filter(|b| b.slot.is_some()).count(), 2, "both slots kept");
+    (r, own, aside)
+}
+
+/// Replica 1 decides `slot` with a value of its own.
+fn lose(r: &mut Replica, slot: u64, at: Timestamp) {
+    let mut out = Vec::new();
+    let decided = Body::Decided { slot: Slot(slot), proposal: proposal(1, 1, slot) };
+    r.handle(at, from_peer(1, 0, decided)).unwrap();
+    r.poll_actions(&mut out);
+    r.check_entries().unwrap();
+}
+
+#[test]
+fn entries_stay_tracked_when_a_stepped_aside_leader_loses_its_slots() {
+    let (mut r, own, aside) = aside_with_slots_in_flight();
+    lose(&mut r, 0, aside.after(5 * MS));
+    lose(&mut r, 1, aside.after(5 * MS));
+    assert!(r.outstanding.contains_key(&own));
+}
+
+/// #187 D2. Stepped aside, the leader already handed its slotted batches' entries on; when
+/// it then loses those slots, `lost_slot` queues them a second time: its own entry is handed
+/// on again with a new hedge clock, and replica 2's goes to `relayed` and is proposed here,
+/// on the stuck disk, with the whole window open.
+#[test]
+#[ignore = "#187 D2, fixed in stage D"]
+fn a_stepped_aside_leader_losing_its_slots_hands_nothing_on_twice_and_proposes_nothing() {
+    let (mut r, own, aside) = aside_with_slots_in_flight();
+    lose(&mut r, 0, aside.after(5 * MS));
+    assert!(r.proposers.keys().all(|s| *s == Slot(1)), "nothing proposed here while stepped aside");
+    lose(&mut r, 1, aside.after(5 * MS));
+    assert_eq!(r.forwarded.get(&own).map(|(_, at)| *at), Some(aside), "the hedge clock is not restarted");
+    assert!(r.proposers.is_empty(), "nothing proposed here while stepped aside");
+}

@@ -110,6 +110,8 @@ pub struct ModelReport {
     pub deputy: usize,
     /// States in which some replica had applied a membership change.
     pub reconfigured: usize,
+    /// Suspected entry combinations (#187) run into over every explored step.
+    pub entry_probes: quepaxa::inspect::EntryProbes,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -598,8 +600,10 @@ impl State {
         Ok(())
     }
 
-    /// Checks the protocol invariants on every replica, accumulating their evidence.
+    /// Checks the protocol invariants on every replica, accumulating their evidence, and
+    /// where each keeps its entries.
     fn observe(&mut self) -> Result<(), String> {
+        self.nodes.iter().try_for_each(|n| n.replica.check_entries())?;
         let live: Vec<_> = self.nodes.iter().enumerate().map(|(i, n)| (i, n.replica.inspect())).collect();
         self.history.observe(&self.epochs, &live)
     }
@@ -759,10 +763,32 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
             if let Err(e) = checked {
                 return Err(format!("{e}\nschedule ({} steps): {p:?}", p.len()));
             }
+            report.entry_probes += probes_added(&state, &next);
             stack.push((next, p));
         }
     }
     Ok(report)
+}
+
+/// What the replicas of `after` ran into since `before`, one step earlier (a replica that
+/// restarted counts from zero).
+fn probes_added(before: &State, after: &State) -> quepaxa::inspect::EntryProbes {
+    let mut added = quepaxa::inspect::EntryProbes::default();
+    for (b, a) in before.nodes.iter().zip(&after.nodes) {
+        let (now, then) = (a.replica.entry_probes(), b.replica.entry_probes());
+        added += if a.starts == b.starts {
+            quepaxa::inspect::EntryProbes {
+                d1: now.d1 - then.d1,
+                d2: now.d2 - then.d2,
+                d2_restarts: now.d2_restarts - then.d2_restarts,
+                d3: now.d3 - then.d3,
+                d4: now.d4 - then.d4,
+            }
+        } else {
+            now
+        };
+    }
+    added
 }
 
 /// Default steps a depth-limited state may take to settle. QuePaxa terminates with
