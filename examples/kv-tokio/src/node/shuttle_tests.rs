@@ -70,8 +70,9 @@ struct Outcome {
 fn writes(count: usize, max_unwritten: u64, log: MemLog) -> Outcome {
     let cfg = Config::new([1; 16], NodeId(0), vec![NodeId(0)], [2; 32]);
     let replica = Replica::new(cfg, [], Timestamp(0)).unwrap();
-    let (events, rx) = mpsc::sync_channel(1);
-    events.send(Ev::Written).unwrap();
+    let (events, rx) = tmpsc::channel(1);
+    events.try_send(Ev::Written).unwrap();
+    let mut inbox = Inbox::new(rx);
     let snapshots = SnapshotWriter::new(&std::env::temp_dir());
     let mut n = Node::with(replica, None, snapshots, HashMap::new(), u64::MAX, events);
     n.max_unwritten = max_unwritten;
@@ -99,9 +100,9 @@ fn writes(count: usize, max_unwritten: u64, log: MemLog) -> Outcome {
             let appends = state.lock().unwrap().1;
             return Outcome { replies, appends, fenced };
         }
-        // Blocks until the writer reports or the queued event is taken; a lost wake-up
-        // leaves this thread blocked for good, which shuttle reports as a deadlock.
-        let _ = rx.recv();
+        // Parks until the writer reports or the queued event is taken; a lost wake-up
+        // leaves this thread parked for good, which shuttle reports as a deadlock.
+        let _ = inbox.recv(None, &mut Vec::new());
         n.on_written();
         n.flush();
     }
@@ -114,8 +115,9 @@ fn writes(count: usize, max_unwritten: u64, log: MemLog) -> Outcome {
 fn handoff(persists: u64, max_unwritten: u64, log: MemLog) -> (Vec<(u64, bool)>, usize) {
     let cfg = Config::new([1; 16], NodeId(0), vec![NodeId(0)], [2; 32]);
     let replica = Replica::new(cfg, [], Timestamp(0)).unwrap();
-    let (events, rx) = mpsc::sync_channel(1);
-    events.send(Ev::Written).unwrap();
+    let (events, rx) = tmpsc::channel(1);
+    events.try_send(Ev::Written).unwrap();
+    let mut inbox = Inbox::new(rx);
     let snapshots = SnapshotWriter::new(&std::env::temp_dir());
     let mut n = Node::with(replica, None, snapshots, HashMap::new(), u64::MAX, events);
     n.max_unwritten = max_unwritten;
@@ -133,8 +135,8 @@ fn handoff(persists: u64, max_unwritten: u64, log: MemLog) -> (Vec<(u64, bool)>,
     }
     let mut reports: Vec<(u64, bool)> = Vec::new();
     while !reports.iter().any(|&(id, ok)| id + 1 == persists || !ok) {
-        // A lost wake-up leaves this thread blocked for good: shuttle reports a deadlock.
-        let _ = rx.recv();
+        // A lost wake-up leaves this thread parked for good: shuttle reports a deadlock.
+        let _ = inbox.recv(None, &mut Vec::new());
         reports.extend(n.written.reports().into_iter().map(|r| (r.id.0, r.ok)));
     }
     let appends = state.lock().unwrap().1;

@@ -58,8 +58,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::{mpsc as tmpsc, oneshot};
 
-use crate::sync::mpsc::{self, SyncSender, TrySendError};
-
 /// The event loop and the snapshot thread allocate and free heavily at once; with the system
 /// allocator, cross-thread frees made compaction take 2-8 ms instead of under 2 ms.
 #[global_allocator]
@@ -205,21 +203,6 @@ async fn read_frame(s: &mut (impl AsyncRead + Unpin)) -> std::io::Result<Bytes> 
     Ok(Bytes::from(buf))
 }
 
-/// Queues an event for the replica thread, waiting (without blocking the runtime) while
-/// the bounded queue is full; false once the replica thread is gone.
-async fn push(events: &SyncSender<Ev>, mut ev: Ev) -> bool {
-    loop {
-        match events.try_send(ev) {
-            Ok(()) => return true,
-            Err(TrySendError::Full(back)) => {
-                ev = back;
-                tokio::time::sleep(Duration::from_micros(200)).await;
-            }
-            Err(TrySendError::Disconnected(_)) => return false,
-        }
-    }
-}
-
 /// Most time one chunk of a peer frame may take to be accepted by the socket.
 const STALL: Duration = Duration::from_secs(2);
 /// A frame is written in chunks of this size, each within `STALL`: a large snapshot on a
@@ -333,7 +316,7 @@ async fn dial(addr: SocketAddr) -> std::io::Result<TcpStream> {
     Ok(s)
 }
 
-async fn inbound(s: impl AsyncRead + Unpin, events: SyncSender<Ev>) {
+async fn inbound(s: impl AsyncRead + Unpin, events: tmpsc::Sender<Ev>) {
     let mut s = BufReader::with_capacity(64 << 10, s);
     let Ok(Ok(hello)) = tokio::time::timeout(Duration::from_secs(5), read_frame(&mut s)).await else {
         return;
@@ -341,7 +324,7 @@ async fn inbound(s: impl AsyncRead + Unpin, events: SyncSender<Ev>) {
     let Ok(from) = <[u8; 4]>::try_from(&hello[..]).map(u32::from_le_bytes) else { return };
     while let Ok(frame) = read_frame(&mut s).await {
         if let Some(frame) = PeerFrame::decode(frame)
-            && !push(&events, Ev::Peer { from, frame }).await
+            && events.send(Ev::Peer { from, frame }).await.is_err()
         {
             return;
         }
@@ -375,7 +358,7 @@ const MAX_PIPELINE: usize = 1024;
 async fn client(
     r: impl AsyncRead + Unpin,
     w: impl AsyncWrite + Unpin + Send + 'static,
-    events: SyncSender<Ev>,
+    events: tmpsc::Sender<Ev>,
 ) {
     let (tx, mut replies) = tmpsc::channel::<oneshot::Receiver<Reply>>(MAX_PIPELINE);
     let writer = tokio::spawn(async move {
@@ -422,7 +405,7 @@ async fn client(
         let text = line.strip_suffix(b"\n").map_or(&line[..], |l| l.strip_suffix(b"\r").unwrap_or(l));
         match std::str::from_utf8(text).ok().and_then(parse_cmd) {
             Some(cmd) => {
-                if !push(&events, Ev::Client { cmd, reply }).await {
+                if events.send(Ev::Client { cmd, reply }).await.is_err() {
                     break;
                 }
             }
@@ -472,7 +455,8 @@ async fn main() {
         peers.insert(*i, peer_link(args.id, move || dial(addr)));
     }
     let listen = listen.expect("--members or --peers must include --id");
-    let (events, rx) = mpsc::sync_channel(65_536);
+    // Bounded: a busy replica thread holds peers and clients back; their tasks await room.
+    let (events, rx) = tmpsc::channel(65_536);
     let mut node = Node::new(replica, disk, peers, args.snapshot_every, events.clone());
     if let Err(e) = node.restore() {
         eprintln!("kv-tokio: {e}");
@@ -561,10 +545,10 @@ mod tests {
     }
 
     /// A client connection served by `client`, with the node side of its events.
-    async fn connect() -> (TcpStream, mpsc::Receiver<Ev>) {
+    async fn connect() -> (TcpStream, tmpsc::Receiver<Ev>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let (events, rx) = mpsc::sync_channel(4 * MAX_PIPELINE);
+        let (events, rx) = tmpsc::channel(4 * MAX_PIPELINE);
         tokio::spawn(async move {
             let (r, w) = listener.accept().await.unwrap().0.into_split();
             client(r, w, events).await
@@ -585,7 +569,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_client_that_never_reads_cannot_queue_unbounded_requests() {
-        let (s, events) = connect().await;
+        let (s, mut events) = connect().await;
         let (_r, mut w) = s.into_split();
         // The node never answers: every request stays outstanding.
         tokio::spawn(async move {
@@ -596,7 +580,7 @@ mod tests {
             }
         });
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let held: Vec<Ev> = events.try_iter().collect();
+        let held: Vec<Ev> = std::iter::from_fn(|| events.try_recv().ok()).collect();
         assert!(held.len() <= MAX_PIPELINE + 2, "{} requests taken in", held.len());
         assert!(held.len() >= MAX_PIPELINE, "{} requests taken in", held.len());
     }

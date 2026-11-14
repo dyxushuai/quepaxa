@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -127,14 +127,14 @@ fn frames_flow_again_soon_after_a_partition_heals() -> turmoil::Result {
         let log = log.clone();
         async move {
             let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
-            let (events, rx) = mpsc::sync_channel(65_536);
+            let (events, mut rx) = tmpsc::channel(65_536);
             tokio::spawn(async move {
                 while let Ok((s, _)) = listener.accept().await {
                     tokio::spawn(inbound(s, events.clone()));
                 }
             });
             loop {
-                for ev in rx.try_iter() {
+                while let Ok(ev) = rx.try_recv() {
                     if let Ev::Peer { frame: PeerFrame::Msg(m), .. } = ev
                         && m == marker
                     {
@@ -207,12 +207,12 @@ fn a_client_that_stops_reading_is_bounded_and_answered_in_order() -> turmoil::Re
     let mut sim = sim(None, 64);
     sim.client("server", async {
         let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
-        let (events, rx) = mpsc::sync_channel(4 * MAX_PIPELINE);
+        let (events, mut rx) = tmpsc::channel(4 * MAX_PIPELINE);
         let (r, w) = listener.accept().await?.0.into_split();
         tokio::spawn(client(r, w, events));
         // The node answers nothing until the connection has backed up.
         tokio::time::sleep(Duration::from_secs(3)).await;
-        let mut held: Vec<Ev> = rx.try_iter().collect();
+        let mut held: Vec<Ev> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!((MAX_PIPELINE..=MAX_PIPELINE + 2).contains(&held.len()), "{} requests taken in", held.len());
         // Then it answers out of order, each request with its own key.
         let mut answered = 0;
@@ -223,7 +223,7 @@ fn a_client_that_stops_reading_is_bounded_and_answered_in_order() -> turmoil::Re
                 answered += 1;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
-            held.extend(rx.try_iter());
+            held.extend(std::iter::from_fn(|| rx.try_recv().ok()));
         }
         Ok(())
     });
@@ -308,7 +308,7 @@ fn replica_host(sim: &mut turmoil::Sim<'_>, id: u32, seen: Arc<Mutex<Seen>>) {
         let seen = seen.clone();
         async move {
             let listener = TcpListener::bind(("0.0.0.0", PORT)).await?;
-            let (events, rx) = mpsc::sync_channel(65_536);
+            let (events, mut rx) = tmpsc::channel(65_536);
             tokio::spawn(async move {
                 while let Ok((s, _)) = listener.accept().await {
                     tokio::spawn(inbound(s, events.clone()));
@@ -337,7 +337,7 @@ fn replica_host(sim: &mut turmoil::Sim<'_>, id: u32, seen: Arc<Mutex<Seen>>) {
                     let _ = replica.handle_timeout(ts());
                 }
                 drive(&mut replica, &peers, &seen, id);
-                for ev in rx.try_iter() {
+                while let Ok(ev) = rx.try_recv() {
                     match ev {
                         Ev::Peer { frame: PeerFrame::Msg(m), .. } => {
                             let _ = replica.handle(ts(), Input::Message(m));

@@ -3,7 +3,7 @@
 //! sends; anything outside that subset is refused with an explicit status, never answered
 //! approximately.
 
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tonic::{Request as GrpcRequest, Response as GrpcResponse, Status};
 
 use crate::client::{Cmd, Failure, Reply};
@@ -17,18 +17,17 @@ use crate::pb::etcdserverpb::{
     range_request, request_op, response_op,
 };
 use crate::pb::mvccpb::KeyValue;
-use crate::sync::mpsc::SyncSender;
 
 pub use crate::pb::etcdserverpb::kv_server::KvServer;
 
 pub struct EtcdKv {
-    events: SyncSender<Ev>,
+    events: mpsc::Sender<Ev>,
     cluster_id: u64,
     member_id: u64,
 }
 
 impl EtcdKv {
-    pub fn new(events: SyncSender<Ev>, cluster_id: [u8; 16], member_id: u32) -> Self {
+    pub fn new(events: mpsc::Sender<Ev>, cluster_id: [u8; 16], member_id: u32) -> Self {
         let mut id = [0u8; 8];
         id.copy_from_slice(&cluster_id[..8]);
         Self { events, cluster_id: u64::from_le_bytes(id), member_id: u64::from(member_id) }
@@ -36,7 +35,7 @@ impl EtcdKv {
 
     async fn call(&self, cmd: Cmd) -> Result<Reply, Status> {
         let (reply, rx) = oneshot::channel();
-        if !crate::push(&self.events, Ev::Client { cmd, reply }).await {
+        if self.events.send(Ev::Client { cmd, reply }).await.is_err() {
             return Err(Status::unavailable("replica stopped"));
         }
         rx.await.map_err(|_| Status::unavailable("replica stopped"))
