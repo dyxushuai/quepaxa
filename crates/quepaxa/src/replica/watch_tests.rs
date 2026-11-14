@@ -33,7 +33,7 @@ fn suspecting() -> (Replica, ProposalId) {
     let id = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 1);
-    while r.forwarded.contains_key(&id) {
+    while r.entries.forwarded().contains_key(&id) {
         let at = r.next_deadline().expect("the hedge is scheduled");
         r.handle_timeout(at).unwrap();
         r.poll_actions(&mut out);
@@ -48,9 +48,9 @@ fn after_a_hedge_new_entries_are_proposed_here_not_forwarded() {
     let next = r.propose(r.now, Bytes::from_static(b"y")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 0, "nothing more goes to the silent leader");
-    assert!(!r.forwarded.contains_key(&next));
+    assert!(!r.entries.forwarded().contains_key(&next));
     assert!(
-        r.batches.values().any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == next)),
+        r.entries.batches().values().any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == next)),
         "the new entry is proposed in a slot of this replica's own"
     );
 }
@@ -67,26 +67,26 @@ fn suspecting_hedges_every_entry_already_forwarded() {
     // A second entry forwarded later: its own hedge deadline is further away.
     let second = r.propose(Timestamp(1 + 30 * MS), Bytes::from_static(b"y")).unwrap();
     r.poll_actions(&mut out);
-    while r.forwarded.contains_key(&first) {
+    while r.entries.forwarded().contains_key(&first) {
         let at = r.next_deadline().expect("the hedge is scheduled");
         r.handle_timeout(at).unwrap();
         r.poll_actions(&mut out);
     }
-    assert!(!r.forwarded.contains_key(&second), "suspicion covers what was handed to the leader");
-    assert!(r.outstanding.get(&second).is_some_and(|o| o.2), "and counts it as hedged");
+    assert!(!r.entries.forwarded().contains_key(&second), "suspicion covers what was handed to the leader");
+    assert!(r.entries.own().get(&second).is_some_and(|o| o.hedged), "and counts it as hedged");
 }
 
 #[test]
 fn a_suspecting_follower_proposes_a_lost_batch_again_itself() {
     let (mut r, id) = suspecting();
     let mut out = Vec::new();
-    let slot = r.batches.values().find_map(|b| b.slot).expect("the hedged batch has a slot");
+    let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the hedged batch has a slot");
     // Another follower's value takes the slot (the leader is still silent).
     r.handle(r.now, from_peer(2, 1, Body::Decided { slot, proposal: proposal(1, 2, 0) })).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 0, "not handed back to the silent leader");
     assert!(
-        r.batches.values().any(|b| b.entries.iter().any(|e| e.2 == id)),
+        r.entries.batches().values().any(|b| b.entries.iter().any(|e| e.2 == id)),
         "the entry stays in a batch of this replica's own"
     );
 }
@@ -102,7 +102,7 @@ fn the_dead_leaders_own_value_deciding_does_not_end_the_suspicion() {
     let next = r.propose(r.now, Bytes::from_static(b"y")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 0);
-    assert!(!r.forwarded.contains_key(&next));
+    assert!(!r.entries.forwarded().contains_key(&next));
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn hearing_from_the_leader_again_ends_the_suspicion() {
     let next = r.propose(r.now, Bytes::from_static(b"y")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 1, "the leader is alive: forward to it again");
-    assert!(r.forwarded.contains_key(&next));
+    assert!(r.entries.forwarded().contains_key(&next));
 }
 
 /// Replica 1 with a 20 ms commit latency (δ = 80 ms) and, when given, an observed delay R
@@ -230,8 +230,11 @@ fn a_follower_behind_the_deputy_hands_its_entries_to_the_deputy() {
     r.handle_timeout(at).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 1), 1, "everything waiting goes to the deputy");
-    assert!(r.batches.values().all(|b| b.slot.is_none()), "not proposed here: one proposer at a time");
-    assert!(r.forwarded.contains_key(&id));
+    assert!(
+        r.entries.batches().values().all(|b| b.slot.is_none()),
+        "not proposed here: one proposer at a time"
+    );
+    assert!(r.entries.forwarded().contains_key(&id));
 }
 
 #[test]
@@ -268,7 +271,10 @@ fn a_deputy_proposes_what_it_is_handed() {
     r.handle(Timestamp(1), from_peer(2, 1, forward)).unwrap();
     r.poll_actions(&mut out);
     assert!(
-        r.batches.values().any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == ProposalId(7))),
+        r.entries
+            .batches()
+            .values()
+            .any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == ProposalId(7))),
         "replica 2 suspects the leader; its deputy proposes the entry"
     );
 }
@@ -288,14 +294,17 @@ fn a_deputy_proposes_a_handed_entry_again_when_its_batch_loses_the_slot() {
     }];
     r.handle(Timestamp(1), from_peer(2, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
     r.poll_actions(&mut out);
-    let slot = r.batches.values().find_map(|b| b.slot).expect("the deputy proposes the entry");
+    let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the deputy proposes the entry");
     out.clear();
     // Another value takes the slot; this replica itself never suspected leader 0.
     r.handle(r.now, from_peer(0, 1, Body::Decided { slot, proposal: proposal(1, 0, 0) })).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 0, "not handed to the leader replica 2 gave up on");
     assert!(
-        r.batches.values().any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == ProposalId(7))),
+        r.entries
+            .batches()
+            .values()
+            .any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == ProposalId(7))),
         "proposed again in a slot of the deputy's own"
     );
 }
@@ -317,14 +326,14 @@ fn entries_a_leader_handed_over_go_back_to_it_once_it_decides_again() {
     }];
     r.handle(Timestamp(1), from_peer(0, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
     r.poll_actions(&mut out);
-    let slot = r.batches.values().find_map(|b| b.slot).expect("the entry is proposed here");
+    let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the entry is proposed here");
     let own = Body::Decided { slot: Slot(slot.0 + 1), proposal: proposal(1, 0, 1) };
     r.handle(Timestamp(2), from_peer(0, 1, own)).unwrap();
     r.poll_actions(&mut out);
     out.clear();
     r.handle(Timestamp(3), from_peer(0, 1, Body::Decided { slot, proposal: proposal(1, 0, 0) })).unwrap();
     r.poll_actions(&mut out);
-    assert!(r.batches.is_empty(), "not proposed again, to lose to the leader slot after slot");
+    assert!(r.entries.batches().is_empty(), "not proposed again, to lose to the leader slot after slot");
     assert_eq!(forwards_to(&out, 0), 1, "handed back to the leader");
 }
 
@@ -342,7 +351,7 @@ fn entries_handed_to_a_leader_this_replica_now_is_are_not_left_waiting() {
     let at = r.next_deadline().expect("the hedge is scheduled");
     r.handle_timeout(at).unwrap();
     r.poll_actions(&mut out);
-    assert!(!r.forwarded.contains_key(&id));
+    assert!(!r.entries.forwarded().contains_key(&id));
     assert!(r.next_deadline().is_none_or(|t| t > at), "no timer left due");
 }
 
@@ -357,14 +366,14 @@ fn a_slow_but_talking_leader_is_hedged_around_entry_by_entry_and_not_suspected()
     r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
     r.poll_actions(&mut out);
     assert!(
-        r.batches.values().any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == id)),
+        r.entries.batches().values().any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == id)),
         "after δ the entry is proposed here"
     );
     out.clear();
     let next = r.propose(r.now, Bytes::from_static(b"y")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 1, "the leader was talking: not suspected");
-    assert!(r.forwarded.contains_key(&next));
+    assert!(r.entries.forwarded().contains_key(&next));
 }
 
 #[test]
@@ -389,10 +398,10 @@ fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
     assert_eq!(r.next_deadline(), Some(Timestamp(MS + 4 * 80 * MS)), "4δ, not δ");
     r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
     r.poll_actions(&mut out);
-    assert!(r.forwarded.contains_key(&id), "still waiting for the leader after δ");
+    assert!(r.entries.forwarded().contains_key(&id), "still waiting for the leader after δ");
     r.handle_timeout(Timestamp(MS + 4 * 80 * MS)).unwrap();
     r.poll_actions(&mut out);
-    assert!(!r.forwarded.contains_key(&id), "hedged after 4δ, in case the forward was lost");
+    assert!(!r.entries.forwarded().contains_key(&id), "hedged after 4δ, in case the forward was lost");
 }
 
 #[test]
@@ -453,7 +462,7 @@ fn hedging_around_a_talking_leader_drives_one_slot_at_a_time() {
     r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.proposers.len(), 1, "one hedged batch is proposed");
-    assert!(!r.relayed.is_empty(), "the rest wait for its slot, though they fill more batches");
+    assert!(!r.entries.relayed().is_empty(), "the rest wait for its slot, though they fill more batches");
 }
 
 #[test]
@@ -484,7 +493,7 @@ fn without_silent_leader_takeover_a_silent_leader_is_waited_for_the_hedge_delay(
     let next = r.propose(r.now, Bytes::from_static(b"y")).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 1, "the leader is not suspected");
-    assert!(r.forwarded.contains_key(&next));
+    assert!(r.entries.forwarded().contains_key(&next));
 }
 
 #[test]
@@ -609,8 +618,11 @@ fn a_leader_whose_disk_is_stuck_hands_its_entries_on_while_others_decide() {
     r.poll_actions(&mut out);
     assert_eq!(r.target(), NodeId(1), "stepped aside for the next in the leader order");
     assert_eq!(forwards_to(&out, 1), 1, "its waiting entry goes there");
-    assert!(r.forwarded.contains_key(&id));
-    assert!(r.outstanding.get(&id).is_some_and(|o| o.2), "its wait does not count as a commit latency");
+    assert!(r.entries.forwarded().contains_key(&id));
+    assert!(
+        r.entries.own().get(&id).is_some_and(|o| o.hedged),
+        "its wait does not count as a commit latency"
+    );
     // A forward now gets no acknowledgement: the followers move on too.
     out.clear();
     let entries = [batch::Item {
@@ -632,7 +644,7 @@ fn a_leader_whose_disk_is_stuck_hands_its_entries_on_while_others_decide() {
     r.handle_timeout(r.now.after(20 * MS)).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 1), 1, "forwarded to the deputy again");
-    assert!(r.relayed.is_empty(), "not hedged here");
+    assert!(r.entries.relayed().is_empty(), "not hedged here");
     // Its disk catches up: it leads again.
     let last = r.watch.disk.in_flight().next_back().expect("writes in flight");
     r.handle(r.now, Input::Persisted(PersistId(last))).unwrap();
@@ -698,7 +710,7 @@ fn a_follower_does_not_hedge_while_every_disk_seems_stuck() {
     r.poll_actions(&mut out);
     r.handle_timeout(Timestamp(150 * MS)).unwrap();
     r.poll_actions(&mut out);
-    assert!(r.forwarded.contains_key(&id), "not hedged past δ");
+    assert!(r.entries.forwarded().contains_key(&id), "not hedged past δ");
     assert_eq!(r.metrics.hedged, 0);
     // The disk catches up: δ counts from then.
     let last = r.watch.disk.in_flight().next_back().expect("writes in flight");
@@ -735,7 +747,7 @@ fn a_disk_that_keeps_completing_writes_is_slow_not_stuck() {
     assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(82 * MS)), "not held, δ not restarted");
     r.handle_timeout(Timestamp(82 * MS)).unwrap();
     r.poll_actions(&mut out);
-    assert!(!r.forwarded.contains_key(&id), "hedged after δ");
+    assert!(!r.entries.forwarded().contains_key(&id), "hedged after δ");
     assert_eq!(r.metrics.hedged, 1);
 }
 
@@ -754,7 +766,7 @@ fn a_hedge_stays_scheduled_until_the_disk_is_actually_stuck() {
     // Still nothing written by then: stuck, and held.
     r.handle_timeout(Timestamp(82 * MS)).unwrap();
     r.poll_actions(&mut out);
-    assert!(r.forwarded.contains_key(&id), "held once the disk is stuck");
+    assert!(r.entries.forwarded().contains_key(&id), "held once the disk is stuck");
     assert_eq!(r.metrics.hedged, 0);
 }
 
@@ -770,7 +782,7 @@ fn a_follower_whose_disk_alone_is_stuck_still_hedges() {
         r.poll_actions(&mut out);
         r.handle_timeout(Timestamp(85 * MS)).unwrap();
         r.poll_actions(&mut out);
-        assert!(!r.forwarded.contains_key(&id), "decided at {at} ms: hedged after δ");
+        assert!(!r.entries.forwarded().contains_key(&id), "decided at {at} ms: hedged after δ");
         assert_eq!(r.metrics.hedged, 1);
     }
 }
@@ -823,8 +835,8 @@ fn a_stepped_aside_deputy_hands_on_what_it_is_handed() {
     }];
     r.handle(r.now, from_peer(2, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
     r.poll_actions(&mut out);
-    assert!(r.relayed.is_empty(), "not proposed on the stuck disk");
-    assert!(!r.batches.values().any(|b| b.entries.iter().any(|e| e.2 == ProposalId(4))));
+    assert!(r.entries.relayed().is_empty(), "not proposed on the stuck disk");
+    assert!(!r.entries.batches().values().any(|b| b.entries.iter().any(|e| e.2 == ProposalId(4))));
     assert_eq!(forwards_to(&out, 2), 1, "handed on to the next member");
 }
 

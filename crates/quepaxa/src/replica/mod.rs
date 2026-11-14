@@ -3,11 +3,11 @@
 //!
 //! `gate` holds the durability gate, `log` the recorder and decided-log side, `messages`
 //! sending, receiving and catching up, `proposing` the proposer side (batching,
-//! forwarding to the leader, hedging, stalled slots).
+//! forwarding to the leader, hedging, stalled slots), `entries` where entries wait until
+//! they commit.
 
 mod disk;
-#[cfg(any(test, feature = "model"))]
-mod entry_checks;
+mod entries;
 mod gate;
 mod log;
 mod messages;
@@ -19,12 +19,10 @@ mod retire;
 mod snapshot;
 mod watch;
 
+use self::gate::Gate;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use bytes::Bytes;
-use core::mem;
-
-use self::gate::Gate;
 
 use crate::api::{Action, Config, DropReason, Error, Input, MemberView, Metrics, Outbound};
 use crate::batch::{self, Entry, Item, Kind};
@@ -32,7 +30,7 @@ use crate::codec::{Body, Envelope, Message, WireCtx};
 use crate::core_state::CoreState;
 use crate::dedup::Dedup;
 use crate::durable::Record;
-use crate::proposal::{Proposal, ValueKey};
+use crate::proposal::Proposal;
 use crate::proposer::SlotProposer;
 use crate::recorder::Register;
 use crate::rng::ChaCha20;
@@ -51,15 +49,6 @@ struct Active {
     resend_at: Timestamp,
     /// When this replica started proposing in the slot.
     started: Timestamp,
-}
-
-/// A batch this replica proposes, in at most one slot at a time until it is decided.
-#[cfg_attr(feature = "model", derive(Clone, Hash))]
-struct LocalBatch {
-    key: ValueKey,
-    value: Bytes,
-    entries: Vec<(NodeId, u64, ProposalId)>,
-    slot: Option<Slot>,
 }
 
 /// Work deferred until the next `Persist` is acknowledged.
@@ -120,29 +109,18 @@ pub struct Replica {
 
     // Proposer side.
     proposers: BTreeMap<Slot, Active>,
-    batches: BTreeMap<u64, LocalBatch>,
-    /// Own entries to batch if this replica proposes them itself, else to forward to its
-    /// target (`watch.rs`).
-    pending: VecDeque<Item>,
-    /// Entries this replica proposes itself whatever it leads: handed to it as the deputy of
-    /// a leader another follower suspects, or its own the leader left uncommitted for δ
-    /// (`watch.rs`).
-    relayed: VecDeque<Item>,
-    /// Own entries handed to the leader, with when.
-    forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
+    /// Own entries awaiting commit and those handed here, queued, forwarded or batched
+    /// (`entries.rs`).
+    entries: entries::Entries,
     /// Whether this replica suspects the leader it hands entries to (`watch.rs`).
     watch: watch::Watch,
     /// Round trips and write origins for leader placement (`placement.rs`).
     placement: placement::Placement,
-    /// Own proposals awaiting commit: when they were made, what they are, and whether they
-    /// were hedged.
-    outstanding: BTreeMap<ProposalId, (Timestamp, Kind, bool)>,
     /// Linearizable reads in progress (`reads.rs`).
     reads: reads::Reads,
     /// Smoothed propose-to-commit latency of own proposals that were not hedged, in
     /// nanoseconds.
     commit_latency: Option<u64>,
-    next_batch: u64,
     next_proposal: u64,
     next_alloc: u64,
     /// First slot this incarnation may use the leader priority in.
@@ -157,25 +135,10 @@ pub struct Replica {
     snapshot_state: Option<Bytes>,
     snapshot_asked: Option<Timestamp>,
 
-    // Retirement, while this replica is removed from the latest epoch.
-    /// Durable progress each member of that epoch reported in catch-up replies.
-    member_progress: BTreeMap<NodeId, u64>,
-    /// When to ask the members still behind again.
-    retire_probe: Option<Timestamp>,
-    /// The epoch `Action::Retired` was reported for.
-    retired: Option<u64>,
-    /// A barrier entry of this replica's own (through the log), confirming retirement from this epoch once
-    /// committed (a later change may have added it back); never reported to the caller.
-    retire_barrier: Option<(u64, ProposalId)>,
-    /// That barrier committed; retirement is decided once everything learned with it is
-    /// applied (the same page may add the replica back).
-    retire_committed: Option<u64>,
+    retirement: retire::Retirement,
     /// Steps at which this replica's proposers decided, for verification only.
     #[cfg(feature = "model")]
     decided_steps: BTreeMap<Slot, (Proposal, u32)>,
-    /// Suspected entry combinations seen, for verification only (`entry_checks.rs`).
-    #[cfg(feature = "model")]
-    probes: entry_checks::Probes,
 }
 
 impl Replica {
@@ -263,6 +226,7 @@ impl Replica {
             .as_ref()
             .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone());
         let leader = schedule.leader(Slot(floor));
+        let entries = entries::Entries::new(cfg.id, last_incarnation + 1);
         let mut r = Self {
             me: cfg.id,
             wire,
@@ -289,16 +253,11 @@ impl Replica {
             ahead_peer: None,
             dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
             proposers: BTreeMap::new(),
-            batches: BTreeMap::new(),
-            pending: VecDeque::new(),
-            relayed: VecDeque::new(),
-            forwarded: BTreeMap::new(),
+            entries,
             watch: watch::Watch::default(),
             placement: placement::Placement::new(now, leader),
-            outstanding: BTreeMap::new(),
             reads: reads::Reads::default(),
             commit_latency: None,
-            next_batch: 0,
             next_proposal: 0,
             next_alloc: 0,
             h_floor: reservation.map_or(0, |r| r + 1),
@@ -307,15 +266,9 @@ impl Replica {
             floor,
             snapshot_state: snapshot.map(|(_, b)| b),
             snapshot_asked: None,
-            member_progress: BTreeMap::new(),
-            retire_probe: None,
-            retired: None,
-            retire_barrier: None,
-            retire_committed: None,
+            retirement: retire::Retirement::default(),
             #[cfg(feature = "model")]
             decided_steps: BTreeMap::new(),
-            #[cfg(feature = "model")]
-            probes: entry_checks::Probes::default(),
         };
         r.advance_committed();
         // Slots with recovered recorder state were started by someone; make sure they get driven.
@@ -505,8 +458,7 @@ impl Replica {
     }
 
     fn check_no_change_pending(&self) -> Result<(), Error> {
-        let proposed_here = self.outstanding.values().any(|(_, kind, _)| *kind == Kind::Reconfigure);
-        if self.schedule.epoch().1 > self.committed || proposed_here {
+        if self.schedule.epoch().1 > self.committed || self.entries.proposing_change() {
             return Err(Error::ReconfigurationPending);
         }
         Ok(())
@@ -525,7 +477,7 @@ impl Replica {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if self.outstanding.len() + self.reads.len() >= self.cfg.max_outstanding_proposals as usize {
+        if self.entries.own_len() + self.reads.len() >= self.cfg.max_outstanding_proposals as usize {
             return Err(Error::Busy);
         }
         if self.next_proposal >= READ_ID_BASE {
@@ -538,8 +490,7 @@ impl Replica {
             return Err(Error::PayloadTooLarge);
         }
         self.next_proposal += 1;
-        self.outstanding.insert(id, (self.now, kind, false));
-        self.pending.push_back(item);
+        self.entries.submit(self.now, item);
         Ok(id)
     }
 
@@ -675,16 +626,12 @@ impl Replica {
         if let Some(id) = moving {
             self.placement.policy.on_resolved(id);
         }
-        let internal = [self.retire_barrier.take().map(|(_, id)| id), moving];
-        for id in mem::take(&mut self.outstanding).into_keys().filter(|id| !internal.contains(&Some(*id))) {
+        let internal = [self.retirement.fence(), moving];
+        for id in self.entries.fence().filter(|id| !internal.contains(&Some(*id))) {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }
         self.drop_reads();
         self.proposers.clear();
-        self.pending.clear();
-        self.relayed.clear();
-        self.forwarded.clear();
-        self.batches.clear();
         self.inbox.clear();
         self.gate.fence();
     }
@@ -699,7 +646,7 @@ impl Replica {
             registers: self.registers.iter().map(|(s, r)| (s.0, r.into())).collect(),
             decided_here: self.decided_steps.iter().map(|(s, (p, step))| (s.0, p.into(), *step)).collect(),
             decided: self.log.iter().map(|(s, d)| (s.0, (&d.proposal).into())).collect(),
-            local_batches: self.batches.len(),
+            local_batches: self.entries.batch_count(),
             entries: self.entry_probes(),
         }
     }

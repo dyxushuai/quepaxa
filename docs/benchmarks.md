@@ -137,6 +137,46 @@ would save a few percent of one thread and is not worth it. The host's state mac
 the bottleneck: `Kv::put` searches each key twice (`get`, then `insert`), and every
 snapshot makes the next write to each shard copy it. Data: `target/eval-results/saturation-155/`.
 
+### One lookup per write, no shard copy (#210)
+
+`Kv::put` now searches its shard once (`BTreeMap::entry`), and a single-key delete removes
+directly instead of a range lookup followed by a remove. A write to a shard that a snapshot
+still holds goes to a small per-shard overlay rather than copying the shard; the first
+write after the snapshot is dropped folds the overlay back in. The event loop's cost for a
+snapshot is therefore proportional to the writes made during encoding, not to the state.
+
+Same layout and workload as above, with peers on 27100-27102 and clients on 27200-27202,
+before (`ebc4f34`) and after (`cb1aab0`) runs interleaved, three 15 s runs per point, the whole
+matrix under `flock target/ops/bench.lock` with no other process above 50% CPU. Measured
+2026-11-14.
+
+| Offered rate | Build | Achieved | p50 | p90 | p99 | Hedges per replica |
+|---|---|---|---|---|---|---|
+| 200,000/s | before | 199,995/s | 0.60-0.62 ms | 39-41 ms | 128-139 ms | 5,348-43,804 |
+| 200,000/s | after | 199,996/s | 0.58-0.59 ms | 2.5-3.1 ms | 16-20 ms | 0-912 |
+| 250,000/s | before | 250,039/s | 0.75-0.78 ms | 70-84 ms | 154-198 ms | 5,326-43,942 |
+| 250,000/s | after | 250,039/s | 0.69-0.73 ms | 10-12 ms | 39-42 ms | 0-3,283 |
+
+p90 at 250k/s (10-12 ms) is now below its value at 200k/s before the change (39-41 ms).
+Leader suspicions per replica dropped from 2-14 per run to 0-3. Event-loop thread, 8 s of
+`perf record -F 2999` at 250k/s, shares of that thread's samples (ranges over the three
+replicas):
+
+| | Before | After |
+|---|---|---|
+| Thread busy | 70-73% | 63-64% |
+| kv-tokio apply (`ops::run`) | 47-51% | 42-43% |
+| of it `Kv::put` | 29-32% | 20-21% |
+| `BTreeMap::clone` (shard copy-on-write) | 11-14% | 0.01% |
+| overlay fold (`Shard::owned`) | – | 4.2-4.3% |
+| `Replica::handle` | 10-17% | 14-15% |
+| libc `memcmp` (self) | 20% | 24% |
+
+The next bottleneck is the key comparisons in `BTreeMap` searches: `memcmp`'s sample count
+is unchanged by this change, and it is the largest single symbol on the thread. Each compare
+follows an `Arc<[u8]>` to its heap bytes. After that comes the core's `Replica::handle`.
+Data: `target/eval-results/kv-apply-210/locked2/`.
+
 ### Simulated WAN
 
 `run-local.sh 5000 8 50` adds a 50 ms one-way `netem` delay to all loopback traffic,
@@ -554,6 +594,50 @@ each case the probe's `fsync` p50 and max over the latency's window and a disk r
 table above, `fast` below, `mixed` when a case's runs fall on both sides. A comparison
 holds only between rows of the same regime; `DATA_TMPFS=1` takes the disk out entirely,
 at the cost of durability.
+
+### A member that gets faster (`wan.sh speedup`, #206)
+
+Paper §5.3 footnote 7 suggests measuring a non-leader again when its conditions change,
+rather than only once its measurement goes stale (`STALE_HOLDS`, eight holds: 960 s at
+`--placement-periods 30000,120000`). The cheap trigger considered: a tied member's own
+commit tail, which it reports in its probes as a follower, drops clearly below what it
+was. The `speedup` scenario tests whether that signal exists: `heterogeneous` with the
+first leader (ap-ne) on a quota that is lifted at 150 s.
+
+Three back-to-back 300 s runs at `ebc4f34` (`SYSTEMS=quepaxa SLOW_CPUS=0.2`; 0.5 CPU, the
+default, leaves a leader indistinguishable even while it leads, see above). Commit p90 in
+ms of ap-ne's own writes as a follower under the quota (the last tenure before 150 s) and
+after the lift, against the other regions' over the same windows:
+
+| Run | Disk regime | ap-ne quota, p90 | others, p90 | ap-ne lifted, p90 | others, p90 | ap-ne leading under quota, p90 / p99 | others leading, p90 / p99 |
+|---|---|---|---|---|---|---|---|
+| 1 | fast | 8.9 | 8.6-8.7 | 8.7 | 8.5-8.8 | 9.4 / 18.9 | 8.4-8.8 / 10.6-12.2 (one 186) |
+| 2 | fast, slow from about 150 s | 8.6 | 8.4-8.7 | 27.3 | 27.0-27.9 | 9.3 / 16.6 | 8.4-8.8 / 10.8-12.2 (one 178) |
+| 3 | slow | 29.5 | 29.3-30.1 | 29.5 | 29.5-29.9 | 27.4 / 33.4 | 28.2-32.0 / 33.5-226 |
+
+- **There is no signal to trigger on.** A throttled follower's own writes commit like
+  everyone else's (within 0.3 ms of p90), before and after the lift: the commit path runs
+  through the leader and the disk, and a follower's CPU is off it (as "A slow member"
+  found at 0.5 CPU). The tail it reports cannot drop when it gets faster, because it never
+  rose while it was slow. Only a tenure measures a member's speed as a leader.
+- **The disk moves every tail at once**, 8.6 to 27.7 ms in run 2: a trigger on absolute
+  tails would re-explore on every regime switch, and one relative to the other members'
+  would never fire.
+- **Nothing to gain in this scenario anyway.** At 0.2 CPU the throttled leader's p90 was
+  about 10% above the others' in the fast regime and indistinguishable in the slow one;
+  once lifted, every member is alike, so the lead going back to it (`back_to_fast_s`: not
+  within the run in any of the three) would gain nothing. Run 3 shows the existing
+  mechanism's bound instead: ap-ne's first tenure (25 s) did not span the sustained
+  period, so it was explored again at 116 s and rotation demoted it after 13 s.
+
+So the age bound stays: a measurement is retaken once it is older than eight holds, and no
+cheaper trigger is added (the policy and its Verus port are unchanged). A signal that
+could see a follower's speed as a leader would need the follower to time its own leader
+work (say, how long it takes to process a proposal), which it does not do as a follower.
+
+The data: `target/bench-etcd/wan-20261114-094533/` (the three runs) and
+`wan-20261114-004901/` (one earlier run in the fast regime: ap-ne as follower p90 10.2 ms
+against 9.7 ms for us-east; as leader 14.6 against 9.7-9.8).
 
 ## Not measured
 

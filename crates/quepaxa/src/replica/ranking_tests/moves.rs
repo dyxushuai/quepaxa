@@ -15,7 +15,7 @@ fn the_leader_moves_to_the_best_placed_member_after_the_sustained_period() {
     let id = r.placement.policy.moving();
     rounds(&mut r, t + PROBE_INTERVAL, 5, &wan(), &all);
     assert_eq!(r.placement.policy.moving(), id);
-    assert_eq!(r.outstanding.values().filter(|(_, k, _)| *k == Kind::Reconfigure).count(), 1);
+    assert_eq!(r.entries.own().values().filter(|o| o.kind == Kind::Reconfigure).count(), 1);
 }
 
 #[test]

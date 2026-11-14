@@ -631,14 +631,14 @@ impl Node {
             return;
         }
         let through = self.applied - 1;
-        let (core, kv) = (self.replica.core_state(), self.kv.clone());
+        let (core, kv) = (self.replica.core_state(), self.kv.snapshot());
         // The next attempt waits a full interval, also after a failure.
         self.last_snapshot = self.applied;
         self.snapshotting = true;
         let (writer, events) = (self.snapshots.clone(), self.events.clone());
         thread::spawn(move || {
             let bytes = Bytes::from(encode_snapshot(through, &core, &kv));
-            // Unshare the shards now: until then every write copies the shard it touches.
+            // Unshare the shards now: until then writes to them wait in overlays.
             drop(kv);
             let saved = if bytes.len() + 1 > MAX_FRAME {
                 Err(format!("{} bytes exceed the peer frame limit", bytes.len()))

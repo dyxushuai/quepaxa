@@ -11,11 +11,11 @@
 
 use alloc::vec::Vec;
 
-use super::{Active, LocalBatch, Replica};
-use crate::batch::{self, Item};
+use super::{Active, Replica};
+use crate::batch;
 use crate::codec::{Body, WireProposal};
 use crate::durable::Record;
-use crate::proposal::{LEADER_PRIORITY, Proposal, ValueKey};
+use crate::proposal::{LEADER_PRIORITY, Proposal};
 use crate::proposer::{Progress, Reply, SlotProposer};
 use crate::types::{MAX_STEP, NodeId, Slot, Timestamp};
 
@@ -100,13 +100,6 @@ impl Replica {
             self.metrics.messages_rejected += 1;
             return;
         };
-        #[cfg(feature = "model")]
-        {
-            let own = entries
-                .iter()
-                .filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation);
-            self.probes.d3 += own.count() as u64;
-        }
         let cap =
             self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
         // Stepped aside, this replica hands them on (`watch.rs`); so it does for a follower
@@ -114,16 +107,10 @@ impl Replica {
         // leader, not to a deputy.
         let lagging =
             self.watch.committed.get(&from).is_some_and(|&c| self.schedule.leader(Slot(c)) == self.me);
-        let queue = if self.leads_now() || self.watch.aside || lagging {
-            &mut self.pending
-        } else {
-            &mut self.relayed
-        };
-        if queue.len() + entries.len() > cap {
-            return; // the origin hedges
+        let to_pending = self.leads_now() || self.watch.aside || lagging;
+        if self.entries.received(entries, to_pending, cap) {
+            self.ack_forward(from);
         }
-        queue.extend(entries);
-        self.ack_forward(from);
     }
 
     /// Starts as many slots as the window allows, after handing entries to the target if
@@ -139,31 +126,25 @@ impl Replica {
             self.forward_pending();
         }
         // Batches whose entries all committed elsewhere are dead weight.
-        let dedup = &self.dedup;
-        self.batches
-            .retain(|_, b| b.slot.is_some() || b.entries.iter().any(|&(o, i, id)| !dedup.contains(o, i, id)));
+        self.entries.prune(&self.dedup);
         // Hedging around a target that still talks: one slot at a time, or the hedges contend
         // with its slots and stretch a slowdown they were meant to cover. Entries other
         // followers handed here (as their deputy) are not hedges.
-        let deputy = || {
-            self.relayed.iter().any(|i| i.entry.origin != self.me)
-                || self.batches.values().any(|b| b.entries.iter().any(|&(o, _, _)| o != self.me))
-        };
-        let cap = if direct || deputy() { self.window() } else { 1 };
+        let cap = if direct || self.entries.deputy() { self.window() } else { 1 };
         while (self.proposers.len() as u64) < cap {
-            let waiting = self.batches.iter().find(|(_, b)| b.slot.is_none() && !b.entries.is_empty());
+            let waiting = self.entries.waiting();
             // Nothing to propose: skip the search for a slot, which probes the log per slot
             // and ran on every input.
-            if waiting.is_none() && self.relayed.is_empty() && !(direct && !self.pending.is_empty()) {
+            if waiting.is_none() && !self.entries.to_cut(direct) {
                 break;
             }
-            let waiting = waiting.map(|(seq, _)| *seq);
             // A batch is cut only for a slot it can take: one cut and left waiting would be
             // proposed later in someone else's slots.
             let Some(slot) = self.free_slot() else { break };
+            let max = self.cfg.max_batch_bytes as usize;
             let seq = match waiting {
                 Some(seq) => seq,
-                None => match self.cut_batch(direct) {
+                None => match self.entries.cut(direct, max, &self.dedup) {
                     Some(seq) => seq,
                     None => break,
                 },
@@ -174,21 +155,12 @@ impl Replica {
     }
 
     fn forward_pending(&mut self) {
-        if self.pending.is_empty() {
+        if !self.entries.has_pending() {
             return;
         }
         let leader = self.target();
         self.forwarded_now();
-        let entries: Vec<Item> = self.pending.drain(..).collect();
-        for i in
-            entries.iter().filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)
-        {
-            let _earlier = self.forwarded.insert(i.entry.id, (i.clone(), self.now));
-            #[cfg(feature = "model")]
-            if _earlier.is_some_and(|(_, at)| at < self.now) {
-                self.probes.d2_restarts += 1;
-            }
-        }
+        let entries = self.entries.forward(self.now);
         let mut chunk = batch::Builder::new(self.cfg.max_batch_bytes as usize);
         for e in entries {
             if !chunk.fits(&e) {
@@ -204,19 +176,7 @@ impl Replica {
     /// No longer the leader (an order change took effect): the entries of batches not yet in
     /// a slot go to the new leader, instead of being proposed later in its slots.
     pub(super) fn hand_on_unstarted(&mut self) {
-        let mut handed = Vec::new();
-        self.batches.retain(|_, b| {
-            if b.slot.is_none() {
-                // Our own encoding: it decodes.
-                handed.extend(batch::decode(&b.value).unwrap_or_default());
-            }
-            b.slot.is_some()
-        });
-        let dedup = &self.dedup;
-        self.pending.extend(handed.into_iter().filter(|e| {
-            let (o, inc, id) = e.key();
-            !dedup.contains(o, inc, id)
-        }));
+        self.entries.lost_lead(&self.dedup);
     }
 
     /// A local batch lost its slot. The leader, or a follower that suspects it (`watch.rs`),
@@ -230,65 +190,11 @@ impl Replica {
     /// after slot as well.
     pub(super) fn lost_slot(&mut self, seq: u64, winner: NodeId, started: Timestamp) {
         if self.proposes_directly() {
-            if let Some(b) = self.batches.get_mut(&seq) {
-                b.slot = None;
-            }
+            self.entries.lost_slot_kept(seq);
             return;
         }
-        let Some(b) = self.batches.remove(&seq) else { return };
         let deciding = winner == self.target() && self.watch.progressed > started;
-        // Our own encoding: it decodes.
-        let entries = batch::decode(&b.value).unwrap_or_default();
-        for e in entries {
-            let (o, inc, id) = e.key();
-            if self.dedup.contains(o, inc, id) {
-                continue;
-            }
-            #[cfg(feature = "model")]
-            if o == self.me
-                && inc == self.incarnation
-                && (self.forwarded.contains_key(&id) || self.pending.iter().any(|i| i.key() == (o, inc, id)))
-            {
-                self.probes.d2 += 1;
-            }
-            if o == self.me || deciding { self.pending.push_back(e) } else { self.relayed.push_back(e) }
-        }
-    }
-
-    /// Cuts the next batch: relayed entries always, own pending ones only when proposing them
-    /// directly.
-    fn cut_batch(&mut self, lead: bool) -> Option<u64> {
-        let mut entries = batch::Builder::new(self.cfg.max_batch_bytes as usize);
-        loop {
-            let queue = if !self.relayed.is_empty() {
-                &mut self.relayed
-            } else if lead && !self.pending.is_empty() {
-                &mut self.pending
-            } else {
-                break;
-            };
-            let Some(e) = queue.front() else { break };
-            if !entries.fits(e) {
-                break;
-            }
-            let Some(e) = queue.pop_front() else { break };
-            let (o, inc, id) = e.key();
-            if self.dedup.contains(o, inc, id) {
-                continue;
-            }
-            entries.push(e);
-        }
-        (!entries.is_empty()).then(|| self.new_batch(entries.take()))
-    }
-
-    fn new_batch(&mut self, entries: Vec<Item>) -> u64 {
-        let seq = self.next_batch;
-        self.next_batch += 1;
-        let key = ValueKey { origin: self.me, incarnation: self.incarnation, seq };
-        let ids = entries.iter().map(Item::key).collect();
-        self.batches
-            .insert(seq, LocalBatch { key, value: batch::encode(&entries), entries: ids, slot: None });
-        seq
+        self.entries.lost_slot(seq, deciding, &self.dedup);
     }
 
     /// The next slot in the window this replica may start. The leader proposing its own and
@@ -317,9 +223,8 @@ impl Replica {
     }
 
     fn start(&mut self, slot: Slot, seq: u64) {
-        let Some(b) = self.batches.get_mut(&seq) else { return };
-        b.slot = Some(slot);
-        let proposal = Proposal { priority: 0, key: b.key, value: b.value.clone() };
+        let Some((key, value)) = self.entries.start(seq, slot) else { return };
+        let proposal = Proposal { priority: 0, key, value };
         let leader = self.schedule.leader(slot) == self.me && slot.0 >= self.h_floor;
         if leader && self.reserved_through.is_none_or(|t| slot.0 > t) {
             let through = slot.0 + 4 * self.window();
@@ -346,7 +251,7 @@ impl Replica {
     pub(super) fn earliest_timer(&self) -> Option<Timestamp> {
         let resend = self.proposers.values().map(|a| a.resend_at);
         let stall = self.stalled().map(|(_, at)| at);
-        let hedge = self.forwarded.values().filter_map(|(_, at)| self.hedge_at(*at)).min();
+        let hedge = self.entries.forwarded_since().filter_map(|(_, at)| self.hedge_at(at)).min();
         // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
         let behind = self.peer_committed > self.committed + 1
             && self.catch_up.or(self.ahead_peer.map(|p| (p, self.now))).is_some();
@@ -356,7 +261,7 @@ impl Replica {
             .chain(stall)
             .chain(hedge)
             .chain(catch_up)
-            .chain(self.retire_probe)
+            .chain(self.retirement.probe_at())
             .chain(self.reads.resend_at())
             .chain(self.startup_probe)
             .chain(self.watch.ack_due.values().copied())
@@ -384,7 +289,7 @@ impl Replica {
             self.metrics.retransmits += 1;
             self.send_requests(slot, true);
         }
-        if self.forwarded.values().any(|(_, at)| self.silent_at(*at).is_some_and(|t| t <= now)) {
+        if self.entries.forwarded_since().any(|(_, at)| self.silent_at(at).is_some_and(|t| t <= now)) {
             self.suspect_target();
         }
         // The target talks but is slow: entries it left uncommitted too long are proposed here;
@@ -392,24 +297,12 @@ impl Replica {
         // in case the forward was lost or refused.
         let aside = self.watch.aside;
         let late: Vec<_> = self
-            .forwarded
-            .iter()
-            .filter(|(_, (_, at))| self.late_at(*at).is_some_and(|t| t <= now))
-            .map(|(id, _)| *id)
+            .entries
+            .forwarded_since()
+            .filter(|(_, at)| self.late_at(*at).is_some_and(|t| t <= now))
+            .map(|(id, _)| id)
             .collect();
-        for id in late {
-            if let Some((e, _)) = self.forwarded.remove(&id) {
-                if aside {
-                    self.pending.push_back(e);
-                    continue;
-                }
-                if let Some(o) = self.outstanding.get_mut(&id) {
-                    o.2 = true;
-                }
-                self.metrics.hedged += 1;
-                self.relayed.push_back(e);
-            }
-        }
+        self.metrics.hedged += self.entries.late(late, aside);
         if self.peer_committed > self.committed + 1 && self.catch_up_due() {
             // Prefer the most advanced peer; the previous target may be the one that failed.
             let peer = self.ahead_peer.or(self.catch_up.map(|(p, _)| p));
@@ -427,7 +320,7 @@ impl Replica {
         }
         let stalled: Vec<Slot> = self.stalled().filter(|(_, at)| *at <= now).map(|(s, _)| s).collect();
         for slot in stalled {
-            let seq = self.new_batch(Vec::new());
+            let seq = self.entries.new_batch(Vec::new());
             self.start(slot, seq);
         }
     }
