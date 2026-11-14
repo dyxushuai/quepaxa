@@ -6,6 +6,8 @@
 //! forwarding to the leader, hedging, stalled slots).
 
 mod disk;
+#[cfg(any(test, feature = "model"))]
+mod entry_checks;
 mod gate;
 mod log;
 mod messages;
@@ -171,6 +173,9 @@ pub struct Replica {
     /// Steps at which this replica's proposers decided, for verification only.
     #[cfg(feature = "model")]
     decided_steps: BTreeMap<Slot, (Proposal, u32)>,
+    /// Suspected entry combinations seen, for verification only (`entry_checks.rs`).
+    #[cfg(feature = "model")]
+    probes: entry_checks::Probes,
 }
 
 impl Replica {
@@ -309,6 +314,8 @@ impl Replica {
             retire_committed: None,
             #[cfg(feature = "model")]
             decided_steps: BTreeMap::new(),
+            #[cfg(feature = "model")]
+            probes: entry_checks::Probes::default(),
         };
         r.advance_committed();
         // Slots with recovered recorder state were started by someone; make sure they get driven.
@@ -693,6 +700,7 @@ impl Replica {
             decided_here: self.decided_steps.iter().map(|(s, (p, step))| (s.0, p.into(), *step)).collect(),
             decided: self.log.iter().map(|(s, d)| (s.0, (&d.proposal).into())).collect(),
             local_batches: self.batches.len(),
+            entries: self.entry_probes(),
         }
     }
 
