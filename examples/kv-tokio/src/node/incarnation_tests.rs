@@ -1,8 +1,9 @@
 use super::*;
-use crate::ops::{Cmp, Compare, Response, Target};
+use crate::ops::{Cmp, Compare, Request, Response, Target};
 use quepaxa::{Config, NodeId};
 
-/// Executes the real node's persists synchronously, leaving its peer frames queued.
+/// Executes the real node's persists and applies synchronously, leaving its peer frames
+/// queued.
 fn persist(node: &mut Node) {
     while !node.persists.is_empty() {
         let mut last = None;
@@ -21,6 +22,7 @@ fn persist(node: &mut Node) {
         node.written.advance(0, Some(Report { id: last.unwrap(), then, ok: true }));
         node.on_written();
     }
+    node.apply_now();
 }
 
 fn request(node: &mut Node, req: Request) -> oneshot::Receiver<Reply> {

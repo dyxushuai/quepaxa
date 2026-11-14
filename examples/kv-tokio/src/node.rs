@@ -1,6 +1,7 @@
-//! The replica event loop: one thread owns the `Replica`, the disk and the KV state, and
-//! executes actions in order. Persists issued while handling a burst of events share one
-//! fsync (group commit); their gated messages leave only after it.
+//! The replica event loop: one thread owns the `Replica` and executes its actions in order.
+//! Persists issued while handling a burst of events share one fsync on the writer thread
+//! (group commit); their gated messages leave only after it. Commits, and everything that
+//! reads or answers from the KV state, go in order to the apply thread (`apply.rs`).
 
 use std::collections::HashMap;
 use std::task::{Context, Poll, Wake, Waker};
@@ -12,11 +13,11 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self as tmpsc, Sender};
 use tokio::sync::oneshot;
 
-use crate::client::{Cmd, Failure, Pending, Reply};
-use crate::kv::Kv;
-use crate::ops::{self, RangeReq, Request};
-use crate::storage::{Disk, Log, SnapshotWriter, decode_snapshot, encode_snapshot};
-use crate::sync::mpsc::{self, Receiver};
+use crate::apply::{self, Applier, Job};
+use crate::client::{Cmd, Failure, Reply};
+use crate::ops::RangeReq;
+use crate::storage::{Disk, Log, SnapshotWriter, decode_snapshot};
+use crate::sync::mpsc::{self, Receiver, SyncSender};
 use crate::sync::{Arc, Condvar, Mutex, MutexGuard, thread};
 
 /// Largest frame on a peer link; snapshots larger than this are not taken (see `maybe_snapshot`).
@@ -160,8 +161,12 @@ pub struct Node {
     /// `MAX_UNWRITTEN`, lowered by tests.
     max_unwritten: u64,
     written: Arc<Written>,
-    kv: Kv,
-    /// Next slot to apply.
+    /// Jobs for the apply thread, handed over together at the end of a turn (`hand_off`).
+    to_apply: Vec<Job>,
+    applies: SyncSender<Vec<Job>>,
+    /// Taken by the apply thread when the node runs; tests run it by hand.
+    applier: Option<(Applier, Receiver<Vec<Job>>)>,
+    /// Next slot to hand to the apply thread.
     applied: u64,
     snapshot_every: u64,
     last_snapshot: u64,
@@ -175,7 +180,7 @@ pub struct Node {
     snapshot_from: Option<u32>,
     peers: HashMap<u32, PeerLink>,
     start: Instant,
-    pending_writes: Pending,
+    /// Linearizable reads waiting for their barrier.
     reads: HashMap<ProposalId, (RangeReq, oneshot::Sender<Reply>)>,
     persists: Vec<PendingPersist>,
     /// Record bytes in `persists`.
@@ -297,6 +302,8 @@ impl Node {
         every: u64,
         events: Sender<Ev>,
     ) -> Self {
+        let (applies, jobs) = mpsc::sync_channel(apply::QUEUE);
+        let applier = Applier::new(replica.id(), replica.incarnation(), snapshots.clone(), events.clone());
         Self {
             replica,
             snapshots,
@@ -305,7 +312,9 @@ impl Node {
             handed: 0,
             max_unwritten: MAX_UNWRITTEN,
             written: Arc::default(),
-            kv: Kv::default(),
+            to_apply: Vec::new(),
+            applies,
+            applier: Some((applier, jobs)),
             applied: 0,
             snapshot_every: every,
             last_snapshot: 0,
@@ -315,7 +324,6 @@ impl Node {
             snapshot_from: None,
             peers,
             start: Instant::now(),
-            pending_writes: Pending::default(),
             reads: HashMap::new(),
             persists: Vec::new(),
             pending: 0,
@@ -334,7 +342,7 @@ impl Node {
         let bytes = disk.load_snapshot().map_err(|e| format!("read snapshot: {e}"))?;
         let Some(bytes) = bytes else { return Ok(()) };
         let snap = decode_snapshot(&bytes).ok_or("snapshot.bin is corrupt")?;
-        self.kv = snap.kv;
+        self.to_apply.push(Job::Install(snap.kv));
         self.applied = snap.through + 1;
         self.last_snapshot = self.applied;
         self.drain();
@@ -355,8 +363,10 @@ impl Node {
         if let Some(disk) = self.disk.take() {
             self.start_writer(disk);
         }
+        self.start_applier();
         self.drain();
         self.flush();
+        self.hand_off();
         loop {
             // Due timers first: a steady stream of events must not starve retransmission,
             // hedging or catch-up.
@@ -365,6 +375,7 @@ impl Node {
                 let _ = self.replica.handle_timeout(now);
                 self.drain();
                 self.flush();
+                self.hand_off();
             }
             let wait = self.replica.next_deadline().map_or(Duration::from_secs(1), |Timestamp(t)| {
                 Duration::from_nanos(t.saturating_sub(self.now().0))
@@ -384,6 +395,32 @@ impl Node {
             self.on_written();
             self.flush();
             self.maybe_snapshot();
+            self.hand_off();
+        }
+    }
+
+    fn start_applier(&mut self) {
+        if let Some((applier, jobs)) = self.applier.take() {
+            thread::spawn(move || applier.run(&jobs));
+        }
+    }
+
+    /// Hands this turn's jobs to the apply thread, waiting only while its queue is full.
+    fn hand_off(&mut self) {
+        if !self.to_apply.is_empty() {
+            let jobs = std::mem::take(&mut self.to_apply);
+            self.applies.send(jobs).expect("the apply thread stopped");
+        }
+    }
+
+    /// Hands this turn's jobs over and applies them on the calling thread, for tests that
+    /// drive the node by hand.
+    #[cfg(all(test, not(feature = "shuttle")))]
+    fn apply_now(&mut self) {
+        self.hand_off();
+        let (applier, jobs) = self.applier.as_mut().expect("the apply thread runs");
+        while let Ok(batch) = jobs.try_recv() {
+            batch.into_iter().for_each(|job| applier.handle(job));
         }
     }
 
@@ -465,7 +502,7 @@ impl Node {
             Cmd::Write(req) => {
                 let payload = req.encode();
                 match self.replica.propose(now, Bytes::from(payload.clone())) {
-                    Ok(id) => self.pending_writes.write(id, payload, reply),
+                    Ok(id) => self.to_apply.push(Job::Proposed { id, payload, reply }),
                     Err(e) => {
                         let _ = reply.send(refused(e));
                     }
@@ -479,9 +516,7 @@ impl Node {
                     let _ = reply.send(refused(e));
                 }
             },
-            Cmd::Read { range, linearizable: false } => {
-                let _ = reply.send(Reply::Done(ops::read(&self.kv, &range)));
-            }
+            Cmd::Read { range, linearizable: false } => self.to_apply.push(Job::Read { range, reply }),
             Cmd::Stats => {
                 let order: Vec<String> = self.replica.members().iter().map(|m| m.id.0.to_string()).collect();
                 let stats = format!("STATS {:?} LEADERS {}", self.replica.metrics(), order.join(","));
@@ -497,14 +532,14 @@ impl Node {
                     return;
                 }
                 match self.replica.propose_reconfiguration(now, members, leaders) {
-                    Ok(id) => self.pending_writes.write(id, Vec::new(), reply),
+                    Ok(id) => self.to_apply.push(Job::Proposed { id, payload: Vec::new(), reply }),
                     Err(e) => {
                         let _ = reply.send(refused(e));
                     }
                 }
             }
             Cmd::LeaderOrder(order) => match self.replica.propose_leader_order(now, order) {
-                Ok(id) => self.pending_writes.write(id, Vec::new(), reply),
+                Ok(id) => self.to_apply.push(Job::Proposed { id, payload: Vec::new(), reply }),
                 Err(e) => {
                     let _ = reply.send(refused(e));
                 }
@@ -523,7 +558,7 @@ impl Node {
             return;
         }
         // Adopt the state before draining: commits after `through` apply on top of it.
-        self.kv = snap.kv;
+        self.to_apply.push(Job::Install(snap.kv));
         self.applied = through + 1;
         self.last_snapshot = self.applied;
         self.snapshot_from = None;
@@ -553,25 +588,15 @@ impl Node {
                 }
                 Action::Commit { slot, entries } => {
                     if slot.0 >= self.applied {
-                        let me = self.replica.id();
-                        for e in &entries {
-                            // A payload that is not a request (a corrupt or foreign batch)
-                            // applies as nothing on every replica alike.
-                            let Some(req) = Request::decode(&e.payload) else { continue };
-                            let applied = ops::apply(&mut self.kv, &req);
-                            if e.origin == me && e.incarnation == self.replica.incarnation() {
-                                self.pending_writes.applied(slot.0, e.id, &e.payload, applied);
-                            }
-                        }
+                        self.to_apply.push(Job::Commit { slot: slot.0, entries });
                         self.applied = slot.0 + 1;
                     }
                 }
-                Action::Committed { id, slot } => {
-                    self.pending_writes.committed(id, slot.0, self.kv.revision())
-                }
+                Action::Committed { id, slot } => self.to_apply.push(Job::Committed { id, slot: slot.0 }),
+                // Queued behind every commit emitted before it, so it reads their effects.
                 Action::ReadReady { id, .. } => {
-                    if let Some((range, r)) = self.reads.remove(&id) {
-                        let _ = r.send(Reply::Done(ops::read(&self.kv, &range)));
+                    if let Some((range, reply)) = self.reads.remove(&id) {
+                        self.to_apply.push(Job::Read { range, reply });
                     }
                 }
                 Action::SnapshotNeeded { peer, .. } => {
@@ -588,7 +613,7 @@ impl Node {
                     std::process::exit(0);
                 }
                 Action::Dropped { id, reason } => {
-                    self.pending_writes.dropped(id, reason);
+                    self.to_apply.push(Job::Dropped { id, reason });
                     if let Some((_, r)) = self.reads.remove(&id) {
                         let _ = r.send(Reply::Failed(Failure::Fenced));
                     }
@@ -620,33 +645,20 @@ impl Node {
         }
     }
 
-    /// Snapshots the KV state durably, then lets the replica compact its log. Snapshots
-    /// too large for one peer frame are not taken (the log keeps growing instead), so a
-    /// lagging replica can always fetch the latest snapshot.
-    /// Encodes a snapshot on the event loop (a consistent cut) and writes it in the
-    /// background, so the fsync never stalls consensus; the log is compacted once it is
-    /// durable (`Ev::SnapshotSaved`). Only the shard pointers are copied here.
+    /// Asks the apply thread for a snapshot at the last slot handed to it, with the replica
+    /// state taken at the same point (`core_state` covers exactly the commits emitted so
+    /// far). Once it is durable (`Ev::SnapshotSaved`), the replica compacts its log through
+    /// it: never past what was applied and saved.
     fn maybe_snapshot(&mut self) {
         if self.snapshotting || self.applied == 0 || self.applied < self.last_snapshot + self.snapshot_every {
             return;
         }
         let through = self.applied - 1;
-        let (core, kv) = (self.replica.core_state(), self.kv.snapshot());
+        let core = self.replica.core_state();
         // The next attempt waits a full interval, also after a failure.
         self.last_snapshot = self.applied;
         self.snapshotting = true;
-        let (writer, events) = (self.snapshots.clone(), self.events.clone());
-        thread::spawn(move || {
-            let bytes = Bytes::from(encode_snapshot(through, &core, &kv));
-            // Unshare the shards now: until then writes to them wait in overlays.
-            drop(kv);
-            let saved = if bytes.len() + 1 > MAX_FRAME {
-                Err(format!("{} bytes exceed the peer frame limit", bytes.len()))
-            } else {
-                writer.save(through, &bytes).map_err(|e| e.to_string())
-            };
-            let _ = events.blocking_send(Ev::SnapshotSaved { through, core, bytes, saved });
-        });
+        self.to_apply.push(Job::Snapshot { through, core });
     }
 }
 
@@ -700,123 +712,4 @@ mod incarnation_tests;
 mod shuttle_tests;
 
 #[cfg(all(test, not(feature = "shuttle")))]
-mod tests {
-    use super::*;
-
-    /// A single-member node whose persists are reported by hand (no writer thread).
-    fn node(name: &str) -> Node {
-        let dir = std::env::temp_dir().join(format!("kv-tokio-node-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let (disk, records) = Disk::open(&dir).unwrap();
-        let cfg = quepaxa::Config::new([1; 16], quepaxa::NodeId(0), vec![quepaxa::NodeId(0)], [2; 32]);
-        let replica = Replica::new(cfg, records, Timestamp(0)).unwrap();
-        let (events, _) = tmpsc::channel(16);
-        let mut n = Node::new(replica, disk, HashMap::new(), u64::MAX, events);
-        n.drain();
-        n
-    }
-
-    #[test]
-    fn every_report_reaches_the_replica_even_when_several_arrive_together() {
-        let mut n = node("reports");
-        let (reply, _) = oneshot::channel();
-        n.on_client(
-            n.now(),
-            Cmd::Write(Request::Put { key: b"k".to_vec(), value: b"v".to_vec(), prev_kv: false }),
-            reply,
-        );
-        n.drain();
-        let id = n.persists.last().expect("the proposal persists").id;
-        // Two reports taken in one turn: the first produces actions, the second is a failure.
-        let report = |ok| Report { id, then: Vec::new(), ok };
-        n.written.advance(0, Some(report(true)));
-        n.written.advance(0, Some(report(false)));
-        n.on_written();
-        assert_eq!(
-            n.replica.propose(n.now(), Bytes::from_static(b"x")),
-            Err(quepaxa::Error::Fenced),
-            "the storage failure fenced the replica"
-        );
-    }
-
-    /// Acknowledges every persist issued so far, as the writer thread would.
-    fn settle(n: &mut Node) {
-        while let Some(id) = n.persists.last().map(|p| p.id) {
-            n.persists.clear();
-            n.pending = 0;
-            n.written.advance(0, Some(Report { id, then: Vec::new(), ok: true }));
-            n.on_written();
-        }
-    }
-
-    #[test]
-    fn each_write_gets_the_result_it_saw_in_log_order() {
-        let mut n = node("results");
-        let put = |n: &mut Node, v: &[u8]| {
-            let (reply, rx) = oneshot::channel();
-            let req = Request::Put { key: b"k".to_vec(), value: v.to_vec(), prev_kv: true };
-            n.on_client(n.now(), Cmd::Write(req), reply);
-            n.drain();
-            rx
-        };
-        let mut first = put(&mut n, b"1");
-        settle(&mut n);
-        let mut second = put(&mut n, b"2");
-        settle(&mut n);
-        let Ok(Reply::Done(a)) = first.try_recv() else { panic!("first write unanswered") };
-        let Ok(Reply::Done(b)) = second.try_recv() else { panic!("second write unanswered") };
-        assert_eq!(a.revision, 1);
-        let ops::Response::Put { prev: Some(prev) } = b.response else { panic!("{b:?}") };
-        assert_eq!((b.revision, &*prev.value), (2, &b"1"[..]));
-    }
-
-    #[test]
-    fn a_full_peer_queue_drops_frames_instead_of_blocking() {
-        let mut n = node("full-peer");
-        // Nothing drains these queues, like a peer that is unreachable.
-        let (msgs, mut rx) = tokio::sync::mpsc::channel(1);
-        let (bulk, _bulk) = tokio::sync::mpsc::channel(1);
-        n.peers.insert(1, PeerLink::new(msgs, bulk));
-        n.send(1, PeerFrame::Msg(Bytes::from_static(b"first")));
-        n.send(1, PeerFrame::Msg(Bytes::from_static(b"second")));
-        assert_eq!(rx.try_recv().unwrap(), PeerFrame::Msg(Bytes::from_static(b"first")).encode());
-        assert!(rx.try_recv().is_err(), "the frame that did not fit was dropped");
-    }
-
-    #[test]
-    fn snapshots_take_the_bulk_queue_and_nothing_else_does() {
-        let mut n = node("bulk-peer");
-        let (msgs, mut msgs_rx) = tokio::sync::mpsc::channel(8);
-        let (bulk, mut bulk_rx) = tokio::sync::mpsc::channel(1);
-        n.peers.insert(1, PeerLink::new(msgs, bulk));
-        let snapshot = || PeerFrame::Snapshot(Bytes::from_static(b"state"));
-        n.send(1, snapshot());
-        n.send(1, snapshot());
-        // The full bulk queue does not hold messages back.
-        n.send(1, PeerFrame::SnapshotRequest);
-        n.send(1, PeerFrame::Msg(Bytes::from_static(b"m")));
-        assert_eq!(bulk_rx.try_recv().unwrap(), snapshot().encode());
-        assert!(bulk_rx.try_recv().is_err(), "the snapshot that did not fit was dropped");
-        assert_eq!(msgs_rx.try_recv().unwrap(), PeerFrame::SnapshotRequest.encode());
-        assert_eq!(msgs_rx.try_recv().unwrap(), PeerFrame::Msg(Bytes::from_static(b"m")).encode());
-        assert!(msgs_rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn waiting_for_the_disk_ends_once_the_writer_catches_up() {
-        let written = Arc::new(Written::default());
-        let writer = written.clone();
-        let t = std::thread::spawn(move || {
-            for bytes in [10, 20, 30] {
-                std::thread::sleep(Duration::from_millis(5));
-                writer.advance(bytes, None);
-            }
-        });
-        written.wait_for(0);
-        written.wait_for(25);
-        assert!(written.lock().0 >= 25);
-        t.join().unwrap();
-        written.advance(u64::MAX, None);
-        written.wait_for(u64::MAX - 1);
-    }
-}
+mod tests;

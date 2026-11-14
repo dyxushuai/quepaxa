@@ -34,6 +34,7 @@ last-error-shared-across-threads	-	cargo nextest run -p quepaxa-ffi --test c_abi
 writer-forgets-to-wake-the-event-loop	-	cargo test -p kv-tokio --features shuttle --bin kv-tokio shuttle_tests::the_handoff	deadlock
 writer-never-wakes-the-event-loop	-	cargo test -p kv-tokio --features shuttle --bin kv-tokio shuttle_tests::the_writer_wakes	deadlock
 event-loop-bell-never-rings	-	cargo test -p kv-tokio --features shuttle --bin kv-tokio shuttle_tests::the_writer_wakes	deadlock
+read-served-before-it-is-applied	-	cargo test -p kv-tokio --bin kv-tokio node::tests::a_linearizable_read	the read missed a write decided before it
 leader-proposes-past-handover	-	cargo nextest run --no-fail-fast -p quepaxa next_leaders	only the slots this replica still leads
 stale-member-ranked-first	-	cargo nextest run --no-fail-fast -p quepaxa ranking_tests	a stale member is never placed first
 placement-ignores-the-hold	-	cargo nextest run --no-fail-fast -p quepaxa ranking_tests	within the hold
