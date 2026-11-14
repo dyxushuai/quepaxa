@@ -137,6 +137,46 @@ would save a few percent of one thread and is not worth it. The host's state mac
 the bottleneck: `Kv::put` searches each key twice (`get`, then `insert`), and every
 snapshot makes the next write to each shard copy it. Data: `target/eval-results/saturation-155/`.
 
+### One lookup per write, no shard copy (#210)
+
+`Kv::put` now searches its shard once (`BTreeMap::entry`), and a single-key delete removes
+directly instead of a range lookup followed by a remove. A write to a shard that a snapshot
+still holds goes to a small per-shard overlay rather than copying the shard; the first
+write after the snapshot is dropped folds the overlay back in. The event loop's cost for a
+snapshot is therefore proportional to the writes made during encoding, not to the state.
+
+Same layout and workload as above, with peers on 27100-27102 and clients on 27200-27202,
+before (`ebc4f34`) and after (`cb1aab0`) runs interleaved, three 15 s runs per point, the whole
+matrix under `flock target/ops/bench.lock` with no other process above 50% CPU. Measured
+2026-11-14.
+
+| Offered rate | Build | Achieved | p50 | p90 | p99 | Hedges per replica |
+|---|---|---|---|---|---|---|
+| 200,000/s | before | 199,995/s | 0.60-0.62 ms | 39-41 ms | 128-139 ms | 5,348-43,804 |
+| 200,000/s | after | 199,996/s | 0.58-0.59 ms | 2.5-3.1 ms | 16-20 ms | 0-912 |
+| 250,000/s | before | 250,039/s | 0.75-0.78 ms | 70-84 ms | 154-198 ms | 5,326-43,942 |
+| 250,000/s | after | 250,039/s | 0.69-0.73 ms | 10-12 ms | 39-42 ms | 0-3,283 |
+
+p90 at 250k/s (10-12 ms) is now below its value at 200k/s before the change (39-41 ms).
+Leader suspicions per replica dropped from 2-14 per run to 0-3. Event-loop thread, 8 s of
+`perf record -F 2999` at 250k/s, shares of that thread's samples (ranges over the three
+replicas):
+
+| | Before | After |
+|---|---|---|
+| Thread busy | 70-73% | 63-64% |
+| kv-tokio apply (`ops::run`) | 47-51% | 42-43% |
+| of it `Kv::put` | 29-32% | 20-21% |
+| `BTreeMap::clone` (shard copy-on-write) | 11-14% | 0.01% |
+| overlay fold (`Shard::owned`) | – | 4.2-4.3% |
+| `Replica::handle` | 10-17% | 14-15% |
+| libc `memcmp` (self) | 20% | 24% |
+
+The next bottleneck is the key comparisons in `BTreeMap` searches: `memcmp`'s sample count
+is unchanged by this change, and it is the largest single symbol on the thread. Each compare
+follows an `Arc<[u8]>` to its heap bytes. After that comes the core's `Replica::handle`.
+Data: `target/eval-results/kv-apply-210/locked2/`.
+
 ### Simulated WAN
 
 `run-local.sh 5000 8 50` adds a 50 ms one-way `netem` delay to all loopback traffic,
