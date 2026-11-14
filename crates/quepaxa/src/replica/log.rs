@@ -180,9 +180,8 @@ impl Replica {
             self.actions.push(Action::Commit { slot, entries });
             for id in mine {
                 self.forwarded.remove(&id);
-                if self.retire_barrier.is_some_and(|(_, b)| b == id) {
+                if self.retirement.committed(id) {
                     self.outstanding.remove(&id);
-                    self.confirm_retired();
                     continue;
                 }
                 // Placement's own move: applied or ignored, the application never sees it.

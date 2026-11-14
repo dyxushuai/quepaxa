@@ -10,7 +10,9 @@
 # hedges only during a shared stall, and steps aside and back in turn; leader placement
 # (placement.rs, from crates/quepaxa/src/placement_policy.rs) never places an excluded
 # member first, explores each tied member once until its measurement goes stale, measures
-# leader and candidates by one rule, and resolves its move before anything else. Uses
+# leader and candidates by one rule, and resolves its move before anything else; retirement
+# (retirement.rs, from crates/quepaxa/src/replica/retire.rs) never goes back for the latest
+# epoch, and retires only once its barrier committed in an epoch that excludes it. Uses
 # Verus, fetched (pinned, checksum verified) into target/verus-<digest>, and the Rust
 # toolchain that
 # release requires (installed with rustup if missing). Linux x86_64 only.
@@ -47,6 +49,7 @@ verus "$here/dedup.rs"
 verus "$here/schedule.rs"
 verus "$here/disk_health.rs"
 verus "$here/placement.rs"
+verus "$here/retirement.rs"
 
 # Each bug: the file, a name, then a sed expression that plants it. The proof must fail on
 # every one.
@@ -82,6 +85,11 @@ bugs=(
   placement move-never-resolves           '/fn on_resolved/,/^    \}/ s/self\.pending = Pending::Idle;//'
   placement untrack-drops-the-move        's/if let Pending::Tracking\(_\) = self\.pending \{/if true {/'
   placement restart-keeps-the-tenure      '/fn on_restart/,/^    \}/ s/self\.start_tenure\(leader, now\);/self.tenure.leader = leader; self.led.remove(\&leader);/'
+  retirement retirement-forgotten               's/^ +self\.phase = Phase::Retired \{ epoch: confirmed \};//'
+  retirement second-barrier-in-flight           's/^ +Phase::Draining \{ \.\. \} => Next::Nothing,//'
+  retirement retired-although-added-back        's/None => false,/None => true,/'
+  retirement old-barrier-retires-a-later-epoch  's/=> e == confirmed,/=> e >= confirmed,/'
+  retirement confirmed-by-another-commit        's/if barrier == id \{/if true {/'
 )
 mkdir -p "$work"
 status=0

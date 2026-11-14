@@ -100,6 +100,13 @@ impl Replica {
             self.metrics.messages_rejected += 1;
             return;
         };
+        #[cfg(feature = "model")]
+        {
+            let own = entries
+                .iter()
+                .filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation);
+            self.probes.d3 += own.count() as u64;
+        }
         let cap =
             self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
         // Stepped aside, this replica hands them on (`watch.rs`); so it does for a follower
@@ -176,7 +183,11 @@ impl Replica {
         for i in
             entries.iter().filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation)
         {
-            self.forwarded.insert(i.entry.id, (i.clone(), self.now));
+            let _earlier = self.forwarded.insert(i.entry.id, (i.clone(), self.now));
+            #[cfg(feature = "model")]
+            if _earlier.is_some_and(|(_, at)| at < self.now) {
+                self.probes.d2_restarts += 1;
+            }
         }
         let mut chunk = batch::Builder::new(self.cfg.max_batch_bytes as usize);
         for e in entries {
@@ -232,6 +243,13 @@ impl Replica {
             let (o, inc, id) = e.key();
             if self.dedup.contains(o, inc, id) {
                 continue;
+            }
+            #[cfg(feature = "model")]
+            if o == self.me
+                && inc == self.incarnation
+                && (self.forwarded.contains_key(&id) || self.pending.iter().any(|i| i.key() == (o, inc, id)))
+            {
+                self.probes.d2 += 1;
             }
             if o == self.me || deciding { self.pending.push_back(e) } else { self.relayed.push_back(e) }
         }
@@ -338,7 +356,7 @@ impl Replica {
             .chain(stall)
             .chain(hedge)
             .chain(catch_up)
-            .chain(self.retire_probe)
+            .chain(self.retirement.probe_at())
             .chain(self.reads.resend_at())
             .chain(self.startup_probe)
             .chain(self.watch.ack_due.values().copied())

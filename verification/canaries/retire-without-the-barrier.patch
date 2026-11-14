@@ -1,11 +1,11 @@
 diff --git a/crates/quepaxa/src/replica/retire.rs b/crates/quepaxa/src/replica/retire.rs
 --- a/crates/quepaxa/src/replica/retire.rs
 +++ b/crates/quepaxa/src/replica/retire.rs
-@@ -58,6 +58,7 @@
-             {
-                 self.retire_barrier = Some((epoch, id));
+@@ -188,6 +188,7 @@
+             Next::Submit { epoch } => {
+                 if let Ok(id) = self.submit(Bytes::new(), Kind::Barrier) {
+                     self.retirement.submitted(epoch, id);
++                    self.retirement.committed(id);
+                 }
              }
-+            self.confirm_retired();
-             return;
-         }
-         if self.retire_probe.is_none_or(|t| t <= self.now) {
+             Next::Ask(members) => {
