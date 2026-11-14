@@ -196,4 +196,7 @@ pub struct Report {
     /// With `SimConfig::track_leader`: from which virtual ms each leader led, as the first
     /// live member reported it.
     pub leader_timeline: Vec<(u64, usize)>,
+    /// Suspected entry combinations (#187) every replica ran into, crashed and retired
+    /// incarnations included.
+    pub entry_probes: quepaxa::inspect::EntryProbes,
 }

@@ -120,8 +120,7 @@ impl Replica {
         for (id, kind) in done {
             self.outstanding.remove(&id);
             self.forwarded.remove(&id);
-            if self.retire_barrier.is_some_and(|(_, b)| b == id) {
-                self.confirm_retired();
+            if self.retirement.committed(id) {
                 continue;
             }
             if self.placement.policy.on_resolved(id) {
@@ -142,6 +141,8 @@ impl Replica {
                 b.slot = None;
             }
         }
+        #[cfg(feature = "model")]
+        self.probe_released();
         // The snapshot may carry this replica past its last led slot (`advance_committed`).
         if led && !self.leads_now() {
             self.hand_on_unstarted();
