@@ -97,7 +97,7 @@ impl Replica {
         if self.fenced {
             return Err(Error::Fenced);
         }
-        if self.outstanding.len() + self.reads.len() >= self.cfg.max_outstanding_proposals as usize {
+        if self.entries.own_len() + self.reads.len() >= self.cfg.max_outstanding_proposals as usize {
             return Err(Error::Busy);
         }
         if self.reads.next_id >= READ_ID_BASE {

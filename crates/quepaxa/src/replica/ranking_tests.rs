@@ -80,14 +80,20 @@ fn rounds(r: &mut Replica, from: u64, secs: u64, rtt: &[&[u64]], writes: &[(u32,
 fn moved(r: &Replica) -> Option<Vec<u32>> {
     let id = r.placement.policy.moving()?;
     let item = r
-        .pending
+        .entries
+        .pending()
         .iter()
         .find(|i| i.entry.id == id)
         .map(|i| i.entry.payload.clone())
         .or_else(|| {
-            r.batches.values().flat_map(|b| batch::changes(&b.value)).find(|(k, _)| k.2 == id).map(|(_, p)| p)
+            r.entries
+                .batches()
+                .values()
+                .flat_map(|b| batch::changes(&b.value))
+                .find(|(k, _)| k.2 == id)
+                .map(|(_, p)| p)
         })
-        .or_else(|| r.forwarded.get(&id).map(|(i, _)| i.entry.payload.clone()))?;
+        .or_else(|| r.entries.forwarded().get(&id).map(|(i, _)| i.entry.payload.clone()))?;
     let (_, order) = crate::schedule::decode_change(&item)?;
     Some(order.into_iter().map(|n| n.0).collect())
 }

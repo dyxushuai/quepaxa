@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::codec::reply_proposal;
+use crate::proposal::ValueKey;
 use proptest::prelude::*;
 
 fn replica() -> Replica {
@@ -760,7 +761,7 @@ fn a_snapshot_over_a_decided_but_unapplied_local_batch_releases_it() {
     let id = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     let (key, value, slot) =
-        r.batches.values().map(|b| (b.key, b.value.clone(), b.slot)).next().expect("a local batch");
+        r.entries.batches().values().map(|b| (b.key, b.value.clone(), b.slot)).next().expect("a local batch");
     assert_eq!(slot, Some(Slot(1)));
     let decided = Proposal { priority: 1, key, value };
     r.handle(Timestamp(1), from_peer(Body::Decided { slot: Slot(1), proposal: decided })).unwrap();
@@ -769,7 +770,7 @@ fn a_snapshot_over_a_decided_but_unapplied_local_batch_releases_it() {
     // Another local batch in flight in slot 2, the first one the snapshot leaves open.
     r.propose(Timestamp(1), Bytes::from_static(b"y")).unwrap();
     r.poll_actions(&mut out);
-    let open = |r: &Replica| r.batches.values().filter(|b| b.slot == Some(Slot(2))).count();
+    let open = |r: &Replica| r.entries.batches().values().filter(|b| b.slot == Some(Slot(2))).count();
     assert_eq!(open(&r), 1);
     let mut dedup = Dedup::default();
     dedup.first_time(NodeId(0), r.incarnation, id);
@@ -778,7 +779,7 @@ fn a_snapshot_over_a_decided_but_unapplied_local_batch_releases_it() {
         CoreState { next: 2, leaders: members.to_vec(), schedule: Schedule::new(&members), dedup }.encode();
     assert_eq!(r.install_snapshot(Timestamp(2), Slot(1), state), Ok(true));
     r.poll_actions(&mut out);
-    assert!(r.batches.values().all(|b| b.key != key), "a covered, committed batch is released");
+    assert!(r.entries.batches().values().all(|b| b.key != key), "a covered, committed batch is released");
     assert_eq!(open(&r), 1, "a batch past the snapshot keeps its slot");
 }
 
@@ -804,12 +805,12 @@ fn a_follower_hands_a_hedged_batch_that_lost_its_slot_back_to_the_leader() {
     r.poll_actions(&mut out);
     assert_eq!(forwards(&out), 1);
     // The leader never commits it: the follower hedges, proposing it in a slot of its own.
-    while r.forwarded.contains_key(&id) {
+    while r.entries.forwarded().contains_key(&id) {
         let at = r.next_deadline().expect("the hedge is scheduled");
         r.handle_timeout(at).unwrap();
     }
     r.poll_actions(&mut out);
-    let slot = r.batches.values().find_map(|b| b.slot).expect("the hedged batch has a slot");
+    let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the hedged batch has a slot");
     out.clear();
     // The leader's value takes the slot.
     let env =
@@ -817,9 +818,9 @@ fn a_follower_hands_a_hedged_batch_that_lost_its_slot_back_to_the_leader() {
     let decided = Message { env, body: Body::Decided { slot, proposal: proposal(1, 0, 0) } }.encode();
     r.handle(r.now, Input::Message(decided)).unwrap();
     r.poll_actions(&mut out);
-    assert!(r.batches.is_empty(), "the follower does not compete with the leader again");
+    assert!(r.entries.batches().is_empty(), "the follower does not compete with the leader again");
     assert_eq!(forwards(&out), 1, "the entry goes back to the leader");
-    assert!(r.forwarded.contains_key(&id), "and is hedged again if the leader stays silent");
+    assert!(r.entries.forwarded().contains_key(&id), "and is hedged again if the leader stays silent");
 }
 
 #[test]
@@ -833,13 +834,17 @@ fn a_hedged_entry_does_not_stretch_the_hedge_delay() {
     r.poll_actions(&mut out);
     // The leader stays silent: the entry is hedged and commits in this replica's own slot,
     // long after it was proposed.
-    while r.forwarded.contains_key(&id) {
+    while r.entries.forwarded().contains_key(&id) {
         let at = r.next_deadline().expect("the hedge is scheduled");
         r.handle_timeout(at).unwrap();
         r.poll_actions(&mut out);
     }
-    let (slot, key, value) =
-        r.batches.values().find_map(|b| Some((b.slot?, b.key, b.value.clone()))).expect("a hedged batch");
+    let (slot, key, value) = r
+        .entries
+        .batches()
+        .values()
+        .find_map(|b| Some((b.slot?, b.key, b.value.clone())))
+        .expect("a hedged batch");
     let env =
         Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(2), to: NodeId(1), commit_index: 0 };
     let decided =

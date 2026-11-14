@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 
 use super::Replica;
 use super::placement::fresh;
-use crate::batch::{self, Kind};
+use crate::batch::Kind;
 use crate::placement_policy::Periods;
 use crate::types::{NodeId, Slot};
 
@@ -132,14 +132,11 @@ impl Replica {
     /// Whether this replica may propose an order change now: it has not stepped aside, and
     /// no order change is pending or on its way.
     fn may_change(&self) -> bool {
-        let pending_change = |kind: Kind| kind == Kind::Reconfigure;
         self.cfg.placement
             && !self.watch.aside
             && self.schedule.settled(Slot(self.committed))
             && self.placement.policy.moving().is_none()
-            && !self.outstanding.values().any(|(_, kind, _)| pending_change(*kind))
-            && !self.pending.iter().chain(&self.relayed).any(|i| pending_change(i.kind))
-            && !self.batches.values().any(|b| !batch::changes(&b.value).is_empty())
+            && !self.entries.any_change()
     }
 
     /// The round trip between `a` and `b` as `a` (or, failing that, `b`) last reported it,
