@@ -101,16 +101,24 @@ fn bench(c: &mut Criterion) {
             _ => {}
         }
     }
-    // Commits beyond the backlog (a slot commits many entries at once) are credited to later
-    // iterations, which then only propose.
-    let mut owed: isize = 0;
+    // The backlog is topped up to `BACKLOG` before every delivery, so every call sees a full
+    // backlog; a slot commits many entries at once, so the time is divided by the entries
+    // committed: the cost per entry.
+    let mut outstanding = BACKLOG;
     g.bench_function("three_members_leader_1000_outstanding_propose_to_commit", |b| {
-        b.iter(|| {
-            three[0].propose(Timestamp(1), Bytes::from_static(b"PUT abcdefgh 1")).unwrap();
-            owed += 1;
-            let (_, acked) = deliver(&mut three, &mut held, owed.max(0) as usize);
-            owed -= acked as isize;
-            black_box(acked)
+        b.iter_custom(|iters| {
+            let start = std::time::Instant::now();
+            let mut done = 0u64;
+            while done < iters {
+                while outstanding <= BACKLOG {
+                    three[0].propose(Timestamp(1), Bytes::from_static(b"PUT abcdefgh 1")).unwrap();
+                    outstanding += 1;
+                }
+                let (_, acked) = black_box(deliver(&mut three, &mut held, 1));
+                outstanding -= acked;
+                done += acked as u64;
+            }
+            start.elapsed()
         })
     });
 
