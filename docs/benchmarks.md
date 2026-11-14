@@ -177,6 +177,50 @@ is unchanged by this change, and it is the largest single symbol on the thread. 
 follows an `Arc<[u8]>` to its heap bytes. After that comes the core's `Replica::handle`.
 Data: `target/eval-results/kv-apply-210/locked2/`.
 
+### Apply off the core thread (#213)
+
+The core thread keeps the `Replica` and hands each turn's commits, proposal registrations,
+released reads and snapshot requests to an apply thread through one bounded FIFO (64
+batches). The apply thread owns the KV state and answers clients
+([ADR 0005](adr/0005-kv-tokio-runtime-threads.md)).
+
+Same layout and workload as above, peers on 17100-17102 and clients on 17200-17202. Before
+is `6f92f76`, after is this change. Runs were interleaved, three 15 s runs per point, the
+whole matrix under `flock target/ops/bench.lock`, started at a 1-minute load of 2.65. The
+load later rose to 6-10 from other work on the host. CPU is a share of one CPU, averaged
+over the three replicas. Measured 2026-11-14.
+
+| Offered rate | Throughput | p50 | p90 | p99 | Core thread CPU | Apply thread CPU | Process CPU |
+|---|---|---|---|---|---|---|---|
+| 10,000/s | 10,020 → 10,020 | 207 → 217 µs | 0.51 → 0.37 ms | 0.94 → 0.85 ms | 9.0 → 8.4% | 1.8% | 27 → 28% |
+| 200,000/s | 199,998 → 199,998 | 590 → 610 µs | 2.5 → 1.2 ms | 17.7 → 10.7 ms | 40 → 20% | 21% | 86 → 85% |
+| 250,000/s | 250,041 → 250,040 | 680 → 697 µs | 9.0 → 2.0 ms | 35.9 → 17.6 ms | 47 → 23% | 28% | 97 → 98% |
+| 800,000/s | 800,168 → 800,169 | 610 → 164 ms | 4.33 → 0.97 s | 4.42 → 1.61 s | 87 → 28% | 83% | 137 → 161% |
+
+- **Saturation:** much better. The core thread no longer runs apply, so it stays well short of a full core.
+  Under overload the apply work moves onto the second CPU, and p99 drops from 4.4 s to 1.6 s.
+- **Tail at 200k-250k/s:** p90 is a half to a quarter of before, and p99 is about half.
+- **Low load costs latency:** p50 at 10k/s is higher. Six more interleaved pairs at a load of
+  at most 2.6, half with after first, give 192.5 → 211 µs (ranges 189-208 vs 207-223 µs) and
+  an unchanged p99 (852 vs 847 µs). The likely cause is one more cross-thread wake-up per
+  commit: process context switches rose from 35k/s to 41k/s. On a disk, the commit path
+  is dominated by fsync (milliseconds), so the 18 µs is a cost only in-memory setups see.
+- The single-owner alternative (all of a replica on one thread) used about 30% less CPU,
+  but lost 15% of saturation throughput with two CPUs per replica. See ADR 0005.
+
+`wan.sh calm` (QuePaxa only, five regions, 1,000 writes/s, one run per side, latencies in
+ms). Every case ran in the fast disk regime (fsync p50 2.5-2.9 ms). With one run per side,
+this shows only that WAN latency holds:
+
+| Case | Build | p50 | p99 | max | Disk regime |
+|---|---|---|---|---|---|
+| calm | before | 444 | 654 | 770 | fast |
+| calm | after | 438 | 649 | 758 | fast |
+| calm-best | before | 204 | 329 | 398 | fast |
+| calm-best | after | 192 | 316 | 365 | fast |
+
+Raw data and scripts are kept outside the repo.
+
 ### Simulated WAN
 
 `run-local.sh 5000 8 50` adds a 50 ms one-way `netem` delay to all loopback traffic,

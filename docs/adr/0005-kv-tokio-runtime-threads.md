@@ -25,4 +25,22 @@ An async core would tie the library to a runtime and lose deterministic simulati
 
 ## Measurements
 
-MEASUREMENTS
+All in the #155 layout: three replicas on tmpfs, two CPUs each, and the `run-local.sh`
+workload. Medians of interleaved runs; details in [benchmarks](../benchmarks.md).
+
+- **Stage 1 (#220).** Event-queue backpressure became awaitable (a bounded Tokio channel, the core sleeping on a bell) instead of a 200 µs sleep loop. At 800k/s offered, throughput rose 1.6% and p99 fell 8%. It held elsewhere.
+- **Stage 3 (this structure)**, against stage 1. Three runs per point. The 10k/s row is six extra pairs run at a 1-minute load of at most 2.6.
+
+| Offered | Throughput | p50 | p99 | Core thread CPU |
+|---|---|---|---|---|
+| 10k/s | same | 192.5 → 211 µs | 852 → 847 µs | 8.7 → 8.5% |
+| 200k/s | same | 590 → 610 µs | 17.7 → 10.7 ms | 40 → 20% |
+| 250k/s | same | 680 → 697 µs | 35.9 → 17.6 ms | 47 → 23% |
+| 800k/s | 800k → 800k | 610 → 164 ms | 4.42 → 1.61 s | 87 → 28% |
+
+The cost is low-load latency. p50 at 10k/s rises by about 18 µs, beyond run-to-run noise:
+six quiet pairs, ranges 189-208 vs 207-223 µs. Each commit now wakes one more thread
+(process context switches 35k → 41k/s). We accept it. With a disk, an fsync of milliseconds
+dominates the commit path. The tail and saturation gains are large. Applying inline when
+the queue is empty would win the 18 µs back, but the KV state would then have two
+owners, so we do not do it.
