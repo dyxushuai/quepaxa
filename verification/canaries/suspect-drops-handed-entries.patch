@@ -1,13 +1,14 @@
-diff --git a/crates/quepaxa/src/replica/watch.rs b/crates/quepaxa/src/replica/watch.rs
-index 94a405a..a67a2f1 100644
---- a/crates/quepaxa/src/replica/watch.rs
-+++ b/crates/quepaxa/src/replica/watch.rs
-@@ -179,7 +179,7 @@ impl Replica {
-                 o.2 = true;
+diff --git a/crates/quepaxa/src/replica/entries.rs b/crates/quepaxa/src/replica/entries.rs
+index 5dabbed..c7f5c85 100644
+--- a/crates/quepaxa/src/replica/entries.rs
++++ b/crates/quepaxa/src/replica/entries.rs
+@@ -406,8 +406,7 @@ impl Entries {
+                 o.hedged = true;
              }
-             self.metrics.hedged += 1;
+             hedged += 1;
+-            self.changes += usize::from(is_change(&e));
 -            self.pending.push_front(e);
 +            let _ = e;
          }
+         hedged
      }
- 

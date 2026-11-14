@@ -172,7 +172,7 @@ fn the_writers_tail_needs_writers_with_half_the_writes() {
 fn an_application_write_on_its_way_holds_nothing_back() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
-    r.outstanding.insert(ProposalId(99), (Timestamp(0), Kind::App, false));
+    r.entries.insert_own(ProposalId(99), Timestamp(0), Kind::App);
     rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
     assert_eq!(first(&r), Some(1));
 }

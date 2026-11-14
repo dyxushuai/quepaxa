@@ -7,7 +7,7 @@ fn a_change_on_its_way_holds_placement_back() {
     let writes = [(0, 10), (1, 10)];
     let mut r = leader(0, &[0, 1, 2]);
     let change = crate::schedule::encode_change(0, &[NodeId(2), NodeId(0), NodeId(1)]);
-    r.relayed.push_back(Item {
+    r.entries.queue_relayed(Item {
         entry: Entry { origin: NodeId(2), incarnation: 1, id: ProposalId(0), payload: change },
         kind: Kind::Reconfigure,
     });
@@ -72,7 +72,8 @@ fn the_move_never_reaches_the_application() {
     );
     // Decided: applied, but neither committed nor dropped to the application.
     let (key, value) = r
-        .batches
+        .entries
+        .batches()
         .values()
         .find(|b| !batch::changes(&b.value).is_empty())
         .map(|b| (b.key, b.value.clone()))
@@ -89,7 +90,7 @@ fn the_move_never_reaches_the_application() {
         )
     );
     assert_eq!(r.placement.policy.moving(), None);
-    assert!(!r.outstanding.contains_key(&id));
+    assert!(!r.entries.own().contains_key(&id));
 }
 
 #[test]
@@ -98,13 +99,16 @@ fn a_membership_change_without_an_order_keeps_the_leader() {
     r.propose_reconfiguration(r.now, alloc::vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)], Vec::new())
         .unwrap();
     let item = r
-        .pending
+        .entries
+        .pending()
         .iter()
-        .chain(&r.relayed)
+        .chain(r.entries.relayed())
         .find(|i| i.kind == Kind::Reconfigure)
         .map(|i| i.entry.payload.clone());
     let item = item
-        .or_else(|| r.batches.values().flat_map(|b| batch::changes(&b.value)).map(|(_, p)| p).next())
+        .or_else(|| {
+            r.entries.batches().values().flat_map(|b| batch::changes(&b.value)).map(|(_, p)| p).next()
+        })
         .unwrap();
     let (_, order) = crate::schedule::decode_change(&item).unwrap();
     assert_eq!(order, [NodeId(2), NodeId(0), NodeId(1), NodeId(3)]);
@@ -177,7 +181,8 @@ fn a_move_that_takes_effect_advances_the_epoch_and_counts() {
     rounds(&mut r, PROBE_INTERVAL, SUSTAIN / PROBE_INTERVAL + 1, &rows(&three(50)), &writes);
     assert_eq!((r.metrics().placement_moves, r.metrics().epoch, r.metrics().leader_position), (1, 0, 0));
     let (key, value) = r
-        .batches
+        .entries
+        .batches()
         .values()
         .find(|b| !batch::changes(&b.value).is_empty())
         .map(|b| (b.key, b.value.clone()))

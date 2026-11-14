@@ -3,6 +3,7 @@
 use super::placement::{ACTIVE_FOR, PROBE_INTERVAL};
 use super::tests::{from_peer, r_wire, replica_as};
 use super::*;
+use crate::proposal::ValueKey;
 
 const MS: u64 = 1_000_000;
 
@@ -387,8 +388,8 @@ fn only_own_application_entries_feed_the_tail() {
         kind,
     };
     let items = [own(1, Kind::App), own(2, Kind::Reconfigure)];
-    r.outstanding.insert(ProposalId(1), (Timestamp(MS), Kind::App, false));
-    r.outstanding.insert(ProposalId(2), (Timestamp(2 * MS), Kind::Reconfigure, false));
+    r.entries.insert_own(ProposalId(1), Timestamp(MS), Kind::App);
+    r.entries.insert_own(ProposalId(2), Timestamp(2 * MS), Kind::Reconfigure);
     apply_items(&mut r, Timestamp(10 * MS), &items);
     assert_eq!(r.placement.latencies, [9 * MS], "an order change's latency counted");
 }

@@ -71,7 +71,7 @@ fn the_leader_takes_forwards_up_to_its_cap_and_no_more() {
         let entries: Vec<Item> = (1..=n).map(|id| item(1, id, Bytes::from_static(b"x"))).collect();
         r.handle(Timestamp(1), from_peer(1, 0, Body::Forward { batch: batch::encode(&entries) })).unwrap();
         r.poll_actions(&mut out);
-        r.pending.len() + r.batches.values().map(|b| b.entries.len()).sum::<usize>()
+        r.entries.pending().len() + r.entries.batches().values().map(|b| b.entries.len()).sum::<usize>()
     };
     assert_eq!(accepted(6), 6, "a forward that fills the cap exactly is taken");
     assert_eq!(accepted(7), 0, "one past the cap is refused whole");
@@ -83,7 +83,7 @@ fn a_forward_split_across_batches_counts_each_one() {
     let mut out = Vec::new();
     r.cfg.max_batch_bytes = 128;
     for id in 1..=2 {
-        r.pending.push_back(item(1, id, Bytes::from(alloc::vec![0; 80])));
+        r.entries.queue_pending(item(1, id, Bytes::from(alloc::vec![0; 80])));
     }
     r.drive();
     r.poll_actions(&mut out);
@@ -101,7 +101,7 @@ fn a_leader_decision_at_the_instant_a_batch_starts_is_not_progress_since() {
     let entries = [item(2, 7, Bytes::from_static(b"x"))];
     r.handle(Timestamp(1), from_peer(0, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
     r.poll_actions(&mut out);
-    let slot = r.batches.values().find_map(|b| b.slot).expect("the entry is proposed here");
+    let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the entry is proposed here");
     let own = Body::Decided { slot: Slot(slot.0 + 1), proposal: proposal(1, 0, 1) };
     r.handle(Timestamp(1), from_peer(0, 1, own)).unwrap();
     r.poll_actions(&mut out);
@@ -111,7 +111,10 @@ fn a_leader_decision_at_the_instant_a_batch_starts_is_not_progress_since() {
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 0, "not handed back to the leader");
     assert!(
-        r.batches.values().any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == ProposalId(7))),
+        r.entries
+            .batches()
+            .values()
+            .any(|b| b.slot.is_some() && b.entries.iter().any(|e| e.2 == ProposalId(7))),
         "proposed again in a slot of this replica's own"
     );
 }
@@ -134,7 +137,7 @@ fn aside_with_slots_in_flight() -> (Replica, ProposalId, Timestamp) {
     let own = r.propose(Timestamp(MS), Bytes::from_static(b"own")).unwrap();
     r.poll_actions(&mut out);
     r.check_entries().unwrap();
-    let slots: Vec<_> = r.batches.values().filter_map(|b| b.slot).collect();
+    let slots: Vec<_> = r.entries.batches().values().filter_map(|b| b.slot).collect();
     assert_eq!(slots, [Slot(0), Slot(1)], "each in a slot of its own");
     let elsewhere = Body::Decided { slot: Slot(9), proposal: proposal(1, 1, 9) };
     r.handle(Timestamp(10 * MS), from_peer(1, 0, elsewhere)).unwrap();
@@ -144,8 +147,8 @@ fn aside_with_slots_in_flight() -> (Replica, ProposalId, Timestamp) {
     r.poll_actions(&mut out);
     r.check_entries().unwrap();
     assert_eq!(r.target(), NodeId(1), "stepped aside");
-    assert_eq!(r.forwarded.get(&own).map(|(_, at)| *at), Some(aside), "its own entry handed on");
-    assert_eq!(r.batches.values().filter(|b| b.slot.is_some()).count(), 2, "both slots kept");
+    assert_eq!(r.entries.forwarded().get(&own).map(|(_, at)| *at), Some(aside), "its own entry handed on");
+    assert_eq!(r.entries.batches().values().filter(|b| b.slot.is_some()).count(), 2, "both slots kept");
     (r, own, aside)
 }
 
@@ -163,7 +166,7 @@ fn entries_stay_tracked_when_a_stepped_aside_leader_loses_its_slots() {
     let (mut r, own, aside) = aside_with_slots_in_flight();
     lose(&mut r, 0, aside.after(5 * MS));
     lose(&mut r, 1, aside.after(5 * MS));
-    assert!(r.outstanding.contains_key(&own));
+    assert!(r.entries.own().contains_key(&own));
 }
 
 /// #187 D2. Stepped aside, the leader already handed its slotted batches' entries on; when
@@ -177,6 +180,10 @@ fn a_stepped_aside_leader_losing_its_slots_hands_nothing_on_twice_and_proposes_n
     lose(&mut r, 0, aside.after(5 * MS));
     assert!(r.proposers.keys().all(|s| *s == Slot(1)), "nothing proposed here while stepped aside");
     lose(&mut r, 1, aside.after(5 * MS));
-    assert_eq!(r.forwarded.get(&own).map(|(_, at)| *at), Some(aside), "the hedge clock is not restarted");
+    assert_eq!(
+        r.entries.forwarded().get(&own).map(|(_, at)| *at),
+        Some(aside),
+        "the hedge clock is not restarted"
+    );
     assert!(r.proposers.is_empty(), "nothing proposed here while stepped aside");
 }

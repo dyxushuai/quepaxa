@@ -30,7 +30,6 @@
 //! this affects safety.
 
 use alloc::collections::BTreeMap;
-use alloc::vec::Vec;
 
 use super::Replica;
 use super::disk::{Disk, Health};
@@ -138,28 +137,8 @@ impl Replica {
             return;
         }
         self.metrics.stepped_aside += 1;
-        let mut handed = Vec::new();
-        self.batches.retain(|_, b| {
-            // Our own encoding: it decodes.
-            handed.extend(crate::batch::decode(&b.value).unwrap_or_default());
-            b.slot.is_some()
-        });
-        for e in handed {
-            let (o, inc, id) = e.key();
-            if self.dedup.contains(o, inc, id) {
-                continue;
-            }
-            // Its wait on the stuck disk must not count as an ordinary commit latency.
-            if o == self.me
-                && let Some(out) = self.outstanding.get_mut(&id)
-            {
-                out.2 = true;
-            }
-            self.pending.push_back(e);
-        }
         // What others handed this replica goes on too (`on_forward` routes later forwards).
-        let relayed = core::mem::take(&mut self.relayed);
-        self.pending.extend(relayed);
+        self.entries.step_aside(&self.dedup);
     }
 
     /// Whether this replica proposes its own entries itself.
@@ -176,13 +155,7 @@ impl Replica {
             self.metrics.suspicions += 1;
         }
         self.watch.asked = None;
-        for (id, (e, _)) in core::mem::take(&mut self.forwarded).into_iter().rev() {
-            if let Some(o) = self.outstanding.get_mut(&id) {
-                o.2 = true;
-            }
-            self.metrics.hedged += 1;
-            self.pending.push_front(e);
-        }
+        self.metrics.hedged += self.entries.suspect();
     }
 
     /// A message arrived from `from`: a suspected member that speaks is alive.

@@ -3,6 +3,7 @@
 
 use alloc::vec::Vec;
 
+use super::entries::Own;
 use super::{Decision, Effect, Replica};
 use crate::api::{Action, DropReason};
 use crate::batch::{self, Kind};
@@ -87,7 +88,7 @@ impl Replica {
         self.metrics.slots_decided += 1;
         self.gate.write(Record::Decided { slot, proposal: proposal.clone() }.encode());
         if let Some(a) = self.proposers.remove(&slot)
-            && self.batches.get(&a.batch).is_some_and(|b| b.key != proposal.key)
+            && self.entries.batch_key(a.batch).is_some_and(|k| k != proposal.key)
         {
             self.lost_slot(a.batch, proposal.key.origin, a.started);
         }
@@ -170,6 +171,7 @@ impl Replica {
                 Vec::new()
             });
             items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
+            self.entries.dedup_grew();
             self.count_writes(&items);
             let mine: Vec<ProposalId> = items
                 .iter()
@@ -179,36 +181,34 @@ impl Replica {
             let entries = items.into_iter().filter(|i| i.kind == Kind::App).map(|i| i.entry).collect();
             self.actions.push(Action::Commit { slot, entries });
             for id in mine {
-                self.forwarded.remove(&id);
+                let own = self.entries.resolved(id);
                 if self.retirement.committed(id) {
-                    self.outstanding.remove(&id);
                     continue;
                 }
                 // Placement's own move: applied or ignored, the application never sees it.
                 if self.placement.policy.on_resolved(id) {
-                    self.outstanding.remove(&id);
                     continue;
                 }
                 if superseded.contains(&id) {
-                    if self.outstanding.remove(&id).is_some() {
+                    if own.is_some() {
                         self.actions.push(Action::Dropped { id, reason: DropReason::Superseded });
                     }
                     continue;
                 }
-                if let Some((at, kind, hedged)) = self.outstanding.remove(&id) {
+                if let Some(Own { since, kind, hedged }) = own {
                     if kind == Kind::App {
-                        self.note_commit_latency(self.now.0.saturating_sub(at.0));
+                        self.note_commit_latency(self.now.0.saturating_sub(since.0));
                     }
                     // A hedged entry waited out the hedge delay itself: learning from it
                     // would stretch the delay further each time the leader is slow.
                     if !hedged {
-                        self.observe_latency(self.now.0.saturating_sub(at.0));
+                        self.observe_latency(self.now.0.saturating_sub(since.0));
                     }
                     self.actions.push(Action::Committed { id, slot });
                 }
             }
             if key.origin == self.me && key.incarnation == self.incarnation {
-                self.batches.remove(&key.seq);
+                self.entries.applied(key.seq);
             }
             self.emitted += 1;
             if self.cfg.placement {

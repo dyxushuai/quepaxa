@@ -5,7 +5,6 @@
 //! with the application snapshot. After `compact` or `install_snapshot` the replica emits
 //! a checkpoint: a `Persist` that replaces all earlier records.
 
-use alloc::vec::Vec;
 use bytes::Bytes;
 
 use super::Replica;
@@ -108,18 +107,11 @@ impl Replica {
         if self.cfg.placement {
             self.restart_hold();
         }
-        // Local work the snapshot already contains is resolved from its dedup state.
-        let me = self.me;
-        let inc = self.incarnation;
-        let done: Vec<_> = self
-            .outstanding
-            .iter()
-            .filter(|(id, _)| self.dedup.contains(me, inc, **id))
-            .map(|(id, (_, kind, _))| (*id, *kind))
-            .collect();
+        // Local work the snapshot already contains is resolved from its dedup state. Local
+        // batches in covered slots, still proposed or already decided there but not yet
+        // applied: whatever of them committed is resolved here, the rest is proposed again.
+        let done = self.entries.installed_snapshot(state.next, &self.dedup);
         for (id, kind) in done {
-            self.outstanding.remove(&id);
-            self.forwarded.remove(&id);
             if self.retirement.committed(id) {
                 continue;
             }
@@ -134,13 +126,6 @@ impl Replica {
             self.actions.push(Action::Committed { id, slot: through });
         }
         self.proposers = self.proposers.split_off(&Slot(state.next));
-        // Local batches in covered slots, still proposed or already decided there but not yet
-        // applied: whatever of them committed is resolved above, the rest is proposed again.
-        for b in self.batches.values_mut() {
-            if b.slot.is_some_and(|s| s.0 < state.next) {
-                b.slot = None;
-            }
-        }
         #[cfg(feature = "model")]
         self.probe_released();
         // The snapshot may carry this replica past its last led slot (`advance_committed`).
