@@ -338,7 +338,7 @@ impl Replica {
             .chain(stall)
             .chain(hedge)
             .chain(catch_up)
-            .chain(self.retire_probe)
+            .chain(self.retirement.probe_at())
             .chain(self.reads.resend_at())
             .chain(self.startup_probe)
             .chain(self.watch.ack_due.values().copied())

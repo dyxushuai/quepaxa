@@ -120,8 +120,7 @@ impl Replica {
         for (id, kind) in done {
             self.outstanding.remove(&id);
             self.forwarded.remove(&id);
-            if self.retire_barrier.is_some_and(|(_, b)| b == id) {
-                self.confirm_retired();
+            if self.retirement.committed(id) {
                 continue;
             }
             if self.placement.policy.on_resolved(id) {

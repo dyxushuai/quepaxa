@@ -1,12 +1,12 @@
 diff --git a/crates/quepaxa/src/replica/retire.rs b/crates/quepaxa/src/replica/retire.rs
 --- a/crates/quepaxa/src/replica/retire.rs
 +++ b/crates/quepaxa/src/replica/retire.rs
-@@ -49,7 +49,7 @@
-         let members = self.schedule.members(Slot(from));
-         let progress = |m: &NodeId| self.member_progress.get(m).copied().unwrap_or(0);
+@@ -125,7 +125,7 @@
+         };
+         let progress = |m: &NodeId| self.progress.get(m).copied().unwrap_or(0);
          let caught_up = members.iter().filter(|m| progress(m) >= from).count();
 -        if caught_up > members.len() / 2 {
-+        if caught_up > members.len() / 2 || self.committed >= from {
-             self.retire_probe = None;
-             // One at a time: an older one confirms nothing for this epoch when it commits, and
-             // a new one follows. Busy or fenced: tried again on the next event.
++        if caught_up > members.len() / 2 || caught_up > 0 {
+             self.probe = None;
+             return match self.phase {
+                 Phase::Draining { .. } => Next::Nothing,

@@ -504,7 +504,7 @@ fn a_snapshot_resolving_the_retirement_barrier_still_reports_other_proposals() {
     let mut out = Vec::new();
     let app = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
     let barrier = r.submit(Bytes::new(), Kind::Barrier).unwrap();
-    r.retire_barrier = Some((1, barrier));
+    r.retirement.submitted(1, barrier);
     r.poll_actions(&mut out);
     let mut dedup = Dedup::default();
     for id in [app, barrier] {
@@ -518,7 +518,7 @@ fn a_snapshot_resolving_the_retirement_barrier_still_reports_other_proposals() {
     r.poll_actions(&mut out);
     assert!(out.iter().any(|a| matches!(a, Action::Committed { id, .. } if *id == app)), "{out:?}");
     assert!(!out.iter().any(|a| matches!(a, Action::ReadReady { id, .. } if *id == barrier)), "{out:?}");
-    assert_eq!(r.retire_barrier, None, "the barrier was confirmed");
+    assert!(!matches!(r.retirement.phase(), retire::Phase::Draining { .. }), "the barrier was confirmed");
 }
 
 #[test]
@@ -561,7 +561,7 @@ fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
     r.poll_actions(&mut out);
     assert_eq!(r.schedule.epoch(), (1, 64), "removed from slot 64 on");
     let barrier = r.submit(Bytes::new(), Kind::Barrier).unwrap();
-    r.retire_barrier = Some((1, barrier));
+    r.retirement.submitted(1, barrier);
     let own = Item {
         entry: Entry { origin: NodeId(0), incarnation: r.incarnation, id: barrier, payload: Bytes::new() },
         kind: Kind::Barrier,
