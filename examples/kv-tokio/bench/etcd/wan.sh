@@ -477,10 +477,13 @@ run_case() {
         END { printf "leader_changes=%d\nlast_change_s=%d\nmeasure_from_s=%d\n", changes, at, from }' \
         "$results/$name-leaders.txt"
     fi
-    # When the lead first went to the member that got faster, after it did (- if never).
+    # When the lead first moved to the member that got faster, from another member, after
+    # it did (- if never): a member that kept the lead across the lift never returned to it.
     if [ "$scenario" = speedup ]; then
       awk -v from="$change_at" -v slow="${regions[$(slow_of "$pinned")]}" '
-        $1 >= from && $2 == slow && at == "" { at = $1 } END { print "back_to_fast_s=" (at == "" ? "-" : at) }' \
+        $1 >= from && $2 == slow && prev != "" && prev != slow && at == "" { at = $1 }
+        { prev = $2 }
+        END { print "back_to_fast_s=" (at == "" ? "-" : at) }' \
         "$results/$name-leaders.txt"
     fi
   } > "$results/$name-leader.txt"
