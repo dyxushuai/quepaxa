@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/replica/entries.rs b/crates/quepaxa/src/replica/entries.rs
+index 892db21..0f2e7a5 100644
+--- a/crates/quepaxa/src/replica/entries.rs
++++ b/crates/quepaxa/src/replica/entries.rs
+@@ -256,7 +256,7 @@ impl Entries {
+     /// Whether there is something to propose: a batch waiting for a slot, or entries `cut`
+     /// takes (own pending ones only when proposing them directly).
+     pub(super) fn proposable(&self, direct: bool) -> bool {
+-        !self.unslotted.is_empty() || !self.relayed.is_empty() || (direct && !self.pending.is_empty())
++        !self.unslotted.is_empty() || (direct && !self.pending.is_empty())
+     }
+ 
+     /// Own entries handed to the target, with when.
