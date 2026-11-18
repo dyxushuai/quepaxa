@@ -283,7 +283,9 @@ one entry leaves every other entry's census alone. Departures, marked `DEV`: vec
 scans for the `VecDeque`s, `BTreeMap`s and `BTreeSet`, `remove(0)` and `insert(0, ..)` for
 `pop_front` and `push_front`; a swap for `drain(..)` and `mem::take`; popping from the back
 for `into_iter().rev()`; index loops for `filter().count()` and `any`; `get_mut` as out and
-back in; at most `max` entries for `cut`'s byte budget; `lost_lead` and `step_aside` one
+back in; at most `max` entries for `cut`'s byte budget, and its own entries moved as each
+is taken (the code moves them after the cut, in one ordered walk of `own`: nothing reads
+`own` in between); `lost_lead` and `step_aside` one
 batch at a time in seq order (no step reads the others); `prune` removing in place;
 `take_back`'s flags for the callers' closures; the records for the `Left`s, and `since` left
 out of them; `dedup_grew` and `installed_snapshot` given the new dedup state; `takeover` for

@@ -1,5 +1,5 @@
-//! Entries handed back: a batch lost its slot or its leader, the replica stepped aside, or
-//! the target was suspected or slow.
+//! Entries handed back: a batch lost its slot or its leader, the replica stepped aside, the
+//! target was suspected or slow, or a snapshot released slots; and everything dropped when fenced.
 //!
 //! A batch in a slot may hold copies of own entries that have left it: stepping aside hands
 //! its entries on and keeps the slot, so that whichever copy is decided first commits. Such
@@ -8,7 +8,7 @@
 
 use alloc::vec::Vec;
 
-use super::{At, Entries};
+use super::{At, Entries, Left};
 use crate::batch::{self, Item};
 use crate::dedup::Dedup;
 use crate::types::ProposalId;
@@ -170,5 +170,41 @@ impl Entries {
             }
         }
         hedged
+    }
+
+    /// A snapshot through `next - 1` was installed with `dedup`: the own entries it contains
+    /// are resolved (returned), and local batches in covered slots, still proposed or already
+    /// decided there but not yet applied, are proposed again.
+    pub(in crate::replica) fn installed_snapshot(&mut self, next: u64, dedup: &Dedup) -> Vec<Left> {
+        let (me, inc) = (self.me, self.incarnation);
+        let done: Vec<ProposalId> =
+            self.own.keys().filter(|id| dedup.contains(me, inc, **id)).copied().collect();
+        let left = done.into_iter().filter_map(|id| self.resolved(id)).collect();
+        let released: Vec<u64> = self
+            .batches
+            .iter()
+            .filter(|(_, b)| b.slot.is_some_and(|s| s.0 < next))
+            .map(|(seq, _)| *seq)
+            .collect();
+        for seq in released {
+            self.unslot(seq);
+        }
+        self.prune_due = true;
+        left
+    }
+
+    /// Fenced: everything is dropped; returns the own proposals that were awaited.
+    pub(in crate::replica) fn fence(&mut self) -> Vec<Left> {
+        let ids: Vec<ProposalId> = self.own.keys().copied().collect();
+        let left = ids.into_iter().filter_map(|id| self.leave(id)).collect();
+        self.pending.clear();
+        self.relayed.clear();
+        self.forwarded.clear();
+        self.batches.clear();
+        self.unslotted.clear();
+        self.foreign = 0;
+        self.changes = 0;
+        self.prune_due = false;
+        left
     }
 }

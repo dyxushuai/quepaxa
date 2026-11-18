@@ -373,6 +373,8 @@ impl Entries {
     pub(super) fn cut(&mut self, lead: bool, max_bytes: usize, dedup: &Dedup) -> Option<u64> {
         let seq = self.next_batch;
         let mut entries = batch::Builder::new(max_bytes);
+        // `relayed` drains before `pending`: the first `from_relayed` entries taken came from it.
+        let mut from_relayed = 0;
         loop {
             let relayed = if !self.relayed.is_empty() {
                 true
@@ -391,12 +393,54 @@ impl Entries {
             if dedup.contains(o, inc, id) {
                 continue;
             }
-            if self.mine(&e) {
-                self.moved(id, if relayed { At::Relayed } else { At::Pending }, At::Batched { seq });
-            }
+            from_relayed += usize::from(relayed);
             entries.push(e);
         }
-        (!entries.is_empty()).then(|| self.new_batch(entries.take()))
+        if entries.is_empty() {
+            return None;
+        }
+        let items = entries.take();
+        self.batched(&items, from_relayed, seq);
+        Some(self.new_batch(items))
+    }
+
+    /// The own entries among `items` (the first `from_relayed` taken from `relayed`, the rest
+    /// from `pending`) moved to batch `seq`. Nothing reads `own` while `cut` takes them, so the
+    /// moves wait until it is done: own ids ascend in a cut but for copies, and one ordered
+    /// walk replaces a lookup per entry on the leader's commit path.
+    fn batched(&mut self, items: &[Item], from_relayed: usize, seq: u64) {
+        let (me, inc) = (self.me, self.incarnation);
+        let mut mine = items
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| i.entry.origin == me && i.entry.incarnation == inc)
+            .map(|(n, i)| (i.entry.id, if n < from_relayed { At::Relayed } else { At::Pending }));
+        let Some(first) = mine.clone().next() else { return };
+        let to = At::Batched { seq };
+        let ascending = mine.clone().zip(mine.clone().skip(1)).all(|((a, _), (b, _))| a < b);
+        if !ascending {
+            for (id, from) in mine {
+                self.moved(id, from, to);
+            }
+            return;
+        }
+        let mut next = mine.next();
+        for (id, o) in self.own.range_mut(first.0..) {
+            while let Some((want, _)) = next
+                && want < *id
+            {
+                next = mine.next();
+            }
+            let Some((want, from)) = next else { break };
+            if want == *id {
+                if o.at.same(from) {
+                    o.at = to
+                } else {
+                    o.copied = true
+                }
+                next = mine.next();
+            }
+        }
     }
 
     /// A new local batch of `entries`, not yet in a slot.
@@ -434,41 +478,5 @@ impl Entries {
     /// Entries committed: a batch waiting for a slot may hold nothing else.
     pub(super) fn dedup_grew(&mut self) {
         self.prune_due |= !self.unslotted.is_empty();
-    }
-
-    /// A snapshot through `next - 1` was installed with `dedup`: the own entries it contains
-    /// are resolved (returned), and local batches in covered slots, still proposed or already
-    /// decided there but not yet applied, are proposed again.
-    pub(super) fn installed_snapshot(&mut self, next: u64, dedup: &Dedup) -> Vec<Left> {
-        let (me, inc) = (self.me, self.incarnation);
-        let done: Vec<ProposalId> =
-            self.own.keys().filter(|id| dedup.contains(me, inc, **id)).copied().collect();
-        let left = done.into_iter().filter_map(|id| self.resolved(id)).collect();
-        let released: Vec<u64> = self
-            .batches
-            .iter()
-            .filter(|(_, b)| b.slot.is_some_and(|s| s.0 < next))
-            .map(|(seq, _)| *seq)
-            .collect();
-        for seq in released {
-            self.unslot(seq);
-        }
-        self.prune_due = true;
-        left
-    }
-
-    /// Fenced: everything is dropped; returns the own proposals that were awaited.
-    pub(super) fn fence(&mut self) -> Vec<Left> {
-        let ids: Vec<ProposalId> = self.own.keys().copied().collect();
-        let left = ids.into_iter().filter_map(|id| self.leave(id)).collect();
-        self.pending.clear();
-        self.relayed.clear();
-        self.forwarded.clear();
-        self.batches.clear();
-        self.unslotted.clear();
-        self.foreign = 0;
-        self.changes = 0;
-        self.prune_due = false;
-        left
     }
 }
