@@ -12,7 +12,11 @@
 # member first, explores each tied member once until its measurement goes stale, measures
 # leader and candidates by one rule, and resolves its move before anything else; retirement
 # (retirement.rs, from crates/quepaxa/src/replica/retire.rs) never goes back for the latest
-# epoch, and retires only once its barrier committed in an epoch that excludes it. Uses
+# epoch, and retires only once its barrier committed in an epoch that excludes it; where
+# entries wait (entries.rs, from crates/quepaxa/src/replica/entries.rs and entries/back.rs)
+# keeps every own entry in the place its state names, loses none, counts what the replica
+# asks in O(1) correctly, routes everything pending when not proposing directly, and hands
+# back only entries not yet committed. Uses
 # Verus, fetched (pinned, checksum verified) into target/verus-<digest>, and the Rust
 # toolchain that
 # release requires (installed with rustup if missing). Linux x86_64 only.
@@ -50,6 +54,7 @@ verus "$here/schedule.rs"
 verus "$here/disk_health.rs"
 verus "$here/placement.rs"
 verus "$here/retirement.rs"
+verus "$here/entries.rs"
 
 # Each bug: the file, a name, then a sed expression that plants it. The proof must fail on
 # every one.
@@ -90,6 +95,13 @@ bugs=(
   retirement retired-although-added-back        's/None => false,/None => true,/'
   retirement old-barrier-retires-a-later-epoch  's/=> e == confirmed,/=> e >= confirmed,/'
   retirement confirmed-by-another-commit        's/if barrier == id \{/if true {/'
+  entries start-forgets-unslotted        's/^        self\.unslotted_remove\(seq\);$//'
+  entries route-skips-forwarded-insert   's/^                self\.fwd_insert\(e, now\);$//'
+  entries suspect-drops-the-last-entry   's/^            self\.pending\.insert\(0, e\);$/            if f.len() > 0 { self.pending.insert(0, e); }/'
+  entries lost-lead-takes-slotted-batches '0,/if self\.batches\[j\]\.slot\.is_none\(\) \{/s//if true {/'
+  entries step-aside-leaves-relayed      's/while self\.relayed\.len\(\) > 0/while false/'
+  entries lost-slot-skips-dedup          's/if dedup\.contains\(x\.origin, x\.inc, x\.id\) \{/if false {/'
+  entries received-forgets-foreign       's/^            self\.foreign = self\.foreign \+ f;$//'
 )
 mkdir -p "$work"
 status=0

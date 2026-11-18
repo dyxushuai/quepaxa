@@ -1,0 +1,13 @@
+diff --git a/crates/quepaxa/src/replica/entries.rs b/crates/quepaxa/src/replica/entries.rs
+index 892db21..3939b6b 100644
+--- a/crates/quepaxa/src/replica/entries.rs
++++ b/crates/quepaxa/src/replica/entries.rs
+@@ -340,7 +340,7 @@ impl Entries {
+             if let Some(o) = self.own.get_mut(&id) {
+                 // A copy forwarded over the entry restarts its clock (D2, D3).
+                 match o.at {
+-                    At::Pending => o.at = At::Forwarded { since: now },
++                    At::Pending => {}
+                     At::Forwarded { .. } => (o.at, o.copied) = (At::Forwarded { since: now }, true),
+                     _ => o.copied = true,
+                 }

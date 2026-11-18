@@ -8,6 +8,7 @@
 use bytes::Bytes;
 
 use super::Replica;
+use super::entries::Left;
 use crate::api::{Action, DropReason, Error};
 use crate::batch::Kind;
 use crate::core_state::CoreState;
@@ -111,7 +112,8 @@ impl Replica {
         // batches in covered slots, still proposed or already decided there but not yet
         // applied: whatever of them committed is resolved here, the rest is proposed again.
         let done = self.entries.installed_snapshot(state.next, &self.dedup);
-        for (id, kind) in done {
+        for Left { id, own } in done {
+            let kind = own.kind;
             if self.retirement.committed(id) {
                 continue;
             }

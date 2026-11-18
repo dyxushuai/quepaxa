@@ -1,12 +1,12 @@
-diff --git a/crates/quepaxa/src/replica/entries.rs b/crates/quepaxa/src/replica/entries.rs
-index 5dabbed..c7f5c85 100644
---- a/crates/quepaxa/src/replica/entries.rs
-+++ b/crates/quepaxa/src/replica/entries.rs
-@@ -406,8 +406,7 @@ impl Entries {
-                 o.hedged = true;
+diff --git a/crates/quepaxa/src/replica/entries/back.rs b/crates/quepaxa/src/replica/entries/back.rs
+index a92d442..b325c44 100644
+--- a/crates/quepaxa/src/replica/entries/back.rs
++++ b/crates/quepaxa/src/replica/entries/back.rs
+@@ -143,8 +143,7 @@ impl Entries {
+                 }
              }
              hedged += 1;
--            self.changes += usize::from(is_change(&e));
+-            self.changes += usize::from(super::is_change(&e));
 -            self.pending.push_front(e);
 +            let _ = e;
          }
