@@ -92,8 +92,12 @@ pub struct EntryProbes {
     /// D1: an own entry newly both handed (or about to be handed) to the target and in a
     /// local batch in a slot.
     pub d1: u64,
-    /// D2: an own entry a lost slot queued again while it was already queued or handed on.
-    pub d2: u64,
+    /// D2, own half: an own entry a lost slot queued again while it was already queued or
+    /// handed on (intended: the target decided the slot without it).
+    pub d2_own: u64,
+    /// D2, other half: another member's entry a lost slot handed back from a batch handed on
+    /// when stepping aside (a bug: it went to the target then).
+    pub d2_foreign: u64,
     /// Own entries handed on again while still waiting on an earlier hand-off, restarting
     /// their hedge clock (D2's consequence).
     pub d2_restarts: u64,
@@ -107,7 +111,8 @@ pub struct EntryProbes {
 impl core::ops::AddAssign for EntryProbes {
     fn add_assign(&mut self, o: Self) {
         self.d1 += o.d1;
-        self.d2 += o.d2;
+        self.d2_own += o.d2_own;
+        self.d2_foreign += o.d2_foreign;
         self.d2_restarts += o.d2_restarts;
         self.d3 += o.d3;
         self.d4 += o.d4;

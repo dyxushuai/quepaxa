@@ -1,10 +1,15 @@
 //! Entries handed back: a batch lost its slot or its leader, the replica stepped aside, the
 //! target was suspected or slow, or a snapshot released slots; and everything dropped when fenced.
 //!
-//! A batch in a slot may hold copies of own entries that have left it: stepping aside hands
-//! its entries on and keeps the slot, so that whichever copy is decided first commits. Such
-//! a copy handed back once more, or kept once the batch is out of its slot, marks its entry
-//! `copied` (#187 D2, D4): it is proposed or handed on twice, and dedup absorbs the second.
+//! A batch in a slot may hold copies of entries that have left it: stepping aside hands its
+//! entries on and keeps the slot (marked `handed`), so that whichever copy is decided first
+//! commits. A slot lost by a `handed` batch hands back none of the other members' entries:
+//! they went to the target when this replica stepped aside, and proposed here they would
+//! wait on the stuck disk (#187 D2). Its copies of own entries are handed on again and mark
+//! their entries `copied`: the lost slot shows the target decided without them, and handing
+//! them on at once commits them sooner than waiting for `late` (dropping them stretched the
+//! slowest follower write around a stuck leader from 253 to 342 ms). A copy kept once the
+//! batch is out of its slot marks its entry `copied` too (D4). Dedup absorbs the second copy.
 
 use alloc::vec::Vec;
 
@@ -35,11 +40,13 @@ impl Entries {
         }
     }
 
-    /// The entries of batch `seq`, handed back to a queue, own ones moving out of it.
+    /// The entries `items` of batch `seq`, handed back to a queue, own ones moving out of it;
+    /// those of other members are dropped if the batch was `handed` on.
     fn take_back(
         &mut self,
         seq: u64,
         items: Vec<Item>,
+        handed: bool,
         dedup: &Dedup,
         mut push: impl FnMut(&mut Self, Item),
     ) {
@@ -50,6 +57,8 @@ impl Entries {
             }
             if self.mine(&e) {
                 self.moved(id, At::Batched { seq }, At::Pending);
+            } else if handed {
+                continue;
             }
             push(self, e);
         }
@@ -65,17 +74,19 @@ impl Entries {
 
     /// Batch `seq` lost its slot and its entries are handed back: own ones (and, if the slot
     /// went to the target `deciding`, every one) to `pending`, those of other members to
-    /// `relayed`.
+    /// `relayed`, unless the batch was handed on when this replica stepped aside: they went
+    /// to the target then.
     pub(in crate::replica) fn lost_slot(&mut self, seq: u64, deciding: bool, dedup: &Dedup) {
         let Some(b) = self.remove_batch(seq) else { return };
         // Our own encoding: it decodes.
         let entries = batch::decode(&b.value).unwrap_or_default();
-        self.take_back(seq, entries, dedup, |s, e| {
+        let handed = b.handed;
+        self.take_back(seq, entries, handed, dedup, |s, e| {
             #[cfg(feature = "model")]
-            if s.mine(&e)
-                && (s.forwarded.contains_key(&e.entry.id) || s.pending.iter().any(|i| i.key() == e.key()))
-            {
-                s.probes.d2 += 1;
+            if !s.mine(&e) {
+                s.probes.d2_foreign += u64::from(handed);
+            } else if s.forwarded.contains_key(&e.entry.id) || s.pending.iter().any(|i| i.key() == e.key()) {
+                s.probes.d2_own += 1;
             }
             if e.entry.origin == s.me || deciding { s.push_pending(e) } else { s.push_relayed(e) }
         });
@@ -93,27 +104,29 @@ impl Entries {
             }
         }
         for (seq, items) in handed {
-            self.take_back(seq, items, dedup, Self::push_pending);
+            self.take_back(seq, items, false, dedup, Self::push_pending);
         }
     }
 
     /// Stepped aside: the entries of every local batch go to `pending` (a batch already in a
-    /// slot stays there too), own ones counted as hedged, and so does everything relayed.
+    /// slot stays there too, `handed`), own ones counted as hedged, and so does everything
+    /// relayed.
     pub(in crate::replica) fn step_aside(&mut self, dedup: &Dedup) {
         let mut handed = Vec::new();
         let mut unstarted = Vec::new();
-        for (seq, b) in &self.batches {
+        for (seq, b) in &mut self.batches {
             // Our own encoding: it decodes.
             handed.push((*seq, batch::decode(&b.value).unwrap_or_default()));
             if b.slot.is_none() {
                 unstarted.push(*seq);
             }
+            b.handed = true;
         }
         for seq in unstarted {
             self.remove_batch(seq);
         }
         for (seq, items) in handed {
-            self.take_back(seq, items, dedup, |s, e| {
+            self.take_back(seq, items, false, dedup, |s, e| {
                 // Its wait on the stuck disk must not count as an ordinary commit latency.
                 if e.entry.origin == s.me
                     && let Some(out) = s.own.get_mut(&e.entry.id)

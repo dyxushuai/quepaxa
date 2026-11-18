@@ -779,7 +779,8 @@ fn probes_added(before: &State, after: &State) -> quepaxa::inspect::EntryProbes 
         added += if a.starts == b.starts {
             quepaxa::inspect::EntryProbes {
                 d1: now.d1 - then.d1,
-                d2: now.d2 - then.d2,
+                d2_own: now.d2_own - then.d2_own,
+                d2_foreign: now.d2_foreign - then.d2_foreign,
                 d2_restarts: now.d2_restarts - then.d2_restarts,
                 d3: now.d3 - then.d3,
                 d4: now.d4 - then.d4,
