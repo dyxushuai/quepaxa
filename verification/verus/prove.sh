@@ -16,7 +16,8 @@
 # entries wait (entries.rs, from crates/quepaxa/src/replica/entries.rs and entries/back.rs)
 # keeps every own entry in the place its state names, loses none, counts what the replica
 # asks in O(1) correctly, routes everything pending when not proposing directly, and hands
-# back only entries not yet committed. Uses
+# back only entries not yet committed, and none of another member's from a batch handed on
+# when stepping aside. Uses
 # Verus, fetched (pinned, checksum verified) into target/verus-<digest>, and the Rust
 # toolchain that
 # release requires (installed with rustup if missing). Linux x86_64 only.
@@ -102,6 +103,8 @@ bugs=(
   entries step-aside-leaves-relayed      's/while self\.relayed\.len\(\) > 0/while false/'
   entries lost-slot-skips-dedup          's/if dedup\.contains\(x\.origin, x\.inc, x\.id\) \{/if false {/'
   entries received-forgets-foreign       's/^            self\.foreign = self\.foreign \+ f;$//'
+  entries lost-slot-ignores-handed       's/^        let handed = b\.handed;$/        let handed = false;/'
+  entries step-aside-forgets-handed      's/^                self\.set_handed\(j\);$//'
 )
 mkdir -p "$work"
 status=0

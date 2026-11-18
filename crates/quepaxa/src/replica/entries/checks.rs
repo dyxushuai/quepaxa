@@ -99,7 +99,14 @@ impl Replica {
     #[doc(hidden)]
     pub fn entry_probes(&self) -> crate::inspect::EntryProbes {
         let p = &self.entries.probes;
-        crate::inspect::EntryProbes { d1: p.d1, d2: p.d2, d2_restarts: p.d2_restarts, d3: p.d3, d4: p.d4 }
+        crate::inspect::EntryProbes {
+            d1: p.d1,
+            d2_own: p.d2_own,
+            d2_foreign: p.d2_foreign,
+            d2_restarts: p.d2_restarts,
+            d3: p.d3,
+            d4: p.d4,
+        }
     }
 }
 
@@ -115,9 +122,10 @@ struct Copies {
 impl Entries {
     /// Checks the entries between calls:
     ///
-    /// - E1: every own entry is in the place its `At` names (forwarded with that time);
-    ///   unless the entry is marked `copied`, that place holds one copy and any other copy
-    ///   is in a batch in a slot (`verification/verus/entries.rs` proves the same);
+    /// - E1: every own entry is in the place its `At` names (forwarded with that time), never
+    ///   a batch handed on; unless the entry is marked `copied`, that place holds one copy
+    ///   and any other copy is in a batch in a slot (`verification/verus/entries.rs` proves
+    ///   the same);
     /// - E2: own entries left only through a `Left`, and none is still awaited once committed;
     /// - E4: the counters match the queues and batches, and a batch `drive` would prune is
     ///   due to be pruned;
@@ -170,6 +178,11 @@ impl Entries {
             };
             if !held {
                 return Err(format!("E1: own entry {id:?} is not at {:?}", o.at));
+            }
+            if let At::Batched { seq } = o.at
+                && self.batches.get(&seq).is_some_and(|b| b.handed)
+            {
+                return Err(format!("E1: own entry {id:?} is at batch {seq}, which was handed on"));
             }
             // Copies in the entry's own batch count whether or not it is in a slot.
             let own_batch = |s: u64| matches!(o.at, At::Batched { seq } if seq == s);
@@ -224,7 +237,8 @@ impl Entries {
 pub(in crate::replica) struct Probes {
     pub(in crate::replica) d1: u64,
     d1_seen: BTreeSet<ProposalId>,
-    pub(in crate::replica) d2: u64,
+    pub(in crate::replica) d2_own: u64,
+    pub(in crate::replica) d2_foreign: u64,
     pub(in crate::replica) d2_restarts: u64,
     pub(in crate::replica) d3: u64,
     d4: u64,

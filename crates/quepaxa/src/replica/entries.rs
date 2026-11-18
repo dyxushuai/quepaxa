@@ -42,6 +42,9 @@ pub(super) struct LocalBatch {
     pub(super) slot: Option<Slot>,
     /// Membership changes among the entries.
     changes: usize,
+    /// Its entries were handed on when the replica stepped aside: a lost slot hands back
+    /// none of the other members' (#187 D2).
+    handed: bool,
 }
 
 /// The place that holds an own entry.
@@ -79,7 +82,8 @@ pub(super) struct Own {
     pub(super) hedged: bool,
     pub(super) at: At,
     /// A copy of it went outside `at` and the batches in a slot: re-queued from a batch it
-    /// had already left (#187 D2), or handed back by a deputy (D3).
+    /// had already left (#187 D2), handed back by a deputy (D3), or kept by a batch out of
+    /// its slot (D4).
     copied: bool,
 }
 
@@ -450,7 +454,8 @@ impl Entries {
         let key = ValueKey { origin: self.me, incarnation: self.incarnation, seq };
         let ids = entries.iter().map(Item::key).collect();
         let changes = entries.iter().filter(|i| is_change(i)).count();
-        let b = LocalBatch { key, value: batch::encode(&entries), entries: ids, slot: None, changes };
+        let value = batch::encode(&entries);
+        let b = LocalBatch { key, value, entries: ids, slot: None, changes, handed: false };
         self.insert_batch(seq, b);
         seq
     }

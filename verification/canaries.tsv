@@ -50,3 +50,4 @@ placement-move-never-resolves	-	cargo nextest run --no-fail-fast -p quepaxa plac
 placement-tenure-from-clock-zero	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	not a sustained tenure yet
 has-work-ignores-relayed	-	cargo nextest run --no-fail-fast -p quepaxa watch_tests	its deputy proposes the entry
 route-forgets-the-place	-	cargo nextest run --no-fail-fast -p quepaxa proposing_tests	E1: own entry ProposalId\([0-9]+\) is not at
+lost-slot-reproposes-handed-entries	-	cargo nextest run --no-fail-fast -p quepaxa proposing_tests	nothing proposed here while stepped aside

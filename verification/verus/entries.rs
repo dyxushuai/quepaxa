@@ -17,8 +17,9 @@
 //    nothing left to commit is due to be pruned;
 // E5 after `route` nothing is pending unless the replica proposes directly;
 // `proposable` is true exactly when a batch waits for a slot or `cut` has entries to take;
-// a lost slot hands back only entries not in dedup; losing the lead keeps every batch in a
-// slot; stepping aside leaves nothing relayed and no batch waiting for a slot.
+// a lost slot hands back only entries not in dedup, and, for a batch handed on when stepping
+// aside, no other member's entry (#187 D2); losing the lead keeps every batch in a slot;
+// stepping aside leaves nothing relayed, no batch waiting for a slot, and every batch handed.
 //
 // Departures from the original's code, forced by what vstd specifies, are marked DEV;
 // VERIFICATION.md lists them. When entries.rs or entries/back.rs changes, port the change here.
@@ -38,8 +39,8 @@ pub enum At { Pending, Relayed, Forwarded { since: u64 }, Batched { seq: u64 } }
 #[derive(Clone, Copy)]
 pub struct Own { pub id: u64, pub change: bool, pub hedged: bool, pub at: At, pub copied: bool }
 
-/// DEV: the value is the entries.
-pub struct Batch { pub seq: u64, pub entries: Vec<Item>, pub slot: Option<u64>, pub changes: u64 }
+/// DEV: the value is the entries. `handed`: its entries were handed on when stepping aside.
+pub struct Batch { pub seq: u64, pub entries: Vec<Item>, pub slot: Option<u64>, pub changes: u64, pub handed: bool }
 
 pub struct BatchV { pub seq: u64, pub entries: Seq<Item>, pub slot: Option<u64> }
 
@@ -1297,6 +1298,17 @@ pub proof fn lemma_absent(v: V, me: u64, inc: u64, id: u64)
     }
 }
 
+/// Batch `seq` is among `bs` and was handed on.
+pub open spec fn handed_on(bs: Seq<Batch>, seq: u64) -> bool {
+    exists|j: int| 0 <= j < bs.len() && (#[trigger] bs[j]).seq == seq && bs[j].handed
+}
+
+/// An entry with key `k` is in batch `seq`.
+pub open spec fn in_batch(v: V, seq: u64, k: (u64, u64, u64)) -> bool {
+    exists|j: int, i: int| 0 <= j < v.batches.len() && v.batches[j].seq == seq && 0 <= i < v.batches[j].entries.len()
+        && key(#[trigger] v.batches[j].entries[i]) == k
+}
+
 /// `At::same`: the same place, whenever a forwarded entry was handed on.
 pub open spec fn same(a: At, b: At) -> bool {
     match (a, b) {
@@ -1524,6 +1536,7 @@ impl Entries {
             final(self).batches@[j as int].entries@ == old(self).batches@[j as int].entries@,
             final(self).batches@[j as int].changes == old(self).batches@[j as int].changes,
             final(self).batches@[j as int].slot == slot,
+            final(self).batches@[j as int].handed == old(self).batches@[j as int].handed,
             views(final(self).batches@) == views(old(self).batches@).update(j as int, BatchV { seq: old(self).batches@[j as int].seq, entries: old(self).batches@[j as int].entries@, slot }),
             final(self).unslotted == old(self).unslotted, final(self).pending == old(self).pending,
             final(self).relayed == old(self).relayed, final(self).forwarded == old(self).forwarded,
@@ -1533,9 +1546,58 @@ impl Entries {
             final(self).inc == old(self).inc, final(self).dedup == old(self).dedup,
     {
         let b = self.batches.remove(j);
-        let Batch { seq, entries, slot: _, changes } = b;
-        self.batches.insert(j, Batch { seq, entries, slot, changes });
+        let Batch { seq, entries, slot: _, changes, handed } = b;
+        self.batches.insert(j, Batch { seq, entries, slot, changes, handed });
         assert(views(self.batches@) =~= views(old(self).batches@).update(j as int, BatchV { seq: old(self).batches@[j as int].seq, entries: old(self).batches@[j as int].entries@, slot }));
+    }
+
+    /// Batch `j` is marked handed on. DEV: out and back in for `get_mut`.
+    fn set_handed(&mut self, j: usize)
+        requires j < old(self).batches@.len(),
+        ensures
+            final(self).batches@.len() == old(self).batches@.len(),
+            forall|i: int| 0 <= i < final(self).batches@.len() && i != j ==> final(self).batches@[i] == old(self).batches@[i],
+            final(self).batches@[j as int].seq == old(self).batches@[j as int].seq,
+            final(self).batches@[j as int].entries@ == old(self).batches@[j as int].entries@,
+            final(self).batches@[j as int].changes == old(self).batches@[j as int].changes,
+            final(self).batches@[j as int].slot == old(self).batches@[j as int].slot,
+            final(self).batches@[j as int].handed,
+            views(final(self).batches@) == views(old(self).batches@),
+            final(self).unslotted == old(self).unslotted, final(self).pending == old(self).pending,
+            final(self).relayed == old(self).relayed, final(self).forwarded == old(self).forwarded,
+            final(self).own == old(self).own, final(self).foreign == old(self).foreign,
+            final(self).changes == old(self).changes, final(self).prune_due == old(self).prune_due,
+            final(self).next_batch == old(self).next_batch, final(self).me == old(self).me,
+            final(self).inc == old(self).inc, final(self).dedup == old(self).dedup,
+            old(self).inv() ==> final(self).inv(),
+    {
+        let b = self.batches.remove(j);
+        let Batch { seq, entries, slot, changes, handed: _ } = b;
+        self.batches.insert(j, Batch { seq, entries, slot, changes, handed: true });
+        proof {
+            let (o, n) = (old(self).batches@, self.batches@);
+            assert(views(n) =~= views(o)) by {
+                assert forall|i: int| 0 <= i < n.len() implies #[trigger] views(n)[i] == views(o)[i] by {
+                    if i != j { assert(n[i] == o[i]); }
+                }
+            }
+            assert forall|s: u64| waits(n, s) <==> waits(o, s) by {
+                if waits(n, s) {
+                    let i = choose|i: int| 0 <= i < n.len() && (#[trigger] n[i]).seq == s && n[i].slot is None && n[i].entries@.len() > 0;
+                    if i != j { assert(n[i] == o[i]); }
+                    assert(o[i].seq == s);
+                }
+                if waits(o, s) {
+                    let i = choose|i: int| 0 <= i < o.len() && (#[trigger] o[i]).seq == s && o[i].slot is None && o[i].entries@.len() > 0;
+                    if i != j { assert(n[i] == o[i]); }
+                    assert(n[i].seq == s);
+                }
+            }
+            assert forall|i: int| 0 <= i < n.len() implies (#[trigger] n[i]).changes == o[i].changes && n[i].seq == o[i].seq
+                && n[i].slot == o[i].slot && n[i].entries@ == o[i].entries@ by {
+                if i != j { assert(n[i] == o[i]); }
+            }
+        }
     }
 
     pub proof fn lemma_bounded(self)
@@ -2547,7 +2609,7 @@ impl Entries {
             assert forall|j: int| 0 <= j < self.batches@.len() implies (#[trigger] self.batches@[j]).seq != seq by {}
         }
         let ghost es = entries@;
-        let b = Batch { seq, entries, slot: None, changes };
+        let b = Batch { seq, entries, slot: None, changes, handed: false };
         self.insert_batch(b);
         proof {
             assert(bv(b) == BatchV { seq, entries: es, slot: None });
@@ -2989,12 +3051,12 @@ impl Entries {
     }
 
     /// The entries `items` of batch `seq`, handed back: own ones move out of it to
-    /// `pending`; those of other members to `relayed` if `relay`, else to `pending`; none in
-    /// dedup. `removed`: the batch was taken out; else they are copies of a batch that stays
-    /// in its slot. `hedge`: own ones are counted as hedged. DEV: flags for the callers'
-    /// closures.
-    #[verifier::rlimit(400)]
-    fn take_back(&mut self, seq: u64, items: Vec<Item>, removed: bool, relay: bool, hedge: bool, dedup: &Dedup)
+    /// `pending`; those of other members to `relayed` if `relay`, else to `pending`, unless
+    /// `handed`; none in dedup. `removed`: the batch was taken out; else they are copies of a
+    /// batch that stays in its slot. `hedge`: own ones are counted as hedged. DEV: flags for
+    /// the callers' closures.
+    #[verifier::rlimit(600)]
+    fn take_back(&mut self, seq: u64, items: Vec<Item>, removed: bool, relay: bool, hedge: bool, handed: bool, dedup: &Dedup)
         requires
             old(self).counted(), shape(old(self).v(), old(self).me, old(self).inc),
             unresolved(old(self).own@, old(self).dedup@, old(self).me, old(self).inc),
@@ -3020,8 +3082,12 @@ impl Entries {
             forall|a: int| old(self).relayed@.len() <= a < final(self).relayed@.len() ==> !dedup.has(key(#[trigger] final(self).relayed@[a])),
             !relay ==> final(self).relayed == old(self).relayed,
             forall|k| holds(old(self).v(), k) ==> holds(final(self).v(), k),
-            removed ==> forall|a: int| 0 <= a < items@.len() ==> holds(final(self).v(), key(#[trigger] items@[a])) || dedup.has(key(items@[a])),
+            removed ==> forall|a: int| 0 <= a < items@.len() ==> holds(final(self).v(), key(#[trigger] items@[a])) || dedup.has(key(items@[a])) || handed,
             held(final(self).v()) <= held(old(self).v()) + items@.len(),
+            // `handed`: no other member's entry is handed back (#187 D2).
+            handed ==> final(self).relayed == old(self).relayed,
+            handed ==> forall|a: int| old(self).pending@.len() <= a < final(self).pending@.len() ==>
+                (#[trigger] final(self).pending@[a]).origin == old(self).me && final(self).pending@[a].inc == old(self).inc,
     {
         let ghost prev = *self;
         let (me, inc) = (self.me, self.inc);
@@ -3057,8 +3123,11 @@ impl Entries {
                 forall|a: int| prev.relayed@.len() <= a < self.relayed@.len() ==> !dedup.has(key(#[trigger] self.relayed@[a])),
                 !relay ==> self.relayed == prev.relayed,
                 forall|k| holds(prev.v(), k) ==> holds(self.v(), k),
-                removed ==> forall|a: int| 0 <= a < i ==> holds(self.v(), key(#[trigger] items@[a])) || dedup.has(key(items@[a])),
+                removed ==> forall|a: int| 0 <= a < i ==> holds(self.v(), key(#[trigger] items@[a])) || dedup.has(key(items@[a])) || handed,
                 held(self.v()) <= held(prev.v()) + i, held(prev.v()) + items@.len() <= 4 * held_max(),
+                handed ==> self.relayed == prev.relayed,
+                handed ==> forall|a: int| prev.pending@.len() <= a < self.pending@.len() ==>
+                    (#[trigger] self.pending@[a]).origin == me && self.pending@[a].inc == inc,
             decreases items.len() - i,
         {
             let x = items[i];
@@ -3082,6 +3151,19 @@ impl Entries {
                         let o = v0.own[k];
                         assert(fine(v0, me, inc, o));
                         assert(!self.dedup@.contains((me, inc, o.id)));
+                        assert(!this(me, inc, o.id)(x));
+                        assert(census(v1, me, inc, o.id) == census(v0, me, inc, o.id));
+                    }
+                }
+                i += 1;
+                continue;
+            }
+            if handed && !(x.origin == self.me && x.inc == self.inc) {
+                proof {
+                    let v1 = self.cur(removed, seq, rest1);
+                    assert forall|k: int| 0 <= k < v1.own.len() implies fine(v1, me, inc, #[trigger] v1.own[k]) by {
+                        let o = v0.own[k];
+                        assert(fine(v0, me, inc, o));
                         assert(!this(me, inc, o.id)(x));
                         assert(census(v1, me, inc, o.id) == census(v0, me, inc, o.id));
                     }
@@ -3169,8 +3251,15 @@ impl Entries {
                 assert forall|k| holds(prev.v(), k) implies holds(self.v(), k) by {
                     lemma_holds_extend(before.v(), self.v(), k);
                 }
+                if handed {
+                    assert(x.origin == me && x.inc == inc);
+                    assert forall|a: int| prev.pending@.len() <= a < self.pending@.len() implies
+                        (#[trigger] self.pending@[a]).origin == me && self.pending@[a].inc == inc by {
+                        if a < before.pending@.len() { assert(self.pending@[a] == before.pending@[a]); }
+                    }
+                }
                 if removed {
-                    assert forall|a: int| 0 <= a < i + 1 implies holds(self.v(), key(#[trigger] items@[a])) || dedup.has(key(items@[a])) by {
+                    assert forall|a: int| 0 <= a < i + 1 implies holds(self.v(), key(#[trigger] items@[a])) || dedup.has(key(items@[a])) || handed by {
                         if a < i { if holds(before.v(), key(items@[a])) { lemma_holds_extend(before.v(), self.v(), key(items@[a])); } }
                         else if x.origin == me || !relay { assert(key(self.pending@[self.pending@.len() - 1]) == key(items@[a])); }
                         else { assert(key(self.relayed@[self.relayed@.len() - 1]) == key(items@[a])); }
@@ -3192,14 +3281,23 @@ impl Entries {
 
     /// Batch `seq` lost its slot and its entries are handed back: own ones (and, if the slot
     /// went to the target `deciding`, every one) to `pending`, those of other members to
-    /// `relayed`.
-    #[verifier::rlimit(100)]
+    /// `relayed`, unless the batch was handed on when stepping aside.
+    #[verifier::rlimit(200)]
     pub fn lost_slot(&mut self, seq: u64, deciding: bool, dedup: &Dedup)
         requires old(self).ready(*dedup),
         ensures
             final(self).ready(*dedup), final(self).same_ids(*old(self)),
-            final(self).kept(*old(self), Set::empty(), Seq::empty()), final(self).next_batch == old(self).next_batch,
+            forall|id: u64| has_own(old(self).v(), id) ==> has_own(final(self).v(), id),
+            // E3, but for the entries of a batch handed on when stepping aside: they went to
+            // the target then.
+            forall|k: (u64, u64, u64)| holds(old(self).v(), k) ==> holds(final(self).v(), k) || final(self).dedup@.contains(k)
+                || (handed_on(old(self).batches@, seq) && in_batch(old(self).v(), seq, k)),
+            final(self).next_batch == old(self).next_batch,
             final(self).forwarded == old(self).forwarded,
+            // A batch handed on hands back no other member's entry (#187 D2).
+            handed_on(old(self).batches@, seq) ==> final(self).relayed == old(self).relayed,
+            handed_on(old(self).batches@, seq) ==> forall|a: int| old(self).pending@.len() <= a < final(self).pending@.len() ==>
+                (#[trigger] final(self).pending@[a]).origin == old(self).me && final(self).pending@[a].inc == old(self).inc,
             // A lost slot hands back only entries not in dedup.
             final(self).pending@.subrange(0, old(self).pending@.len() as int) == old(self).pending@,
             forall|a: int| old(self).pending@.len() <= a < final(self).pending@.len() ==> !dedup.has(key(#[trigger] final(self).pending@[a])),
@@ -3215,6 +3313,7 @@ impl Entries {
                     assert(self.pending@.subrange(0, self.pending@.len() as int) =~= self.pending@);
                     assert(self.relayed@.subrange(0, self.relayed@.len() as int) =~= self.relayed@);
                     assert forall|k| holds(self.v(), k) implies holds(self.v(), k) by {}
+                    assert(!handed_on(self.batches@, seq));
                 }
                 return;
             },
@@ -3230,18 +3329,30 @@ impl Entries {
             assert(every() == |x: Item| true);
             assert(held(mid.v()) + b.entries@.len() == held(prev.v()));
         }
-        self.take_back(seq, b.entries, true, !deciding, false, dedup);
+        let handed = b.handed;
+        proof {
+            assert(handed_on(prev.batches@, seq) == handed) by {
+                if handed_on(prev.batches@, seq) {
+                    let jj = choose|jj: int| 0 <= jj < prev.batches@.len() && (#[trigger] prev.batches@[jj]).seq == seq && prev.batches@[jj].handed;
+                    assert(prev.v().batches[jj].seq == prev.v().batches[j as int].seq);
+                    lemma_one_seq(prev.v(), me, inc, jj, j as int);
+                }
+            }
+        }
+        self.take_back(seq, b.entries, true, !deciding, false, handed, dedup);
         proof {
             self.lemma_due_remove(prev, j as int);
             assert forall|s: int| 0 <= s < self.batches@.len() implies (#[trigger] self.batches@[s]).seq < self.next_batch by {
                 let s2 = if s < j { s } else { s + 1 };
                 assert(self.batches@[s] == prev.batches@[s2]);
             }
-            assert forall|k| holds(prev.v(), k) implies holds(self.v(), k) || self.dedup@.contains(k) by {
+            assert forall|k| holds(prev.v(), k) implies holds(self.v(), k) || self.dedup@.contains(k)
+                || (handed_on(prev.batches@, seq) && in_batch(prev.v(), seq, k)) by {
                 lemma_holds_drop(prev.v(), j as int, k);
                 if !holds(mid.v(), k) {
                     let a = choose|a: int| 0 <= a < prev.v().batches[j as int].entries.len() && key(#[trigger] prev.v().batches[j as int].entries[a]) == k;
                     assert(b.entries@[a] == prev.v().batches[j as int].entries[a]);
+                    assert(prev.v().batches[j as int].seq == seq);
                 }
             }
             assert forall|id: u64| has_own(self.v(), id) implies has_own(prev.v(), id) by {
@@ -3289,7 +3400,7 @@ impl Entries {
             assert(every() == |x: Item| true);
             assert(held(mid.v()) + b.entries@.len() == held(prev.v()));
         }
-        self.take_back(seq, b.entries, true, false, hedge, dedup);
+        self.take_back(seq, b.entries, true, false, hedge, false, dedup);
         proof {
             self.lemma_due_remove(prev, j as int);
             assert forall|s: int| 0 <= s < self.batches@.len() implies (#[trigger] self.batches@[s]).seq < self.next_batch by {
@@ -3388,9 +3499,11 @@ impl Entries {
             final(self).same_ids(*old(self)),
             final(self).kept(*old(self), Set::empty(), Seq::empty()), final(self).next_batch == old(self).next_batch,
             final(self).forwarded == old(self).forwarded,
-            // Stepping aside leaves nothing relayed and no batch waiting for a slot.
+            // Stepping aside leaves nothing relayed, no batch waiting for a slot, and every
+            // batch marked handed on.
             final(self).relayed@.len() == 0,
             forall|c: int| 0 <= c < final(self).batches@.len() ==> (#[trigger] final(self).batches@[c]).slot is Some,
+            forall|c: int| 0 <= c < final(self).batches@.len() ==> (#[trigger] final(self).batches@[c]).handed,
     {
         let ghost prev = *self;
         let (me, inc) = (self.me, self.inc);
@@ -3414,6 +3527,7 @@ impl Entries {
                 forall|k: int| 0 <= k < self.own@.len() ==> (#[trigger] self.own@[k]).id == prev.own@[k].id,
                 forall|k| holds(prev.v(), k) ==> holds(self.v(), k) || self.dedup@.contains(k),
                 forall|c: int| 0 <= c < j ==> (#[trigger] self.batches@[c]).slot is Some,
+                forall|c: int| 0 <= c < j ==> (#[trigger] self.batches@[c]).handed,
             decreases self.batches.len() - j,
         {
             proof {
@@ -3429,6 +3543,9 @@ impl Entries {
                 self.hand_back_unstarted(j, true, dedup);
                 proof {
                     assert forall|c: int| 0 <= c < j implies (#[trigger] self.batches@[c]).slot is Some by {
+                        assert(self.batches@[c] == before.batches@[c]);
+                    }
+                    assert forall|c: int| 0 <= c < j implies (#[trigger] self.batches@[c]).handed by {
                         assert(self.batches@[c] == before.batches@[c]);
                     }
                     assert forall|k| holds(prev.v(), k) implies holds(self.v(), k) || self.dedup@.contains(k) by {
@@ -3451,9 +3568,15 @@ impl Entries {
                     }
                     assert(before.cur(false, seq, items@) == before.v());
                 }
-                self.take_back(seq, items, false, false, true, dedup);
+                self.take_back(seq, items, false, false, true, false, dedup);
+                self.set_handed(j);
                 proof {
-                    assert forall|c: int| 0 <= c < j + 1 implies (#[trigger] self.batches@[c]).slot is Some by {}
+                    assert forall|c: int| 0 <= c < j + 1 implies (#[trigger] self.batches@[c]).slot is Some by {
+                        if c != j { assert(self.batches@[c] == before.batches@[c]); }
+                    }
+                    assert forall|c: int| 0 <= c < j + 1 implies (#[trigger] self.batches@[c]).handed by {
+                        if c != j { assert(self.batches@[c] == before.batches@[c]); }
+                    }
                 }
                 j += 1;
             }
@@ -3474,6 +3597,7 @@ impl Entries {
                 forall|k: int| 0 <= k < self.own@.len() ==> (#[trigger] self.own@[k]).id == prev.own@[k].id,
                 forall|k| holds(prev.v(), k) ==> holds(self.v(), k) || self.dedup@.contains(k),
                 forall|c: int| 0 <= c < self.batches@.len() ==> (#[trigger] self.batches@[c]).slot is Some,
+                forall|c: int| 0 <= c < self.batches@.len() ==> (#[trigger] self.batches@[c]).handed,
             decreases self.relayed@.len(),
         {
             let ghost before = *self;

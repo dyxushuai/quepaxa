@@ -169,21 +169,28 @@ fn entries_stay_tracked_when_a_stepped_aside_leader_loses_its_slots() {
     assert!(r.entries.own().contains_key(&own));
 }
 
-/// #187 D2. Stepped aside, the leader already handed its slotted batches' entries on; when
-/// it then loses those slots, `lost_slot` queues them a second time: its own entry is handed
-/// on again with a new hedge clock, and replica 2's goes to `relayed` and is proposed here,
-/// on the stuck disk, with the whole window open.
+/// #187 D2. Stepped aside, the leader already handed its slotted batches' entries on. When
+/// it then loses those slots, replica 2's entry is not proposed here, on the stuck disk with
+/// the whole window open: it went to replica 1 at stepping aside. Its own entry is handed on
+/// once more, since replica 1 decided the slot without it, and then waits in that one place.
 #[test]
-#[ignore = "#187 D2, fixed in stage D"]
-fn a_stepped_aside_leader_losing_its_slots_hands_nothing_on_twice_and_proposes_nothing() {
+fn a_stepped_aside_leader_losing_its_slots_proposes_nothing_and_hands_its_own_on_once() {
     let (mut r, own, aside) = aside_with_slots_in_flight();
     lose(&mut r, 0, aside.after(5 * MS));
     assert!(r.proposers.keys().all(|s| *s == Slot(1)), "nothing proposed here while stepped aside");
-    lose(&mut r, 1, aside.after(5 * MS));
-    assert_eq!(
-        r.entries.forwarded().get(&own).map(|(_, at)| *at),
-        Some(aside),
-        "the hedge clock is not restarted"
-    );
+    let mut out = Vec::new();
+    let at = aside.after(5 * MS);
+    r.handle(at, from_peer(1, 0, Body::Decided { slot: Slot(1), proposal: proposal(1, 1, 1) })).unwrap();
+    r.poll_actions(&mut out);
+    r.check_entries().unwrap();
     assert!(r.proposers.is_empty(), "nothing proposed here while stepped aside");
+    assert_eq!(forwards_to(&out, 1), 1, "its own entry handed on once more");
+    assert_eq!(
+        r.entries.forwarded().get(&own).map(|(_, t)| *t),
+        Some(at),
+        "handed on when the slot was lost"
+    );
+    assert!(!r.entries.pending().iter().any(|i| i.entry.id == own), "not also pending");
+    assert!(!r.entries.relayed().iter().any(|i| i.entry.id == own), "not also relayed");
+    assert!(r.entries.batches().values().all(|b| !b.entries.iter().any(|e| e.2 == own)), "in no batch");
 }
