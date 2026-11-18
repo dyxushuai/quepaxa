@@ -1,21 +1,26 @@
 //! Where this replica's entries wait until they commit (#187): its own, from `propose` until
 //! they are resolved, and those other members handed it.
 //!
-//! - `pending`: entries to batch if this replica proposes them itself, else to forward to
-//!   its target (`watch.rs`).
+//! - `pending`: entries to batch if this replica proposes them itself, else to hand to its
+//!   target (`route`).
 //! - `relayed`: entries this replica proposes itself whatever it leads: handed to it as the
 //!   deputy of a leader another follower suspects, or its own the leader left uncommitted
 //!   for δ (`watch.rs`).
 //! - `forwarded`: own entries handed to the target, with when.
 //! - `batches`: batches this replica proposes, each in at most one slot at a time.
-//! - `own`: own proposals awaiting commit.
+//! - `own`: own proposals awaiting commit, each with the place `At` that holds it.
 //!
 //! The replica decides who proposes and when; the methods here, named after what triggers
-//! them, move the entries. Counters kept alongside answer in O(1) what the replica asks on
-//! every input: whether a batch waits for a slot (`unslotted`), whether another member's
-//! entries are here (`foreign`), whether a membership change is on its way (`changes`), and
-//! whether a batch may have become dead weight (`prune_due`).
+//! them, move the entries, and an own entry's `At` with it. An own entry leaves `own` only
+//! through a returned `Left`. Copies of an own entry outside its place are allowed in a
+//! batch already in a slot (stepping aside keeps those slots: whichever copy is decided
+//! first commits); a copy anywhere else marks the entry `copied` (`entries/back.rs`).
+//! Counters kept alongside answer in O(1) what the replica asks on every input: whether a
+//! batch waits for a slot (`unslotted`), whether another member's entries are here
+//! (`foreign`), whether a membership change is on its way (`changes`), and whether a batch
+//! may have become dead weight (`prune_due`).
 
+mod back;
 #[cfg(any(test, feature = "model"))]
 mod checks;
 
@@ -39,15 +44,59 @@ pub(super) struct LocalBatch {
     changes: usize,
 }
 
+/// The place that holds an own entry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum At {
+    Pending,
+    Relayed,
+    /// Handed to the target at `since`.
+    Forwarded {
+        since: Timestamp,
+    },
+    /// In local batch `seq`.
+    Batched {
+        seq: u64,
+    },
+}
+
+impl At {
+    /// The same place, whenever a forwarded entry was handed on.
+    fn same(self, other: At) -> bool {
+        match (self, other) {
+            (At::Forwarded { .. }, At::Forwarded { .. }) => true,
+            _ => self == other,
+        }
+    }
+}
+
 /// An own proposal awaiting commit.
 #[derive(Clone, Copy)]
-#[cfg_attr(feature = "model", derive(Hash))]
 pub(super) struct Own {
     /// When it was made.
     pub(super) since: Timestamp,
     pub(super) kind: Kind,
     /// Whether it was hedged: its commit latency is not an ordinary one.
     pub(super) hedged: bool,
+    pub(super) at: At,
+    /// A copy of it went outside `at` and the batches in a slot: re-queued from a batch it
+    /// had already left (#187 D2), or handed back by a deputy (D3).
+    copied: bool,
+}
+
+/// `at` and `copied` follow from the queues, or from history: not part of the fingerprint.
+#[cfg(feature = "model")]
+impl core::hash::Hash for Own {
+    fn hash<H: core::hash::Hasher>(&self, h: &mut H) {
+        (self.since, self.kind, self.hedged).hash(h);
+    }
+}
+
+/// An own entry no longer awaited (committed, superseded, internal, resolved by a snapshot,
+/// or fenced): the only way one leaves `own` (E2).
+#[must_use]
+pub(super) struct Left {
+    pub(super) id: ProposalId,
+    pub(super) own: Own,
 }
 
 #[cfg_attr(feature = "model", derive(Clone))]
@@ -69,6 +118,9 @@ pub(super) struct Entries {
     /// A batch without a slot may have no entry left to commit: one lost its slot, or the
     /// dedup state grew or was replaced while one waited.
     prune_due: bool,
+    /// Own entries that entered and left, for E2 (`checks.rs`).
+    #[cfg(any(test, feature = "model"))]
+    flow: (u64, u64),
     /// Suspected entry combinations seen, for verification only (`checks.rs`).
     #[cfg(feature = "model")]
     pub(super) probes: checks::Probes,
@@ -102,6 +154,8 @@ impl Entries {
             foreign: 0,
             changes: 0,
             prune_due: false,
+            #[cfg(any(test, feature = "model"))]
+            flow: (0, 0),
             #[cfg(feature = "model")]
             probes: checks::Probes::default(),
         }
@@ -109,6 +163,30 @@ impl Entries {
 
     fn foreign_in(&self, ids: &[(NodeId, u64, ProposalId)]) -> usize {
         ids.iter().filter(|&&(o, _, _)| o != self.me).count()
+    }
+
+    /// An entry of this replica's current incarnation.
+    fn mine(&self, i: &Item) -> bool {
+        i.entry.origin == self.me && i.entry.incarnation == self.incarnation
+    }
+
+    /// Own entry `id` was taken from `from` to `to`: the entry moves if `from` holds it,
+    /// else what moved is a copy.
+    fn moved(&mut self, id: ProposalId, from: At, to: At) {
+        if let Some(o) = self.own.get_mut(&id) {
+            if o.at.same(from) { o.at = to } else { o.copied = true }
+        }
+    }
+
+    /// Own entry `id` leaves `own`.
+    fn leave(&mut self, id: ProposalId) -> Option<Left> {
+        let own = self.own.remove(&id)?;
+        self.changes -= usize::from(own.kind == Kind::Reconfigure);
+        #[cfg(any(test, feature = "model"))]
+        {
+            self.flow.1 += 1;
+        }
+        Some(Left { id, own })
     }
 
     // ---- queues and batches, with their counters ----
@@ -175,13 +253,10 @@ impl Entries {
         self.unslotted.first().copied()
     }
 
-    /// Whether `cut` has entries to take.
-    pub(super) fn to_cut(&self, direct: bool) -> bool {
-        !self.relayed.is_empty() || (direct && !self.pending.is_empty())
-    }
-
-    pub(super) fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+    /// Whether there is something to propose: a batch waiting for a slot, or entries `cut`
+    /// takes (own pending ones only when proposing them directly).
+    pub(super) fn proposable(&self, direct: bool) -> bool {
+        !self.unslotted.is_empty() || !self.relayed.is_empty() || (direct && !self.pending.is_empty())
     }
 
     /// Own entries handed to the target, with when.
@@ -203,7 +278,12 @@ impl Entries {
 
     /// `propose` and the like queued an entry of this replica's.
     pub(super) fn submit(&mut self, now: Timestamp, item: Item) {
-        self.own.insert(item.entry.id, Own { since: now, kind: item.kind, hedged: false });
+        let own = Own { since: now, kind: item.kind, hedged: false, at: At::Pending, copied: false };
+        self.own.insert(item.entry.id, own);
+        #[cfg(any(test, feature = "model"))]
+        {
+            self.flow.0 += 1;
+        }
         if is_change(&item) {
             self.changes += 1;
         }
@@ -211,35 +291,59 @@ impl Entries {
     }
 
     /// A follower handed entries to this replica: into `pending` (to hand on, or as the
-    /// leader) or `relayed` (as a deputy), unless that queue would exceed `cap`.
+    /// leader) or `relayed` (as a deputy), unless that queue would exceed `cap`. An own entry
+    /// among them is a copy.
     pub(super) fn received(&mut self, entries: Vec<Item>, to_pending: bool, cap: usize) -> bool {
         #[cfg(feature = "model")]
         {
-            let own = entries
-                .iter()
-                .filter(|i| i.entry.origin == self.me && i.entry.incarnation == self.incarnation);
+            let own = entries.iter().filter(|i| self.mine(i));
             self.probes.d3 += own.count() as u64;
         }
         let queued = if to_pending { self.pending.len() } else { self.relayed.len() };
         if queued + entries.len() > cap {
             return false; // the origin hedges
         }
-        for e in entries {
-            if to_pending { self.push_pending(e) } else { self.push_relayed(e) }
+        for i in &entries {
+            if self.mine(i)
+                && let Some(o) = self.own.get_mut(&i.entry.id)
+            {
+                o.copied = true;
+            }
+        }
+        self.changes += entries.iter().filter(|i| is_change(i)).count();
+        if to_pending {
+            self.pending.extend(entries);
+        } else {
+            self.foreign += entries.iter().filter(|i| i.entry.origin != self.me).count();
+            self.relayed.extend(entries);
         }
         true
     }
 
-    /// Hands everything pending to the target: own entries are tracked from `now`.
-    pub(super) fn forward(&mut self, now: Timestamp) -> Vec<Item> {
+    /// Hands everything pending to the target unless this replica proposes it `direct`ly:
+    /// own entries are tracked from `now`. Returns the entries to send. Afterwards nothing is
+    /// pending unless `direct` (E5).
+    pub(super) fn route(&mut self, direct: bool, now: Timestamp) -> Vec<Item> {
+        if direct || self.pending.is_empty() {
+            return Vec::new();
+        }
         let entries: Vec<Item> = self.pending.drain(..).collect();
         self.changes -= entries.iter().filter(|i| is_change(i)).count();
         let (me, inc) = (self.me, self.incarnation);
         for i in entries.iter().filter(|i| i.entry.origin == me && i.entry.incarnation == inc) {
-            let _earlier = self.forwarded.insert(i.entry.id, (i.clone(), now));
+            let id = i.entry.id;
+            let _earlier = self.forwarded.insert(id, (i.clone(), now));
             #[cfg(feature = "model")]
             if _earlier.is_some_and(|(_, at)| at < now) {
                 self.probes.d2_restarts += 1;
+            }
+            if let Some(o) = self.own.get_mut(&id) {
+                // A copy forwarded over the entry restarts its clock (D2, D3).
+                match o.at {
+                    At::Pending => o.at = At::Forwarded { since: now },
+                    At::Forwarded { .. } => (o.at, o.copied) = (At::Forwarded { since: now }, true),
+                    _ => o.copied = true,
+                }
             }
         }
         entries
@@ -267,6 +371,7 @@ impl Entries {
     /// Cuts the next batch: relayed entries always, own pending ones only when proposing them
     /// directly (`lead`).
     pub(super) fn cut(&mut self, lead: bool, max_bytes: usize, dedup: &Dedup) -> Option<u64> {
+        let seq = self.next_batch;
         let mut entries = batch::Builder::new(max_bytes);
         loop {
             let relayed = if !self.relayed.is_empty() {
@@ -285,6 +390,9 @@ impl Entries {
             let (o, inc, id) = e.key();
             if dedup.contains(o, inc, id) {
                 continue;
+            }
+            if self.mine(&e) {
+                self.moved(id, if relayed { At::Relayed } else { At::Pending }, At::Batched { seq });
             }
             entries.push(e);
         }
@@ -311,134 +419,11 @@ impl Entries {
         Some((b.key, b.value.clone()))
     }
 
-    /// Batch `seq` lost its slot and is proposed again in another one.
-    pub(super) fn lost_slot_kept(&mut self, seq: u64) {
-        if let Some(b) = self.batches.get_mut(&seq) {
-            b.slot = None;
-            if !b.entries.is_empty() {
-                self.unslotted.insert(seq);
-            }
-            self.prune_due = true;
-        }
-    }
-
-    /// Batch `seq` lost its slot and its entries are handed back: own ones (and, if the slot
-    /// went to the target `deciding`, every one) to `pending`, those of other members to
-    /// `relayed`.
-    pub(super) fn lost_slot(&mut self, seq: u64, deciding: bool, dedup: &Dedup) {
-        let Some(b) = self.remove_batch(seq) else { return };
-        // Our own encoding: it decodes.
-        let entries = batch::decode(&b.value).unwrap_or_default();
-        for e in entries {
-            let (o, inc, id) = e.key();
-            if dedup.contains(o, inc, id) {
-                continue;
-            }
-            #[cfg(feature = "model")]
-            if o == self.me
-                && inc == self.incarnation
-                && (self.forwarded.contains_key(&id) || self.pending.iter().any(|i| i.key() == (o, inc, id)))
-            {
-                self.probes.d2 += 1;
-            }
-            if o == self.me || deciding { self.push_pending(e) } else { self.push_relayed(e) }
-        }
-    }
-
-    /// No longer the leader: the entries of batches not yet in a slot go to `pending`.
-    pub(super) fn lost_lead(&mut self, dedup: &Dedup) {
-        let unstarted: Vec<u64> =
-            self.batches.iter().filter(|(_, b)| b.slot.is_none()).map(|(seq, _)| *seq).collect();
-        let mut handed = Vec::new();
-        for seq in unstarted {
-            if let Some(b) = self.remove_batch(seq) {
-                // Our own encoding: it decodes.
-                handed.extend(batch::decode(&b.value).unwrap_or_default());
-            }
-        }
-        for e in handed {
-            let (o, inc, id) = e.key();
-            if !dedup.contains(o, inc, id) {
-                self.push_pending(e);
-            }
-        }
-    }
-
-    /// Stepped aside: the entries of every local batch go to `pending` (a batch already in a
-    /// slot stays there too), own ones counted as hedged, and so does everything relayed.
-    pub(super) fn step_aside(&mut self, dedup: &Dedup) {
-        let mut handed = Vec::new();
-        let mut unstarted = Vec::new();
-        for (seq, b) in &self.batches {
-            // Our own encoding: it decodes.
-            handed.extend(batch::decode(&b.value).unwrap_or_default());
-            if b.slot.is_none() {
-                unstarted.push(*seq);
-            }
-        }
-        for seq in unstarted {
-            self.remove_batch(seq);
-        }
-        for e in handed {
-            let (o, inc, id) = e.key();
-            if dedup.contains(o, inc, id) {
-                continue;
-            }
-            // Its wait on the stuck disk must not count as an ordinary commit latency.
-            if o == self.me
-                && let Some(out) = self.own.get_mut(&id)
-            {
-                out.hedged = true;
-            }
-            self.push_pending(e);
-        }
-        while let Some(e) = self.pop(true) {
-            self.push_pending(e);
-        }
-    }
-
-    /// The target is suspected: everything handed to it goes back to the front of `pending`,
-    /// counted as hedged. Returns how many.
-    pub(super) fn suspect(&mut self) -> u64 {
-        let mut hedged = 0;
-        for (id, (e, _)) in core::mem::take(&mut self.forwarded).into_iter().rev() {
-            if let Some(o) = self.own.get_mut(&id) {
-                o.hedged = true;
-            }
-            hedged += 1;
-            self.changes += usize::from(is_change(&e));
-            self.pending.push_front(e);
-        }
-        hedged
-    }
-
-    /// The target left the entries `late` uncommitted too long: proposed here (counted as
-    /// hedged), or, `aside`, handed to the target again. Returns how many were hedged.
-    pub(super) fn late(&mut self, late: Vec<ProposalId>, aside: bool) -> u64 {
-        let mut hedged = 0;
-        for id in late {
-            if let Some((e, _)) = self.forwarded.remove(&id) {
-                if aside {
-                    self.push_pending(e);
-                    continue;
-                }
-                if let Some(o) = self.own.get_mut(&id) {
-                    o.hedged = true;
-                }
-                hedged += 1;
-                self.push_relayed(e);
-            }
-        }
-        hedged
-    }
-
     /// An own entry is resolved (committed, superseded, or internal): no longer handed to
     /// anyone nor awaited.
-    pub(super) fn resolved(&mut self, id: ProposalId) -> Option<Own> {
+    pub(super) fn resolved(&mut self, id: ProposalId) -> Option<Left> {
         self.forwarded.remove(&id);
-        let own = self.own.remove(&id)?;
-        self.changes -= usize::from(own.kind == Kind::Reconfigure);
-        Some(own)
+        self.leave(id)
     }
 
     /// Own batch `seq` was decided and applied.
@@ -452,34 +437,30 @@ impl Entries {
     }
 
     /// A snapshot through `next - 1` was installed with `dedup`: the own entries it contains
-    /// are resolved (returned, with their kinds), and local batches in covered slots, still
-    /// proposed or already decided there but not yet applied, are proposed again.
-    pub(super) fn installed_snapshot(&mut self, next: u64, dedup: &Dedup) -> Vec<(ProposalId, Kind)> {
+    /// are resolved (returned), and local batches in covered slots, still proposed or already
+    /// decided there but not yet applied, are proposed again.
+    pub(super) fn installed_snapshot(&mut self, next: u64, dedup: &Dedup) -> Vec<Left> {
         let (me, inc) = (self.me, self.incarnation);
-        let done: Vec<_> = self
-            .own
+        let done: Vec<ProposalId> =
+            self.own.keys().filter(|id| dedup.contains(me, inc, **id)).copied().collect();
+        let left = done.into_iter().filter_map(|id| self.resolved(id)).collect();
+        let released: Vec<u64> = self
+            .batches
             .iter()
-            .filter(|(id, _)| dedup.contains(me, inc, **id))
-            .map(|(id, o)| (*id, o.kind))
+            .filter(|(_, b)| b.slot.is_some_and(|s| s.0 < next))
+            .map(|(seq, _)| *seq)
             .collect();
-        for &(id, _) in &done {
-            self.resolved(id);
-        }
-        for (seq, b) in &mut self.batches {
-            if b.slot.is_some_and(|s| s.0 < next) {
-                b.slot = None;
-                if !b.entries.is_empty() {
-                    self.unslotted.insert(*seq);
-                }
-            }
+        for seq in released {
+            self.unslot(seq);
         }
         self.prune_due = true;
-        done
+        left
     }
 
     /// Fenced: everything is dropped; returns the own proposals that were awaited.
-    pub(super) fn fence(&mut self) -> alloc::collections::btree_map::IntoKeys<ProposalId, Own> {
-        let own = core::mem::take(&mut self.own).into_keys();
+    pub(super) fn fence(&mut self) -> Vec<Left> {
+        let ids: Vec<ProposalId> = self.own.keys().copied().collect();
+        let left = ids.into_iter().filter_map(|id| self.leave(id)).collect();
         self.pending.clear();
         self.relayed.clear();
         self.forwarded.clear();
@@ -488,6 +469,6 @@ impl Entries {
         self.foreign = 0;
         self.changes = 0;
         self.prune_due = false;
-        own
+        left
     }
 }

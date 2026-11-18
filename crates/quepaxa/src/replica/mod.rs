@@ -627,7 +627,7 @@ impl Replica {
             self.placement.policy.on_resolved(id);
         }
         let internal = [self.retirement.fence(), moving];
-        for id in self.entries.fence().filter(|id| !internal.contains(&Some(*id))) {
+        for id in self.entries.fence().into_iter().map(|l| l.id).filter(|id| !internal.contains(&Some(*id))) {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }
         self.drop_reads();

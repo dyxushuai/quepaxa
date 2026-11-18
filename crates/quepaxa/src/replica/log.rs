@@ -181,7 +181,7 @@ impl Replica {
             let entries = items.into_iter().filter(|i| i.kind == Kind::App).map(|i| i.entry).collect();
             self.actions.push(Action::Commit { slot, entries });
             for id in mine {
-                let own = self.entries.resolved(id);
+                let own = self.entries.resolved(id).map(|l| l.own);
                 if self.retirement.committed(id) {
                     continue;
                 }
@@ -195,7 +195,7 @@ impl Replica {
                     }
                     continue;
                 }
-                if let Some(Own { since, kind, hedged }) = own {
+                if let Some(Own { since, kind, hedged, .. }) = own {
                     if kind == Kind::App {
                         self.note_commit_latency(self.now.0.saturating_sub(since.0));
                     }

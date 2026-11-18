@@ -1,108 +1,50 @@
 //! Where entries are, checked at call boundaries (tests and feature `model` only; #187).
 //!
-//! `check_entries` asserts what holds of today's queues; `Probes` counts the combinations
-//! suspected reachable (D1-D4) without asserting them, for `Inspection`.
+//! `Entries::check` asserts E1, E2, E4 and E5, and `Replica::check_entries` adds E6;
+//! `Probes` counts the combinations suspected reachable (D1-D4) without asserting them, for
+//! `Inspection`.
 
-use alloc::collections::BTreeSet;
 #[cfg(test)]
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::VecDeque;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
+use super::{At, Entries};
 #[cfg(test)]
-use super::{Entries, LocalBatch, Own};
+use super::{LocalBatch, Own};
 #[cfg(test)]
 use crate::batch::Item;
 use crate::batch::{self, Kind};
+use crate::dedup::Dedup;
 use crate::replica::Replica;
 use crate::types::ProposalId;
 #[cfg(test)]
 use crate::types::Timestamp;
 
 impl Replica {
-    /// Checks where this replica's entries are, between calls:
+    /// Checks where this replica's entries are, between calls: `Entries::check`, and
     ///
-    /// - I2: every own proposal awaiting commit is queued, handed to the target, or in a
-    ///   local batch;
     /// - E6: a local batch in a slot has a proposer there, or the slot is decided and not
-    ///   yet applied;
-    /// - I1/E5: a replica that does not propose its own entries itself has handed every one
-    ///   of them on;
-    /// - E4: the counters match the queues and batches, and a batch `drive` would prune is
-    ///   due to be pruned.
+    ///   yet applied.
     #[doc(hidden)]
     pub fn check_entries(&self) -> Result<(), String> {
         if self.fenced {
             return Ok(());
         }
-        let (me, inc) = (self.me, self.incarnation);
-        let mine = |o, i| o == me && i == inc;
-        let e = &self.entries;
-        for id in e.own.keys() {
-            let queued = e.pending.iter().chain(&e.relayed).any(|i| {
-                let (o, n, e) = i.key();
-                mine(o, n) && e == *id
-            });
-            let batched =
-                e.batches.values().any(|b| b.entries.iter().any(|&(o, n, e)| mine(o, n) && e == *id));
-            if !queued && !batched && !e.forwarded.contains_key(id) {
-                return Err(format!("I2: n{} lost track of its own entry {id:?}", me.0));
-            }
-        }
-        for (seq, b) in &e.batches {
+        for (seq, b) in &self.entries.batches {
             let Some(slot) = b.slot else { continue };
             let proposed = self.proposers.get(&slot).is_some_and(|a| a.batch == *seq);
             let unapplied = slot.0 >= self.emitted && self.log.contains_key(&slot);
             if !proposed && !unapplied {
                 return Err(format!(
                     "E6: n{}'s batch {seq} is in slot {} with no proposer, and not decided there unapplied",
-                    me.0, slot.0
+                    self.me.0, slot.0
                 ));
             }
         }
-        if !self.proposes_directly() && !e.pending.is_empty() {
-            return Err(format!(
-                "I1/E5: n{} hands its entries to n{} but kept {} pending",
-                me.0,
-                self.target().0,
-                e.pending.len()
-            ));
-        }
-        self.check_counters()
-    }
-
-    /// E4: the counters of `entries.rs`, recomputed.
-    fn check_counters(&self) -> Result<(), String> {
-        let e = &self.entries;
-        let unslotted: BTreeSet<u64> = e
-            .batches
-            .iter()
-            .filter(|(_, b)| b.slot.is_none() && !b.entries.is_empty())
-            .map(|(seq, _)| *seq)
-            .collect();
-        let foreign = e.relayed.iter().filter(|i| i.entry.origin != self.me).count()
-            + e.batches.values().flat_map(|b| &b.entries).filter(|&&(o, _, _)| o != self.me).count();
-        let changes = e.own.values().filter(|o| o.kind == Kind::Reconfigure).count()
-            + e.pending.iter().chain(&e.relayed).filter(|i| i.kind == Kind::Reconfigure).count()
-            + e.batches.values().map(|b| batch::changes(&b.value).len()).sum::<usize>();
-        if (&unslotted, foreign, changes) != (&e.unslotted, e.foreign, e.changes) {
-            return Err(format!(
-                "E4: n{} counts unslotted {:?}, foreign {}, changes {}; holds {unslotted:?}, {foreign}, {changes}",
-                self.me.0, e.unslotted, e.foreign, e.changes
-            ));
-        }
-        let dead = e.batches.iter().find(|(_, b)| {
-            b.slot.is_none() && !b.entries.iter().any(|&(o, i, id)| !self.dedup.contains(o, i, id))
-        });
-        if let Some((seq, _)) = dead
-            && !e.prune_due
-        {
-            return Err(format!(
-                "E4: n{}'s batch {seq} has nothing left to commit, and no prune is due",
-                self.me.0
-            ));
-        }
-        Ok(())
+        self.entries.check(self.proposes_directly(), &self.dedup).map_err(|e| format!("n{}: {e}", self.me.0))
     }
 
     /// Own entries of this incarnation both waiting to be handed on (or handed on) and in a
@@ -161,6 +103,119 @@ impl Replica {
     }
 }
 
+/// Where the copies of one own entry are.
+#[derive(Default)]
+struct Copies {
+    pending: usize,
+    relayed: usize,
+    /// The batches holding it, once per copy, with whether each is in a slot.
+    batches: Vec<(u64, bool)>,
+}
+
+impl Entries {
+    /// Checks the entries between calls:
+    ///
+    /// - E1: every own entry is in the place its `At` names (forwarded with that time);
+    ///   unless the entry is marked `copied`, that place holds one copy and any other copy
+    ///   is in a batch in a slot (`verification/verus/entries.rs` proves the same);
+    /// - E2: own entries left only through a `Left`, and none is still awaited once committed;
+    /// - E4: the counters match the queues and batches, and a batch `drive` would prune is
+    ///   due to be pruned;
+    /// - E5: a replica that does not propose its own entries `direct`ly has routed every one
+    ///   of them on.
+    pub(in crate::replica) fn check(&self, direct: bool, dedup: &Dedup) -> Result<(), String> {
+        self.check_own(dedup)?;
+        if !direct && !self.pending.is_empty() {
+            return Err(format!("E5: hands its entries on but kept {} pending", self.pending.len()));
+        }
+        self.check_counters(dedup)
+    }
+
+    /// E1 and E2.
+    fn check_own(&self, dedup: &Dedup) -> Result<(), String> {
+        let (me, inc) = (self.me, self.incarnation);
+        let (entered, left) = self.flow;
+        if entered - left != self.own.len() as u64 {
+            return Err(format!(
+                "E2: {entered} own entries entered, {left} left, {} awaited",
+                self.own.len()
+            ));
+        }
+        let mut seen: BTreeMap<ProposalId, Copies> = BTreeMap::new();
+        let mine = |i: &&batch::Item| i.entry.origin == me && i.entry.incarnation == inc;
+        for i in self.pending.iter().filter(mine) {
+            seen.entry(i.entry.id).or_default().pending += 1;
+        }
+        for i in self.relayed.iter().filter(mine) {
+            seen.entry(i.entry.id).or_default().relayed += 1;
+        }
+        for (seq, b) in &self.batches {
+            for &(_, _, id) in b.entries.iter().filter(|&&(o, n, _)| o == me && n == inc) {
+                seen.entry(id).or_default().batches.push((*seq, b.slot.is_some()));
+            }
+        }
+        let none = Copies::default();
+        for (id, o) in &self.own {
+            if dedup.contains(me, inc, *id) {
+                return Err(format!("E2: own entry {id:?} committed, still awaited"));
+            }
+            let c = seen.get(id).unwrap_or(&none);
+            let forwarded = self.forwarded.get(id).map(|(_, t)| *t);
+            let in_batch = |seq| c.batches.iter().any(|&(s, _)| s == seq);
+            let held = match o.at {
+                At::Pending => c.pending > 0,
+                At::Relayed => c.relayed > 0,
+                At::Forwarded { since } => forwarded == Some(since),
+                At::Batched { seq } => in_batch(seq),
+            };
+            if !held {
+                return Err(format!("E1: own entry {id:?} is not at {:?}", o.at));
+            }
+            // Copies in the entry's own batch count whether or not it is in a slot.
+            let own_batch = |s: u64| matches!(o.at, At::Batched { seq } if seq == s);
+            let batched = c.batches.iter().filter(|&&(s, slotted)| !slotted || own_batch(s)).count();
+            let copies = c.pending + c.relayed + usize::from(forwarded.is_some()) + batched - 1;
+            if copies > 0 && !o.copied {
+                return Err(format!(
+                    "E1: own entry {id:?} at {:?} has {copies} copies outside it and the slotted batches",
+                    o.at
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// E4: the counters, recomputed.
+    fn check_counters(&self, dedup: &Dedup) -> Result<(), String> {
+        let unslotted: BTreeSet<u64> = self
+            .batches
+            .iter()
+            .filter(|(_, b)| b.slot.is_none() && !b.entries.is_empty())
+            .map(|(seq, _)| *seq)
+            .collect();
+        let foreign = self.relayed.iter().filter(|i| i.entry.origin != self.me).count()
+            + self.batches.values().flat_map(|b| &b.entries).filter(|&&(o, _, _)| o != self.me).count();
+        let changes = self.own.values().filter(|o| o.kind == Kind::Reconfigure).count()
+            + self.pending.iter().chain(&self.relayed).filter(|i| i.kind == Kind::Reconfigure).count()
+            + self.batches.values().map(|b| batch::changes(&b.value).len()).sum::<usize>();
+        if (&unslotted, foreign, changes) != (&self.unslotted, self.foreign, self.changes) {
+            return Err(format!(
+                "E4: counts unslotted {:?}, foreign {}, changes {}; holds {unslotted:?}, {foreign}, {changes}",
+                self.unslotted, self.foreign, self.changes
+            ));
+        }
+        let dead = self.batches.iter().find(|(_, b)| {
+            b.slot.is_none() && !b.entries.iter().any(|&(o, i, id)| !dedup.contains(o, i, id))
+        });
+        if let Some((seq, _)) = dead
+            && !self.prune_due
+        {
+            return Err(format!("E4: batch {seq} has nothing left to commit, and no prune is due"));
+        }
+        Ok(())
+    }
+}
+
 /// Counts of the suspected combinations (feature `model`); never part of the replica's
 /// fingerprint (`Entries` hashes without them), so exploring and storm detection see the
 /// same states as without them.
@@ -206,8 +261,10 @@ impl Entries {
         self.push_relayed(i);
     }
 
+    /// An own entry with no place: the replica's checks reject it.
     pub(in crate::replica) fn insert_own(&mut self, id: ProposalId, since: Timestamp, kind: Kind) {
         self.changes += usize::from(kind == Kind::Reconfigure);
-        self.own.insert(id, Own { since, kind, hedged: false });
+        self.flow.0 += 1;
+        self.own.insert(id, Own { since, kind, hedged: false, at: At::Pending, copied: false });
     }
 }

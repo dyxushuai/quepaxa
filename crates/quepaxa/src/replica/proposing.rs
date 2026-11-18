@@ -122,9 +122,7 @@ impl Replica {
         self.check_aside();
         // Fixed for this call: starting slots changes neither suspicions nor the disk.
         let direct = self.proposes_directly();
-        if !direct {
-            self.forward_pending();
-        }
+        self.forward_pending(direct);
         // Batches whose entries all committed elsewhere are dead weight.
         self.entries.prune(&self.dedup);
         // Hedging around a target that still talks: one slot at a time, or the hedges contend
@@ -132,17 +130,16 @@ impl Replica {
         // followers handed here (as their deputy) are not hedges.
         let cap = if direct || self.entries.deputy() { self.window() } else { 1 };
         while (self.proposers.len() as u64) < cap {
-            let waiting = self.entries.waiting();
             // Nothing to propose: skip the search for a slot, which probes the log per slot
             // and ran on every input.
-            if waiting.is_none() && !self.entries.to_cut(direct) {
+            if !self.entries.proposable(direct) {
                 break;
             }
             // A batch is cut only for a slot it can take: one cut and left waiting would be
             // proposed later in someone else's slots.
             let Some(slot) = self.free_slot() else { break };
             let max = self.cfg.max_batch_bytes as usize;
-            let seq = match waiting {
+            let seq = match self.entries.waiting() {
                 Some(seq) => seq,
                 None => match self.entries.cut(direct, max, &self.dedup) {
                     Some(seq) => seq,
@@ -154,13 +151,14 @@ impl Replica {
         }
     }
 
-    fn forward_pending(&mut self) {
-        if !self.entries.has_pending() {
+    /// Hands what is pending to the target, unless this replica proposes it `direct`ly.
+    fn forward_pending(&mut self, direct: bool) {
+        let entries = self.entries.route(direct, self.now);
+        if entries.is_empty() {
             return;
         }
         let leader = self.target();
         self.forwarded_now();
-        let entries = self.entries.forward(self.now);
         let mut chunk = batch::Builder::new(self.cfg.max_batch_bytes as usize);
         for e in entries {
             if !chunk.fits(&e) {
