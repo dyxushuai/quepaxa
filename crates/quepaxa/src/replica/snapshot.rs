@@ -51,7 +51,7 @@ impl Replica {
     ///   call's actions were not taken.
     pub fn compact(&mut self, now: Timestamp, through: Slot, core_state: Bytes) -> Result<(), Error> {
         self.begin(now)?;
-        if self.fenced {
+        if self.phase.fenced() {
             return Err(Error::Fenced);
         }
         let state = self.check_state(through, &core_state)?;
@@ -92,7 +92,7 @@ impl Replica {
         core_state: Bytes,
     ) -> Result<bool, Error> {
         self.begin(now)?;
-        if self.fenced {
+        if self.phase.fenced() {
             return Err(Error::Fenced);
         }
         let state = self.check_state(through, &core_state)?;
@@ -141,11 +141,8 @@ impl Replica {
         // Resume fetching whatever the cluster decided after the snapshot. The snapshot
         // answered any outstanding request, so if peers compacted past it meanwhile, the
         // next one may be asked for at once.
-        self.catch_up = None;
         self.snapshot_asked = None;
-        if self.peer_committed > self.committed
-            && let Some(peer) = self.ahead_peer
-        {
+        if let Some(peer) = self.catch_up.installed(self.committed) {
             self.request_catch_up(peer);
         }
         self.pump();
@@ -177,8 +174,7 @@ impl Replica {
     /// Rewrites the durable state from scratch: everything recovery needs, nothing below the floor.
     fn checkpoint(&mut self) {
         let mut records = alloc::vec![Record::Incarnation(self.incarnation).encode()];
-        let reserved = self.reserved_through.or(self.h_floor.checked_sub(1));
-        if let Some(t) = reserved {
+        if let Some(t) = self.reservation.checkpoint() {
             records.push(Record::Reservation { through: Slot(t) }.encode());
         }
         if let Some(state) = &self.snapshot_state {

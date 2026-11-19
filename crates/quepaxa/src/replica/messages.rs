@@ -1,5 +1,5 @@
-//! Messages: encoding and sending (gated on durability where they report state), accepting
-//! and dispatching received ones, and catching up from peers after a gap or a restart.
+//! Messages: encoding and sending (gated on durability where they report state), and
+//! accepting and dispatching received ones.
 
 use super::*;
 
@@ -57,67 +57,18 @@ impl Replica {
         }
         self.heard_from(from);
         self.watch.committed.insert(from, msg.env.commit_index);
-        if msg.env.commit_index > self.peer_committed {
-            self.peer_committed = msg.env.commit_index;
-            self.ahead_peer = Some(from);
-        }
-        if self.peer_committed > self.committed {
+        self.catch_up.heard(from, msg.env.commit_index);
+        if self.catch_up.ahead_of(self.committed) {
             self.seen.entry(Slot(self.committed)).or_insert(self.now);
         }
         if msg.env.commit_index > self.committed + 1 && self.catch_up_due() {
             self.request_catch_up(from);
         }
         if let Body::Entries { .. } = msg.body {
-            if self.startup_probe.is_some() {
-                self.probe_answers.insert(from);
-            }
+            self.phase.answered(from);
             self.note_progress(from, msg.env.commit_index);
         }
         self.inbox.push_back((from, msg.body));
-    }
-
-    /// Ends the startup probe once a majority of the members at the decided prefix, counting
-    /// this replica, answered it. Checked after a page is applied: a page that crosses into a
-    /// new epoch must be answered by its members, not the old ones.
-    pub(super) fn check_probe_answers(&mut self) {
-        if self.startup_probe.is_none() {
-            return;
-        }
-        let members = self.schedule.members(Slot(self.committed));
-        let answered = members.iter().filter(|m| **m == self.me || self.probe_answers.contains(m)).count();
-        if answered > members.len() / 2 {
-            self.startup_probe = None;
-            self.probe_answers.clear();
-        }
-    }
-
-    /// Whether a bulk catch-up request may be (re)sent now.
-    pub(super) fn catch_up_due(&self) -> bool {
-        self.catch_up.is_none_or(|(_, t)| t.after(self.cfg.retransmit_interval) <= self.now)
-    }
-
-    /// Asks every known replica where the log is (again on the retransmit timer, until a
-    /// majority of the members answered; see `check_probe_answers`).
-    pub(super) fn probe_peers(&mut self) {
-        let peers: alloc::collections::BTreeSet<NodeId> = self
-            .cfg
-            .members
-            .iter()
-            .copied()
-            .chain(self.schedule.everyone())
-            .filter(|&m| m != self.me)
-            .collect();
-        // Nobody to ask (a single member): nothing to wait for either.
-        self.startup_probe = (!peers.is_empty()).then(|| self.now.after(self.cfg.retransmit_interval));
-        for peer in peers {
-            self.send(peer, Body::CatchUp { from: Slot(self.committed) });
-        }
-    }
-
-    /// Fetches the decided prefix from `committed` in bulk.
-    pub(super) fn request_catch_up(&mut self, peer: NodeId) {
-        self.catch_up = Some((peer, self.now));
-        self.send(peer, Body::CatchUp { from: Slot(self.committed) });
     }
 
     pub(super) fn pump(&mut self) {
@@ -146,7 +97,7 @@ impl Replica {
                     }
                     Body::CatchUp { from: start } => self.on_catch_up(from, start),
                     Body::Entries { first, proposals } => {
-                        let page = !proposals.is_empty();
+                        let empty = proposals.is_empty();
                         for (i, p) in proposals.into_iter().enumerate() {
                             let Some(slot) = first.0.checked_add(i as u64) else { break };
                             self.learn(Slot(slot), p, false);
@@ -154,17 +105,8 @@ impl Replica {
                         self.check_probe_answers();
                         // A late or duplicate page from another peer is still useful, but only
                         // the active request's answer moves the catch-up along.
-                        if self.catch_up.is_some_and(|(peer, _)| peer == from) {
-                            if page {
-                                self.catch_up = None;
-                                // Still behind after a page: ask the same peer for the next one.
-                                if self.peer_committed > self.committed + 1 {
-                                    self.request_catch_up(from);
-                                }
-                            } else {
-                                // Nothing new there: ask again only on the timer.
-                                self.catch_up = Some((from, self.now));
-                            }
+                        if let Some(peer) = self.catch_up.page(from, empty, self.committed, self.now) {
+                            self.request_catch_up(peer);
                         }
                     }
                     Body::Forward { batch } => self.on_forward(from, &batch),

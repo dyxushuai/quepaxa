@@ -94,7 +94,7 @@ impl Replica {
 
     /// Queues a read for the next round; the caller pumps it.
     pub(super) fn submit_read(&mut self) -> Result<ProposalId, Error> {
-        if self.fenced {
+        if self.phase.fenced() {
             return Err(Error::Fenced);
         }
         if self.entries.own_len() + self.reads.len() >= self.cfg.max_outstanding_proposals as usize {
@@ -135,7 +135,7 @@ impl Replica {
     /// and makes progress toward it otherwise. Run after the inbox is drained, so a ready
     /// read follows the commits it covers.
     pub(super) fn check_reads(&mut self) {
-        if self.fenced {
+        if self.phase.fenced() {
             return;
         }
         loop {

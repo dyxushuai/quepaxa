@@ -30,7 +30,7 @@ impl Replica {
     ///   yet applied.
     #[doc(hidden)]
     pub fn check_entries(&self) -> Result<(), String> {
-        if self.fenced {
+        if self.phase.fenced() {
             return Ok(());
         }
         for (seq, b) in &self.entries.batches {

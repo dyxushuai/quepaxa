@@ -63,7 +63,7 @@ impl Replica {
     pub(super) fn send_requests(&mut self, slot: Slot, resend: bool) {
         let me = self.me;
         let resend_at = self.now.after(self.cfg.retransmit_interval);
-        let h_ready = self.reserved_durable.is_some_and(|t| slot.0 <= t);
+        let h_ready = self.reservation.covers(slot);
         let Some(a) = self.proposers.get_mut(&slot) else { return };
         a.resend_at = resend_at;
         let step = a.prop.step();
@@ -116,7 +116,7 @@ impl Replica {
     /// Starts as many slots as the window allows, after handing entries to the target if
     /// this replica does not propose them itself.
     pub(super) fn drive(&mut self) {
-        if self.fenced {
+        if self.phase.fenced() {
             return;
         }
         self.check_aside();
@@ -223,10 +223,8 @@ impl Replica {
     fn start(&mut self, slot: Slot, seq: u64) {
         let Some((key, value)) = self.entries.start(seq, slot) else { return };
         let proposal = Proposal { priority: 0, key, value };
-        let leader = self.schedule.leader(slot) == self.me && slot.0 >= self.h_floor;
-        if leader && self.reserved_through.is_none_or(|t| slot.0 > t) {
-            let through = slot.0 + 4 * self.window();
-            self.reserved_through = Some(through);
+        let leader = self.schedule.leader(slot) == self.me && self.reservation.may_lead(slot);
+        if leader && let Some(through) = self.reservation.extend(slot, 4 * self.window()) {
             self.gate.write(Record::Reservation { through: Slot(through) }.encode());
             self.after_durable(super::Effect::ReservationDurable(through));
         }
@@ -251,17 +249,14 @@ impl Replica {
         let stall = self.stalled().map(|(_, at)| at);
         let hedge = self.entries.forwarded_since().filter_map(|(_, at)| self.hedge_at(at)).min();
         // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
-        let behind = self.peer_committed > self.committed + 1
-            && self.catch_up.or(self.ahead_peer.map(|p| (p, self.now))).is_some();
-        let catch_up =
-            behind.then(|| self.catch_up.map_or(self.now, |(_, t)| t.after(self.cfg.retransmit_interval)));
+        let catch_up = self.catch_up.deadline(self.committed, self.now, self.cfg.retransmit_interval);
         resend
             .chain(stall)
             .chain(hedge)
             .chain(catch_up)
             .chain(self.retirement.probe_at())
             .chain(self.reads.resend_at())
-            .chain(self.startup_probe)
+            .chain(self.phase.probe_at())
             .chain(self.watch.ack_due.values().copied())
             .chain(self.aside_at().filter(|_| !self.watch.aside))
             .chain(self.placement.next_probe)
@@ -277,7 +272,7 @@ impl Replica {
         for node in ack_due {
             self.ack_forward(node);
         }
-        if self.startup_probe.is_some_and(|t| t <= now) {
+        if self.phase.probe_at().is_some_and(|t| t <= now) {
             self.probe_peers();
         }
         self.fire_probe();
@@ -301,18 +296,11 @@ impl Replica {
             .map(|(id, _)| id)
             .collect();
         self.metrics.hedged += self.entries.late(late, aside);
-        if self.peer_committed > self.committed + 1 && self.catch_up_due() {
-            // Prefer the most advanced peer; the previous target may be the one that failed.
-            let peer = self.ahead_peer.or(self.catch_up.map(|(p, _)| p));
-            if let Some(peer) = peer {
-                self.metrics.catch_up_retries += 1;
-                self.request_catch_up(peer);
-            }
-        } else if self.catch_up_due()
-            && let Some(peer) = self.read_catch_up_from()
-        {
-            // The answers' commit indexes may predate the slots their marks wait for, and the
-            // round's resend timer brings this back here until the read is ready.
+        // Outside the membership, the answers' commit indexes may predate the slots the read
+        // marks wait for, and the round's resend timer brings this back here until the read
+        // is ready.
+        let interval = self.cfg.retransmit_interval;
+        if let Some(peer) = self.catch_up.retry(self.committed, now, interval, || self.read_catch_up_from()) {
             self.metrics.catch_up_retries += 1;
             self.request_catch_up(peer);
         }
