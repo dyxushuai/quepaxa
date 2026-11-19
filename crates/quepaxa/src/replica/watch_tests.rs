@@ -74,6 +74,7 @@ fn suspecting_hedges_every_entry_already_forwarded() {
     }
     assert!(!r.entries.forwarded().contains_key(&second), "suspicion covers what was handed to the leader");
     assert!(r.entries.own().get(&second).is_some_and(|o| o.hedged), "and counts it as hedged");
+    assert_eq!(r.metrics().hedged, 2, "both entries count in the metric");
 }
 
 #[test]
@@ -477,6 +478,39 @@ fn r_rises_at_once_to_a_slower_answer() {
         Some(&(30 * MS)),
         "a leader whose disk slowed: σ covers it at once"
     );
+}
+
+#[test]
+fn r_counts_from_the_first_forward_the_target_has_not_answered() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    r.propose(Timestamp(2 * MS), Bytes::from_static(b"y")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 2);
+    r.handle(Timestamp(10 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: 0 })).unwrap();
+    assert_eq!(r.watch.reply.get(&NodeId(0)), Some(&(9 * MS)), "from 1 ms, not the later forward");
+}
+
+#[test]
+fn sigma_equal_to_the_hedge_delay_does_not_count() {
+    // 2R = δ = 80 ms.
+    let r = with_latency(Some(40));
+    assert_eq!(r.hedge_delay(), 80 * MS);
+    assert_eq!(r.silence_wait(NodeId(0)), None);
+}
+
+#[test]
+fn progress_announced_at_the_forward_itself_is_not_a_backlog() {
+    let mut r = with_latency(None);
+    // δ = 80 ms; 4δ stays under hedge_max.
+    r.cfg.hedge_max = 400 * MS;
+    let at = Timestamp(10 * MS);
+    r.watch.progressed = at;
+    assert_eq!(r.late_at(at), Some(at.after(80 * MS)), "nothing decided after the forward: δ");
+    r.watch.progressed = at.after(1);
+    assert_eq!(r.late_at(at), Some(at.after(4 * 80 * MS)));
 }
 
 #[test]

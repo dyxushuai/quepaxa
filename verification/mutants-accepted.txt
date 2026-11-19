@@ -65,6 +65,10 @@ crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::drive
 crates/quepaxa/src/replica/proposing.rs: replace + with * in Replica::drive
 crates/quepaxa/src/replica/proposing.rs: replace && with || in Replica::cut_batch
 
-# Asking a member that already reported exactly the epoch's first slot again only sends one
-# more probe; retirement waits for the same majority either way.
-crates/quepaxa/src/replica/retire.rs: replace < with <= in Replica::check_retired
+# Equivalent: a sample equal to R decays to R itself (R - R/8 + R/8 = R).
+crates/quepaxa/src/replica/watch.rs: replace < with <= in Replica::heard_from
+
+# Equivalent: the guard decides only when silence_wait(self.me) is Some, which needs an R for
+# this replica; heard_from learns R only from on_message, which drops a replica's own
+# messages (its sends to itself go straight to the inbox).
+crates/quepaxa/src/replica/watch.rs: replace match guard leader != self.me with true in Replica::takeover_at
