@@ -134,7 +134,7 @@ fn stepping_aside_waits_for_a_decision_after_the_oldest_write() {
 fn stepping_aside_and_back_alternate_once_per_stall() {
     let (mut r, _) = leader_with_a_stuck_disk();
     let mut out = Vec::new();
-    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 1, 0) };
+    let decided = Body::decided(Slot(9), proposal(1, 1, 0));
     r.handle(t(10), from_peer(1, 0, decided)).unwrap();
     r.poll_actions(&mut out);
     for at in [81, 90, 100] {

@@ -81,20 +81,7 @@ impl Replica {
                     Body::RecordReply { slot, req_step, step, first, prev_agg } => {
                         self.on_reply(from, slot, req_step, step, first, prev_agg)
                     }
-                    Body::Decided { slot, proposal } => {
-                        // The target announced a slot it decided itself: it is busy, not stuck
-                        // (`late_at`). Not a repeat, nor its answer to a request of ours (it may
-                        // only have cached someone else's decision).
-                        // New to this replica (`learn` ignores emitted or known slots).
-                        if slot.0 >= self.emitted && !self.log.contains_key(&slot) {
-                            // A majority made a value durable without this replica (`aside_at`).
-                            self.watch.disk.decided_elsewhere(self.now);
-                            if from == self.target() && !self.proposers.contains_key(&slot) {
-                                self.watch.progressed = self.now;
-                            }
-                        }
-                        self.learn(slot, proposal, false)
-                    }
+                    Body::Decided { slot, priority, key } => self.on_decided(from, slot, priority, key),
                     Body::CatchUp { from: start } => self.on_catch_up(from, start),
                     Body::Entries { first, proposals } => {
                         let empty = proposals.is_empty();

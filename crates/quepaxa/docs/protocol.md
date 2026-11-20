@@ -74,6 +74,15 @@ What the paper leaves open, the crate fixes as follows (the repository's
   contend with the leader's slots, off its fast path, the moment the disks resume. A disk
   that keeps completing writes is slow, not stuck, and does not hold hedges; nor does
   one that would be stuck by the time a hedge is due, until it is.
+- **Decisions.** A proposer that decides tells every replica with `Decided`, which names
+  the value by its key (and priority) without carrying it, as does a recorder asked about
+  a slot it already knows decided. A key names exactly one value, so the receiver takes it
+  from whatever it holds under that key: the register's values for the slot, its own
+  proposer there, or its own batch. A receiver that holds none, having missed the
+  requests, asks the sender for the slot with `CatchUp`, again every retransmit interval
+  (through the slot's other members, in case the decider is gone) until it learns the
+  slot; one request per peer covers every slot it waits for. The leader so sends each
+  value once per peer per slot.
 - **Durability.** Recorder state is written before any reply that reports it leaves.
 - **Snapshots, catch-up, membership.** See the other chapters.
 

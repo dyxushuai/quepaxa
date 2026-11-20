@@ -1,7 +1,7 @@
 //! A follower's watch on its leader: suspecting a silent one and proposing directly.
 
 use super::disk::Health;
-use super::tests::{from_peer, proposal, r_wire, replica_as};
+use super::tests::{announce, from_peer, proposal, r_wire, replica_as};
 use super::*;
 
 mod hedging;

@@ -49,7 +49,7 @@ fn arb_body() -> impl Strategy<Value = Body> {
                     prev_agg: a.map(|a| reply_proposal(&a, key)),
                 }
             }),
-        (slot.clone(), p.clone()).prop_map(|(slot, proposal)| Body::Decided { slot, proposal }),
+        (slot.clone(), p.clone()).prop_map(|(slot, proposal)| Body::decided(slot, proposal)),
         slot.clone().prop_map(|from| Body::CatchUp { from }),
         (slot.clone(), proptest::collection::vec(p, 0..3))
             .prop_map(|(first, proposals)| Body::Entries { first, proposals }),
@@ -112,7 +112,7 @@ fn misaddressed_and_out_of_range_messages_are_rejected_at_the_exact_bounds() {
         // decisions are not.
         (7, 0, Body::CatchUp { from: Slot(0) }, false),
         (7, 0, reply(4, 4), true),
-        (7, 0, Body::Decided { slot: Slot(0), proposal: proposal(1, 7, 0) }, true),
+        (7, 0, Body::decided(Slot(0), proposal(1, 7, 0)), true),
         (1, 0, Body::CatchUp { from: Slot(0) }, false),
         (1, 0, req(0, max_step + 1), true),
         (1, 0, req(0, max_step), false),
@@ -145,7 +145,7 @@ fn a_decided_value_that_is_not_a_batch_commits_nothing_and_is_counted() {
     let env =
         Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 0 };
     let proposal = Proposal { value: Bytes::from_static(b"garbage"), ..proposal(1, 1, 0) };
-    let body = Body::Decided { slot: Slot(0), proposal };
+    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![proposal] };
     r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
@@ -164,7 +164,7 @@ fn decisions_are_learned_up_to_the_last_valid_slot() {
             to: NodeId(0),
             commit_index: 0,
         };
-        let body = Body::Decided { slot: Slot(slot), proposal: proposal(1, 1, 0) };
+        let body = Body::Entries { first: Slot(slot), proposals: alloc::vec![proposal(1, 1, 0)] };
         r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
         assert_eq!(r.metrics().slots_decided, learned, "slot {slot}");
     }
@@ -255,16 +255,7 @@ fn decisions_are_applied_before_their_local_record_is_durable() {
     // Ten decisions not originated by the leader (node 0) rotate it. They are applied at
     // once (a majority already holds each durably), and core state covers them.
     for slot in 0..10 {
-        let env = Envelope {
-            cluster_id: [3; 16],
-            config_epoch: 0,
-            from: NodeId(1),
-            to: NodeId(0),
-            commit_index: 0,
-        };
-        let body = Body::Decided { slot: Slot(slot), proposal: proposal(1, 1, slot) };
-        r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
-        r.poll_actions(&mut out);
+        out.extend(announce(&mut r, Timestamp(1), 1, Slot(slot), proposal(1, 1, slot)));
     }
     assert_eq!(r.emitted_index(), 10);
     assert_eq!(out.iter().filter(|a| matches!(a, Action::Commit { .. })).count(), 10);
@@ -378,8 +369,7 @@ fn catch_up_replies_wait_for_durability_and_are_sent_even_when_empty() {
     out.clear();
     // Slot 0 is decided but its record is not durable yet: a reply reporting it waits for
     // that write.
-    r.handle(Timestamp(1), msg(Body::Decided { slot: Slot(0), proposal: proposal(1, 1, 0) })).unwrap();
-    r.poll_actions(&mut out);
+    out.extend(announce(&mut r, Timestamp(1), 1, Slot(0), proposal(1, 1, 0)));
     let persist = out.iter().find_map(|a| match a {
         Action::Persist { id, .. } => Some(*id),
         _ => None,
@@ -764,7 +754,7 @@ fn a_snapshot_over_a_decided_but_unapplied_local_batch_releases_it() {
         r.entries.batches().values().map(|b| (b.key, b.value.clone(), b.slot)).next().expect("a local batch");
     assert_eq!(slot, Some(Slot(1)));
     let decided = Proposal { priority: 1, key, value };
-    r.handle(Timestamp(1), from_peer(Body::Decided { slot: Slot(1), proposal: decided })).unwrap();
+    r.handle(Timestamp(1), from_peer(Body::decided(Slot(1), decided))).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.emitted, 0, "slot 0 is still unknown");
     // Another local batch in flight in slot 2, the first one the snapshot leaves open.
@@ -813,11 +803,8 @@ fn a_follower_hands_a_hedged_batch_that_lost_its_slot_back_to_the_leader() {
     let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the hedged batch has a slot");
     out.clear();
     // The leader's value takes the slot.
-    let env =
-        Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(0), to: NodeId(1), commit_index: 0 };
-    let decided = Message { env, body: Body::Decided { slot, proposal: proposal(1, 0, 0) } }.encode();
-    r.handle(r.now, Input::Message(decided)).unwrap();
-    r.poll_actions(&mut out);
+    let now = r.now;
+    out.extend(announce(&mut r, now, 0, slot, proposal(1, 0, 0)));
     assert!(r.entries.batches().is_empty(), "the follower does not compete with the leader again");
     assert_eq!(forwards(&out), 1, "the entry goes back to the leader");
     assert!(r.entries.forwarded().contains_key(&id), "and is hedged again if the leader stays silent");
@@ -847,13 +834,34 @@ fn a_hedged_entry_does_not_stretch_the_hedge_delay() {
         .expect("a hedged batch");
     let env =
         Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(2), to: NodeId(1), commit_index: 0 };
-    let decided =
-        Message { env, body: Body::Decided { slot, proposal: Proposal { priority: 1, key, value } } };
+    let decided = Message { env, body: Body::decided(slot, Proposal { priority: 1, key, value }) };
     r.handle(Timestamp(r.now.0 + 500 * MS), Input::Message(decided.encode())).unwrap();
     r.poll_actions(&mut out);
     assert!(out.iter().any(|a| matches!(a, Action::Committed { id: c, .. } if *c == id)), "{out:?}");
     // Its latency includes the hedge delay itself; learning from it would feed back.
     assert_eq!(r.hedge_delay(), delta);
+}
+
+/// Peer `from` announces `slot` decided with `p`. A receiver that does not hold the value
+/// asks `from` for the slot; the peer answers with it, as it would. Returns the actions of
+/// both, without that request.
+pub(super) fn announce(r: &mut Replica, at: Timestamp, from: u32, slot: Slot, p: Proposal) -> Vec<Action> {
+    let me = r.me.0;
+    r.handle(at, from_peer(from, me, Body::decided(slot, p.clone()))).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    let asks = |a: &Action| match a {
+        Action::Send(o) if o.to == NodeId(from) => {
+            Message::decode(&o.bytes, &r_wire()).is_ok_and(|m| m.body == Body::CatchUp { from: slot })
+        }
+        _ => false,
+    };
+    if let Some(i) = out.iter().position(asks) {
+        out.remove(i);
+        r.handle(at, from_peer(from, me, Body::Entries { first: slot, proposals: alloc::vec![p] })).unwrap();
+        r.poll_actions(&mut out);
+    }
+    out
 }
 
 pub(super) fn from_peer(from: u32, to: u32, body: Body) -> Input {
@@ -942,11 +950,7 @@ fn the_mark_survives_register_removal_compaction_and_restart() {
         )
         .unwrap();
         persist_all(&mut r, &mut records);
-        r.handle(
-            Timestamp(1),
-            from_peer(1, 0, Body::Decided { slot: Slot(slot), proposal: proposal(1, 1, slot) }),
-        )
-        .unwrap();
+        r.handle(Timestamp(1), from_peer(1, 0, Body::decided(Slot(slot), proposal(1, 1, slot)))).unwrap();
         persist_all(&mut r, &mut records);
     }
     assert!(r.registers.is_empty(), "registers go once their decisions are durable");
@@ -1015,8 +1019,7 @@ fn an_answer_to_a_previous_incarnations_read_does_not_count() {
     // Restarted, with slot 0 decided since: a fresh read needs a majority's answers.
     let mut r = Replica::new(cfg(), records.clone(), Timestamp(2)).unwrap();
     persist_all(&mut r, &mut Vec::new());
-    r.handle(Timestamp(2), from_peer(1, 0, Body::Decided { slot: Slot(0), proposal: proposal(1, 1, 0) }))
-        .unwrap();
+    r.handle(Timestamp(2), from_peer(1, 0, Body::decided(Slot(0), proposal(1, 1, 0)))).unwrap();
     persist_all(&mut r, &mut Vec::new());
     let read = r.read_barrier(Timestamp(3)).unwrap();
     let new = read_round_sent(&mut r, 1);

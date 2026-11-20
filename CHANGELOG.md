@@ -5,6 +5,15 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa` (wire, breaking): `Decided` no longer carries the value, only the slot, the
+  priority and the value's key. The receiver takes the value from what it already holds
+  under that key (its register for the slot, its proposer there, or its own batch), and
+  otherwise asks the sender for the slot with `CatchUp`, again every
+  `retransmit_interval` (rotating through the slot's members) until it learns it. The
+  leader now sends each slot's value once per peer: with n replicas and a V-byte value,
+  its egress per slot drops from (n−1)(174 + 2V) to (n−1)(169 + V) bytes. The wire
+  version is 2: peers of older versions reject every message and must all be upgraded
+  together.
 - `examples/kv-tokio`: snapshots travel on their own connection to each peer, with a
   queue of one, so consensus messages no longer wait behind a whole snapshot. The bulk
   connection is paced: 32 KiB chunks, each followed by a pause as long as it took, so it

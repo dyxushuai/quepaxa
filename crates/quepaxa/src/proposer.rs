@@ -6,8 +6,9 @@
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use bytes::Bytes;
 
-use crate::proposal::{LEADER_PRIORITY, Proposal};
+use crate::proposal::{LEADER_PRIORITY, Proposal, ValueKey};
 use crate::rng::ChaCha20;
 use crate::types::{NodeId, Step};
 
@@ -81,6 +82,17 @@ impl SlotProposer {
     #[cfg(test)]
     pub fn working(&self) -> &Proposal {
         &self.p
+    }
+
+    /// The value this proposer holds under `key`: its working proposal, a request it sent,
+    /// or one a recorder reported.
+    pub fn value_of(&self, key: ValueKey) -> Option<&Bytes> {
+        let replies = self.replies.values().flat_map(|r| [r.first.as_ref(), r.prev_agg.as_ref()]).flatten();
+        core::iter::once(&self.p)
+            .chain(self.sent.values())
+            .chain(replies)
+            .find(|p| p.key == key)
+            .map(|p| &p.value)
     }
 
     /// The request for recorder `j` at the current step.

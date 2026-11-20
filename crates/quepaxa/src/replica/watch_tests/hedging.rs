@@ -102,12 +102,7 @@ fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
     let id = r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     // A value of the leader's own is decided after the forward: it is busy, not stuck.
-    r.handle(
-        Timestamp(4 * MS),
-        from_peer(0, 1, Body::Decided { slot: Slot(0), proposal: proposal(1, 0, 0) }),
-    )
-    .unwrap();
-    r.poll_actions(&mut out);
+    out.extend(announce(&mut r, Timestamp(4 * MS), 0, Slot(0), proposal(1, 0, 0)));
     // Its disk works: the decision's record is written.
     let last = r.watch.disk.in_flight().next_back().expect("the decision is being written");
     r.handle(Timestamp(5 * MS), Input::Persisted(PersistId(last))).unwrap();
@@ -125,10 +120,9 @@ fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
 fn only_a_new_decision_the_target_announces_counts_as_its_progress() {
     let mut r = with_latency(Some(5));
     let mut out = Vec::new();
-    let decided = |slot| Body::Decided { slot: Slot(slot), proposal: proposal(1, 2, slot) };
+    let decided = |slot| Body::decided(Slot(slot), proposal(1, 2, slot));
     // A decision this replica already holds, repeated by the leader.
-    r.handle(Timestamp(MS), from_peer(2, 1, decided(0))).unwrap();
-    r.poll_actions(&mut out);
+    announce(&mut r, Timestamp(MS), 2, Slot(0), proposal(1, 2, 0));
     r.handle(Timestamp(2 * MS), from_peer(0, 1, decided(0))).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.watch.progressed, Timestamp(0), "a repeat");

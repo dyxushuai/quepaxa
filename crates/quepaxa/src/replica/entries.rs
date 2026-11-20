@@ -273,6 +273,11 @@ impl Entries {
         self.batches.get(&seq).map(|b| b.key)
     }
 
+    /// The value of the local batch proposed under `key`.
+    pub(super) fn batch_value(&self, key: ValueKey) -> Option<&Bytes> {
+        self.batches.get(&key.seq).filter(|b| b.key == key).map(|b| &b.value)
+    }
+
     #[cfg(feature = "model")]
     pub(super) fn batch_count(&self) -> usize {
         self.batches.len()

@@ -1,7 +1,7 @@
 //! Proposer side: reply counters, the leader's forward cap, split forwards, and a lost
 //! slot's entries.
 
-use super::tests::{from_peer, proposal, replica_as};
+use super::tests::{announce, from_peer, proposal, replica_as};
 use super::watch_tests::forwards_to;
 use super::*;
 use crate::codec::reply_proposal;
@@ -102,12 +102,12 @@ fn a_leader_decision_at_the_instant_a_batch_starts_is_not_progress_since() {
     r.handle(Timestamp(1), from_peer(0, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
     r.poll_actions(&mut out);
     let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the entry is proposed here");
-    let own = Body::Decided { slot: Slot(slot.0 + 1), proposal: proposal(1, 0, 1) };
+    let own = Body::decided(Slot(slot.0 + 1), proposal(1, 0, 1));
     r.handle(Timestamp(1), from_peer(0, 1, own)).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.watch.progressed, Timestamp(1));
     out.clear();
-    r.handle(Timestamp(3), from_peer(0, 1, Body::Decided { slot, proposal: proposal(1, 0, 0) })).unwrap();
+    r.handle(Timestamp(3), from_peer(0, 1, Body::decided(slot, proposal(1, 0, 0)))).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 0, "not handed back to the leader");
     assert!(
@@ -139,7 +139,7 @@ fn aside_with_slots_in_flight() -> (Replica, ProposalId, Timestamp) {
     r.check_entries().unwrap();
     let slots: Vec<_> = r.entries.batches().values().filter_map(|b| b.slot).collect();
     assert_eq!(slots, [Slot(0), Slot(1)], "each in a slot of its own");
-    let elsewhere = Body::Decided { slot: Slot(9), proposal: proposal(1, 1, 9) };
+    let elsewhere = Body::decided(Slot(9), proposal(1, 1, 9));
     r.handle(Timestamp(10 * MS), from_peer(1, 0, elsewhere)).unwrap();
     r.poll_actions(&mut out);
     let aside = Timestamp(MS + 80 * MS);
@@ -154,10 +154,7 @@ fn aside_with_slots_in_flight() -> (Replica, ProposalId, Timestamp) {
 
 /// Replica 1 decides `slot` with a value of its own.
 fn lose(r: &mut Replica, slot: u64, at: Timestamp) {
-    let mut out = Vec::new();
-    let decided = Body::Decided { slot: Slot(slot), proposal: proposal(1, 1, slot) };
-    r.handle(at, from_peer(1, 0, decided)).unwrap();
-    r.poll_actions(&mut out);
+    announce(r, at, 1, Slot(slot), proposal(1, 1, slot));
     r.check_entries().unwrap();
 }
 
@@ -180,8 +177,7 @@ fn a_stepped_aside_leader_losing_its_slots_proposes_nothing_and_hands_its_own_on
     assert!(r.proposers.keys().all(|s| *s == Slot(1)), "nothing proposed here while stepped aside");
     let mut out = Vec::new();
     let at = aside.after(5 * MS);
-    r.handle(at, from_peer(1, 0, Body::Decided { slot: Slot(1), proposal: proposal(1, 1, 1) })).unwrap();
-    r.poll_actions(&mut out);
+    out.extend(announce(&mut r, at, 1, Slot(1), proposal(1, 1, 1)));
     r.check_entries().unwrap();
     assert!(r.proposers.is_empty(), "nothing proposed here while stepped aside");
     assert_eq!(forwards_to(&out, 1), 1, "its own entry handed on once more");
