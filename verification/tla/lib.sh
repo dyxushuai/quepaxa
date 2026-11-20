@@ -20,14 +20,15 @@ tlc() {
   # so back-to-back runs sharing one collided and the second failed to start.
   local meta
   meta=$(mktemp -d)
-  local args=(-cp tla2tools.jar tlc2.TLC "${@:4}" -workers auto -deadlock -metadir "$meta" "$3.tla")
+  local workers=${TLA_WORKERS:-auto}
+  local args=(-cp tla2tools.jar tlc2.TLC "${@:4}" -workers "$workers" -deadlock -metadir "$meta" "$3.tla")
   cp "$jar" "$1/tla2tools.jar"
   local status
   if command -v java >/dev/null; then
     (cd "$1" && timeout "$2" java -XX:+UseParallelGC "${args[@]}")
     status=$?
   else
-    args=(-cp tla2tools.jar tlc2.TLC "${@:4}" -workers auto -deadlock -metadir /tmp/tlc "$3.tla")
+    args=(-cp tla2tools.jar tlc2.TLC "${@:4}" -workers "$workers" -deadlock -metadir /tmp/tlc "$3.tla")
     # The time limit runs inside the container: killing the client would leave it running.
     docker run --rm -v "$1:/spec" -w /spec eclipse-temurin:21.0.4_7-jre timeout "$2" java "${args[@]}"
     status=$?
