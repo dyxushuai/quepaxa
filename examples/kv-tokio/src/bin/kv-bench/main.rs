@@ -3,11 +3,14 @@
 //! default, random keys from a 52-letter alphabet, Poisson arrivals.
 //!
 //! ```text
-//! kv-bench --targets 127.0.0.1:7200,127.0.0.1:7201 --rate 20000 --secs 10 --conns 16 [--gets 0.5]
+//! kv-bench --targets 127.0.0.1:7200,127.0.0.1:7201 --rate 20000 --secs 10 --conns 16 [--gets 0.5] [--size 17]
 //! kv-bench --protocol etcd --targets 127.0.0.1:2379 --rate 5000 --secs 60 \
 //!          [--timeline 100] [--fault-at 20] [--samples out.csv] [--start-at UNIX_MS] [--seed 1] \
 //!          [--rate-at 30:0,60:5000]
 //! ```
+//!
+//! `--size BYTES` (line protocol only) sets the command size in the same terms, 1 + 8 + the
+//! value, so a PUT's value is `BYTES - 9` long: 8 random letters padded with `x`.
 //!
 //! Prints achieved throughput and latency percentiles. Results are measurements of one
 //! machine and configuration, not production claims.
@@ -59,9 +62,15 @@ fn word(rng: &mut SplitMix) -> String {
     (0..8).map(|_| LETTERS[(rng.next() % 52) as usize] as char).collect()
 }
 
-fn command(rng: &mut SplitMix, gets: f64) -> String {
+fn command(rng: &mut SplitMix, gets: f64, size: usize) -> String {
     let key = word(rng);
-    if rng.unit() < gets { format!("GET {key}\n") } else { format!("PUT {key} {}\n", word(rng)) }
+    if rng.unit() < gets {
+        return format!("GET {key}\n");
+    }
+    let mut cmd = format!("PUT {key} {}", word(rng));
+    cmd.extend(std::iter::repeat_n('x', size - 17));
+    cmd.push('\n');
+    cmd
 }
 
 /// How long a connect, the final `STATS`, or the wait for in-flight replies may take.
@@ -82,6 +91,7 @@ async fn connection(
     rate: f64,
     until: Instant,
     gets: f64,
+    size: usize,
     seed: u64,
     stats: Arc<Mutex<Stats>>,
 ) {
@@ -122,7 +132,7 @@ async fn connection(
         }
         sent.lock().unwrap().push_back(Instant::now());
         // A server that stops reading must not hold the run past its end.
-        let cmd = command(&mut rng, gets);
+        let cmd = command(&mut rng, gets, size);
         let write = w.write_all(cmd.as_bytes());
         if !matches!(tokio::time::timeout_at((until + GRACE).into(), write).await, Ok(Ok(()))) {
             write_failed = true;
@@ -215,7 +225,7 @@ async fn main() {
     let (mut rate, mut secs, mut conns, mut gets) = (1000.0, 10.0, 8usize, 0.5);
     let (mut protocol, mut samples_path, mut timeline_ms, mut fault_at, mut start_at) =
         (String::from("lines"), None, None, None, None);
-    let mut seed = 1;
+    let (mut seed, mut size) = (1, 17);
     let mut rate_at = Vec::new();
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -237,16 +247,19 @@ async fn main() {
                 start_at = Some(std::time::UNIX_EPOCH + Duration::from_millis(ms));
             }
             "--seed" => seed = v.parse().expect("--seed: integer"),
+            "--size" => size = v.parse().expect("--size: command bytes"),
             "--rate-at" => rate_at.extend(parse_rate_at(&v).unwrap_or_else(|e| panic!("--rate-at: {e}"))),
             other => panic!("unknown flag {other}"),
         }
     }
     assert!(!targets.is_empty(), "--targets is required");
+    assert!(size >= 17, "--size: at least 17 bytes (an 8-byte value)");
     match protocol.as_str() {
         "lines" => {
             assert!(start_at.is_none() && rate_at.is_empty(), "--start-at and --rate-at need --protocol etcd")
         }
         "etcd" => {
+            assert_eq!(size, 17, "--size needs --protocol lines");
             let load = etcd::Load { targets, rate, rate_at, secs, conns, gets, start_at, seed };
             let (samples, end_us) = etcd::run(&load).await;
             report(&samples, end_us, rate, secs, timeline_ms, fault_at, samples_path.as_deref());
@@ -260,7 +273,15 @@ async fn main() {
     let tasks: Vec<_> = (0..conns)
         .map(|c| {
             let addr = targets[c % targets.len()];
-            tokio::spawn(connection(addr, rate / conns as f64, until, gets, seed + c as u64, stats.clone()))
+            tokio::spawn(connection(
+                addr,
+                rate / conns as f64,
+                until,
+                gets,
+                size,
+                seed + c as u64,
+                stats.clone(),
+            ))
         })
         .collect();
     for t in tasks {

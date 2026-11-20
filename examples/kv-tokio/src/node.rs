@@ -3,6 +3,7 @@
 //! (group commit); their gated messages leave only after it. Commits, and everything that
 //! reads or answers from the KV state, go in order to the apply thread (`apply.rs`).
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
@@ -59,11 +60,13 @@ impl PeerFrame {
 pub struct PeerLink {
     msgs: Sender<Vec<u8>>,
     bulk: Sender<Vec<u8>>,
+    /// Bytes queued onto this link, 4-byte length prefixes included; dropped frames are not.
+    sent: Cell<u64>,
 }
 
 impl PeerLink {
     pub fn new(msgs: Sender<Vec<u8>>, bulk: Sender<Vec<u8>>) -> Self {
-        Self { msgs, bulk }
+        Self { msgs, bulk, sent: Cell::new(0) }
     }
 
     /// Queues `frame`, or drops it if its queue is full (the peer is unreachable or slow):
@@ -71,7 +74,11 @@ impl PeerLink {
     /// again.
     pub fn send(&self, frame: PeerFrame) {
         let queue = if matches!(frame, PeerFrame::Snapshot(_)) { &self.bulk } else { &self.msgs };
-        let _ = queue.try_send(frame.encode());
+        let frame = frame.encode();
+        let len = 4 + frame.len() as u64;
+        if queue.try_send(frame).is_ok() {
+            self.sent.set(self.sent.get() + len);
+        }
     }
 }
 
@@ -519,7 +526,15 @@ impl Node {
             Cmd::Read { range, linearizable: false } => self.to_apply.push(Job::Read { range, reply }),
             Cmd::Stats => {
                 let order: Vec<String> = self.replica.members().iter().map(|m| m.id.0.to_string()).collect();
-                let stats = format!("STATS {:?} LEADERS {}", self.replica.metrics(), order.join(","));
+                let mut egress: Vec<_> = self.peers.iter().map(|(id, p)| (*id, p.sent.get())).collect();
+                egress.sort_unstable();
+                let egress: Vec<String> = egress.iter().map(|(id, b)| format!("{id}={b}")).collect();
+                let stats = format!(
+                    "STATS {:?} EGRESS {} LEADERS {}",
+                    self.replica.metrics(),
+                    egress.join(","),
+                    order.join(",")
+                );
                 let _ = reply.send(Reply::Text(stats));
             }
             Cmd::Reconfigure(members, leaders) => {

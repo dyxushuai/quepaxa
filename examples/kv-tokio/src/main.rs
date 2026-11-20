@@ -11,7 +11,8 @@
 //! `hedge_max`; raise them above the longest round trip and commit path on a WAN.
 //! `--placement on` lets the leader move to the replica where writes commit fastest (set it
 //! on every replica); `--placement-periods` sets its sustained period and hold in ms.
-//! `STATS` ends with `LEADERS <ids>`, the leader order in force.
+//! `STATS` ends with `EGRESS <id>=<bytes>,..` (bytes queued to each peer link, framing
+//! included) and `LEADERS <ids>`, the leader order in force.
 //!
 //! `--members` are the configured members; `--peers` are replicas that may join later (a
 //! joining replica runs with the same `--members` and finds its own address in `--peers`).
