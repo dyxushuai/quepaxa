@@ -228,7 +228,8 @@ slot value twice to each of the n−1 others: once in `RecordRequest` (89 + V by
 in `Decided` (85 + V bytes), so (n−1)(174 + 2V) bytes per slot, where V is the slot value
 (4 bytes plus 25 + payload per entry). `replica::egress_tests::leader_egress_bytes_per_slot`
 asserts that exactly, for n = 3 and 5 with 17 B and 64 KiB payloads. For n = 3 and one
-64 KiB entry it is 262,608 bytes. Later phases change that test.
+64 KiB entry it is 262,608 bytes. Later phases change that test: Phase 1 (`Decided`
+names the value by key, 80 bytes) makes it (n−1)(169 + V), 131,468 bytes for that case.
 
 The same layout as #155: the 16 vCPU VM above, three replicas pinned to CPUs 0-1, 2-3 and
 4-5, kv-bench on 8-15, data on tmpfs, peers on 37100-37102 and clients on 37200-37202.

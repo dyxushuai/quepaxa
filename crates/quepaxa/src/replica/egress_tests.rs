@@ -1,4 +1,4 @@
-//! Bytes the leader sends per slot, by message kind: the baseline issue #172 moves.
+//! Bytes the leader sends per slot, by message kind, as issue #172 moves them.
 
 use alloc::collections::{BTreeMap, VecDeque};
 
@@ -80,13 +80,15 @@ impl Net {
     }
 }
 
-/// Today's leader egress per slot carrying a slot value of `v` bytes: each of the n−1 others
-/// gets one `RecordRequest` (44 envelope, 8 slot, 4 step, 28 head, 5 value tag and length, then
-/// v) and one `Decided` (44, 8, 28, 5, then v), so (n−1)(174 + 2v). The 44-byte
-/// `ForwardAck` to the origin is rate-limited (`ack_every`), so it is not per slot: with time
-/// standing still only the first slot sends one, and the last slot is the one measured.
+/// Leader egress per slot carrying a slot value of `v` bytes: each of the n−1 others gets one
+/// `RecordRequest` (44 envelope, 8 slot, 4 step, 28 head, 5 value tag and length, then v) and
+/// one `Decided` naming the value by key (44, 8, 28), so (n−1)(169 + v). Before `Decided`
+/// dropped the value (#172 Phase 1) it also carried a tag, a length and v: (n−1)(174 + 2v).
+/// The 44-byte `ForwardAck` to the origin is rate-limited (`ack_every`), so it is not per
+/// slot: with time standing still only the first slot sends one, and the last slot is the one
+/// measured.
 fn expected(n: usize, v: usize) -> BTreeMap<&'static str, (usize, usize)> {
-    BTreeMap::from([("Decided", ((n - 1) * (85 + v), n - 1)), ("RecordRequest", ((n - 1) * (89 + v), n - 1))])
+    BTreeMap::from([("Decided", ((n - 1) * 80, n - 1)), ("RecordRequest", ((n - 1) * (89 + v), n - 1))])
 }
 
 #[test]
@@ -108,7 +110,7 @@ fn leader_egress_bytes_per_slot() {
             let v = 29 + payload;
             assert_eq!(per_slot, expected(n, v), "n={n} payload={payload}");
             let total: usize = per_slot.values().map(|(b, _)| b).sum();
-            assert_eq!(total, (n - 1) * (174 + 2 * v), "n={n} payload={payload}");
+            assert_eq!(total, (n - 1) * (169 + v), "n={n} payload={payload}");
         }
     }
 }
