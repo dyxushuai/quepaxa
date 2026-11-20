@@ -196,9 +196,12 @@ pub(super) struct Reservation {
 }
 
 impl Reservation {
-    /// The largest reservation in the recovered records, if any.
-    pub(super) fn recovered(through: Option<u64>) -> Self {
-        Self { floor: through.map_or(0, |r| r + 1), through: None, durable: None }
+    /// The largest reservation in the recovered records, if any. `None` for one through
+    /// `u64::MAX`: no slot lies past it, and the replica never writes it (it reserves
+    /// `slot + 4 · window` with `slot` at most `MAX_SLOT`), so its record is corrupt.
+    pub(super) fn recovered(through: Option<u64>) -> Option<Self> {
+        let floor = through.map_or(Some(0), |r| r.checked_add(1))?;
+        Some(Self { floor, through: None, durable: None })
     }
 
     /// Whether `slot` is past every reservation recovered.

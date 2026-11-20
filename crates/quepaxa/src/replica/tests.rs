@@ -182,6 +182,17 @@ fn restart_rejects_a_decision_beyond_the_last_valid_slot() {
 }
 
 #[test]
+fn restart_rejects_a_reservation_through_the_last_slot() {
+    let cfg = || Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    let reserved = |through| Record::Reservation { through: Slot(through) }.encode();
+    assert!(Replica::new(cfg(), [reserved(u64::MAX - 1)], Timestamp(0)).is_ok());
+    assert_eq!(
+        Replica::new(cfg(), [reserved(40), reserved(u64::MAX), reserved(41)], Timestamp(0)).err(),
+        Some(Error::CorruptRecord { index: 1 })
+    );
+}
+
+#[test]
 fn snapshots_may_cover_slots_up_to_the_last_valid_one() {
     let members = [NodeId(0), NodeId(1), NodeId(2)];
     let state = |next| {
