@@ -221,6 +221,60 @@ this shows only that WAN latency holds:
 
 Raw data and scripts are kept outside the repo.
 
+### Leader egress with large commands (#172, before batch IDs)
+
+The baseline that issue #172's phases are measured against. Today the leader sends every
+slot value twice to each of the n−1 others: once in `RecordRequest` (89 + V bytes) and once
+in `Decided` (85 + V bytes), so (n−1)(174 + 2V) bytes per slot, where V is the slot value
+(4 bytes plus 25 + payload per entry). `replica::egress_tests::leader_egress_bytes_per_slot`
+asserts that exactly, for n = 3 and 5 with 17 B and 64 KiB payloads. For n = 3 and one
+64 KiB entry it is 262,608 bytes. Later phases change that test.
+
+The same layout as #155: the 16 vCPU VM above, three replicas pinned to CPUs 0-1, 2-3 and
+4-5, kv-bench on 8-15, data on tmpfs, peers on 37100-37102 and clients on 37200-37202.
+`run-local.sh` options: `KV_SIZE` (17 B, 4 KiB, 64 KiB commands, `kv-bench --size`),
+`KV_GETS=0` (all PUTs, so every command takes a slot), and with `KV_EGRESS=1gbit`, each
+replica's egress capped at 1 Gbit/s. The cap works like this: each replica runs in its own
+cgroup scope, nft marks its packets and an HTB class per mark on `lo` limits them. That
+needs root (`tc`, `nft`). Clients write to all three replicas, so two thirds of the
+commands reach the leader as follower forwards.
+
+Each point uses a fresh cluster and 10 s of load. Capacity is the highest offered rate that
+was sustained: no unanswered, failed or missed requests, throughput at least 97% of
+offered, and p99 at most 100 ms. The ramp raises the rate ×1.5 per step from 50k/s, 4k/s
+or 250/s, then tries the geometric midpoint once. There are three runs per point, medians
+shown, run to run range in brackets. The overload point offers 2× capacity once per run.
+Fixed rates are 10k/s, 2k/s and 200/s. Leader egress per slot is the leader's `STATS`
+`EGRESS` bytes (framing included) over its `slots_decided`. The whole matrix ran under
+`flock target/ops/bench.lock`, starting at a 1-minute load of 2.2. Measured 2026-11-20.
+
+| Egress cap | Command | Capacity | Leader egress per slot | At 2× capacity: throughput, unanswered | Fixed rate p50 / p99 |
+|---|---|---|---|---|---|
+| none | 17 B | 206,675/s (168,750-253,125) | 2,653 B | 413,409/s, 0 | 0.25 / 1.41 ms |
+| none | 4 KiB | 24,801/s (all three) | 43,628 B | 49,481/s, 0 | 0.32 / 1.76 ms |
+| none | 64 KiB | 2,322/s (1,032-3,483) | 270,716 B | 4,459/s, 0 | 2.36 / 4.24 ms |
+| 1 Gbit/s | 17 B | 206,675/s (137,783-206,675) | 912 B | 413,409/s, 0 | 0.27 / 1.12 ms |
+| 1 Gbit/s | 4 KiB | 7,348/s (all three) | 31,855 B | 3,097/s, 42,125 | 0.45 / 1.40 ms |
+| 1 Gbit/s | 64 KiB | 375/s (all three) | 263,321 B | 134/s, 6,197 | 5.12 / 12.35 ms |
+
+- **Go for Phase 2: under the cap, leader egress is the limit for large commands.** Capacity
+  falls 3.4× at 4 KiB and 6.2× at 64 KiB against no cap, while 17 B does not move. At
+  capacity the leader sends 122.6 MB/s at 4 KiB (98% of 1 Gbit/s) and 98.5 MB/s at 64 KiB
+  (79%; the next ramp step would need about 148 MB/s). The 64 KiB slots carry one command
+  each, at 263 KB per slot, close to the formula's 262.6 KB.
+- **17 B is bounded by the p99 rule, not by throughput.** At 2× capacity every request still
+  completes, so the ramp stops where p99 passes 100 ms.
+- **Overload collapses under the cap.** At 2× capacity, throughput drops to 3.1k/s at 4 KiB
+  and 134/s at 64 KiB. Followers hedge (44,863 and 6,804 times) and the leader retransmits.
+  Without the cap, 4 KiB and 64 KiB hold at 2×. This is tracked in #231.
+- Uncapped 64 KiB capacity varies a lot between runs (1,032-3,483/s). With no cap the leader
+  sent 413 MB/s at 4 KiB and 609 MB/s at 64 KiB, so CPU and memory copies limit there, not
+  the link.
+- Per slot, egress without the cap is larger at 17 B and 4 KiB than with it because slots
+  are batched differently, so compare egress per slot only at one size and cap.
+
+Raw data and scripts are kept outside the repo.
+
 ### Simulated WAN
 
 `run-local.sh 5000 8 50` adds a 50 ms one-way `netem` delay to all loopback traffic,
