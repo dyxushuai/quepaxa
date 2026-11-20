@@ -1,13 +1,12 @@
 diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
-index df321dc..3730dc4 100644
 --- a/crates/quepaxa/src/replica/mod.rs
 +++ b/crates/quepaxa/src/replica/mod.rs
-@@ -272,7 +272,7 @@ impl Replica {
+@@ -248,7 +248,7 @@ impl Replica {
              commit_latency: None,
              next_proposal: 0,
              next_alloc: 0,
--            h_floor: reservation.map_or(0, |r| r + 1),
-+            h_floor: 0,
-             reserved_through: None,
-             reserved_durable: None,
+-            reservation: recovery::Reservation::recovered(reservation),
++            reservation: recovery::Reservation::recovered(None),
              floor,
+             snapshot_state: snapshot.map(|(_, b)| b),
+             snapshot_asked: None,

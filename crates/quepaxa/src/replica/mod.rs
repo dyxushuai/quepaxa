@@ -2,7 +2,8 @@
 //! durability gate that keeps replies behind the writes they depend on (ADR 0002).
 //!
 //! `gate` holds the durability gate, `log` the recorder and decided-log side, `messages`
-//! sending, receiving and catching up, `proposing` the proposer side (batching,
+//! sending and receiving, `recovery` the way from a start to normal operation (the phase,
+//! catching up, the leader's reservation), `proposing` the proposer side (batching,
 //! forwarding to the leader, hedging, stalled slots), `entries` where entries wait until
 //! they commit.
 
@@ -15,6 +16,7 @@ mod placement;
 mod proposing;
 mod ranking;
 mod reads;
+mod recovery;
 mod retire;
 mod snapshot;
 mod watch;
@@ -76,7 +78,8 @@ pub struct Replica {
     rng: ChaCha20,
     incarnation: u64,
     now: Timestamp,
-    fenced: bool,
+    /// `Recovering → Live`, or `Fenced` (`recovery.rs`).
+    phase: recovery::Phase,
     metrics: Metrics,
 
     gate: Gate<Effect>,
@@ -88,19 +91,10 @@ pub struct Replica {
     log: BTreeMap<Slot, Decision>,
     committed: u64,
     emitted: u64,
-    peer_committed: u64,
     /// Undecided slots someone else drives, with when they last made progress.
     seen: BTreeMap<Slot, Timestamp>,
-    /// Outstanding bulk catch-up request: peer and when it was sent.
-    catch_up: Option<(NodeId, Timestamp)>,
-    /// After a restart: when to ask every known replica where the log is again, until a
-    /// majority of the members has answered (one as far behind as this replica tells it
-    /// nothing).
-    startup_probe: Option<Timestamp>,
-    /// Who answered it so far.
-    probe_answers: alloc::collections::BTreeSet<NodeId>,
-    /// A peer that advertised `peer_committed`.
-    ahead_peer: Option<NodeId>,
+    /// How far peers are ahead, and the bulk request in flight (`recovery.rs`).
+    catch_up: recovery::CatchUp,
     /// Leader schedule as of the decided prefix (`committed`), used to drive slots.
     schedule: Schedule,
     /// The same schedule as of the emitted prefix (`emitted`), carried in `core_state`.
@@ -123,10 +117,8 @@ pub struct Replica {
     commit_latency: Option<u64>,
     next_proposal: u64,
     next_alloc: u64,
-    /// First slot this incarnation may use the leader priority in.
-    h_floor: u64,
-    reserved_through: Option<u64>,
-    reserved_durable: Option<u64>,
+    /// The slots this incarnation may lead at the top priority (`recovery.rs`).
+    reservation: recovery::Reservation,
 
     // Compaction.
     /// First slot not covered by a snapshot; nothing below it is kept.
@@ -236,7 +228,7 @@ impl Replica {
             cfg,
             incarnation: last_incarnation + 1,
             now,
-            fenced: false,
+            phase: recovery::Phase::start(last_incarnation > 0, now),
             metrics: Metrics::default(),
             gate: Gate::new(Record::Incarnation(last_incarnation + 1).encode()),
             actions: Vec::new(),
@@ -245,12 +237,8 @@ impl Replica {
             log,
             committed: floor,
             emitted: floor,
-            peer_committed: 0,
             seen: BTreeMap::new(),
-            catch_up: None,
-            startup_probe: None,
-            probe_answers: alloc::collections::BTreeSet::new(),
-            ahead_peer: None,
+            catch_up: recovery::CatchUp::default(),
             dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
             proposers: BTreeMap::new(),
             entries,
@@ -260,9 +248,7 @@ impl Replica {
             commit_latency: None,
             next_proposal: 0,
             next_alloc: 0,
-            h_floor: reservation.map_or(0, |r| r + 1),
-            reserved_through: None,
-            reserved_durable: None,
+            reservation: recovery::Reservation::recovered(reservation),
             floor,
             snapshot_state: snapshot.map(|(_, b)| b),
             snapshot_asked: None,
@@ -474,7 +460,7 @@ impl Replica {
 
     /// Queues a local entry; the caller pumps it.
     fn submit(&mut self, payload: Bytes, kind: Kind) -> Result<ProposalId, Error> {
-        if self.fenced {
+        if self.phase.fenced() {
             return Err(Error::Fenced);
         }
         if self.entries.own_len() + self.reads.len() >= self.cfg.max_outstanding_proposals as usize {
@@ -512,7 +498,7 @@ impl Replica {
     /// - [`Error::NotDrained`] if the previous call's actions were not taken.
     pub fn handle(&mut self, now: Timestamp, input: Input) -> Result<(), Error> {
         self.begin(now)?;
-        if self.fenced {
+        if self.phase.fenced() {
             return Ok(());
         }
         match input {
@@ -535,7 +521,7 @@ impl Replica {
     /// [`Error::NotDrained`] if the previous call's actions were not taken.
     pub fn handle_timeout(&mut self, now: Timestamp) -> Result<(), Error> {
         self.begin(now)?;
-        if self.fenced {
+        if self.phase.fenced() {
             return Ok(());
         }
         self.fire_timers();
@@ -547,7 +533,7 @@ impl Replica {
     /// When [`Replica::handle_timeout`] next needs to run; `None` if no timer is needed
     /// until the next call (and always after fencing). Re-read it after every call.
     pub fn next_deadline(&self) -> Option<Timestamp> {
-        if self.fenced { None } else { self.earliest_timer() }
+        if self.phase.fenced() { None } else { self.earliest_timer() }
     }
 
     /// Moves every pending action into `out` (appending), in the order to carry them out.
@@ -611,7 +597,7 @@ impl Replica {
 
     fn apply(&mut self, e: Effect) {
         match e {
-            Effect::ReservationDurable(t) => self.reserved_durable = self.reserved_durable.max(Some(t)),
+            Effect::ReservationDurable(t) => self.reservation.made_durable(t),
             // The recorder state is only garbage once the decision is durable here.
             Effect::DecidedDurable(slot) => {
                 self.registers.remove(&slot);
@@ -621,7 +607,7 @@ impl Replica {
     }
 
     fn fence(&mut self) {
-        self.fenced = true;
+        self.phase.fence();
         let moving = self.placement.policy.moving();
         if let Some(id) = moving {
             self.placement.policy.on_resolved(id);

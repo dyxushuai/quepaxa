@@ -17,7 +17,10 @@
 # keeps every own entry in the place its state names, loses none, counts what the replica
 # asks in O(1) correctly, routes everything pending when not proposing directly, and hands
 # back only entries not yet committed, and none of another member's from a batch handed on
-# when stepping aside. Uses
+# when stepping aside; recovery (recovery.rs, from crates/quepaxa/src/replica/recovery.rs)
+# never lets a restarted replica propose at the top priority in a slot it may have reserved
+# before the crash, leaves Recovering only once a majority answered, and stops catching up
+# only once caught up with its peers and its read mark. Uses
 # Verus, fetched (pinned, checksum verified) into target/verus-<digest>, and the Rust
 # toolchain that
 # release requires (installed with rustup if missing). Linux x86_64 only.
@@ -56,6 +59,7 @@ verus "$here/disk_health.rs"
 verus "$here/placement.rs"
 verus "$here/retirement.rs"
 verus "$here/entries.rs"
+verus "$here/recovery.rs"
 
 # Each bug: the file, a name, then a sed expression that plants it. The proof must fail on
 # every one.
@@ -105,6 +109,18 @@ bugs=(
   entries received-forgets-foreign       's/^            self\.foreign = self\.foreign \+ f;$//'
   entries lost-slot-ignores-handed       's/^        let handed = b\.handed;$/        let handed = false;/'
   entries step-aside-forgets-handed      's/^                self\.set_handed\(j\);$//'
+  recovery restart-leads-below-its-reservation 's/let leader = leads \&\& self\.res\.may_lead\(slot\);/let leader = leads;/'
+  recovery restart-ignores-the-reservation     's/let res = Reservation::recovered\(recovered\);/let res = Reservation::recovered(None);/'
+  recovery top-request-not-held                's/let gate = step == 4 \&\& top \&\& !h_ready \&\& !to_me;/let gate = false;/'
+  recovery reservation-durable-at-once         's/^                self\.waits\.push\(Wait::Durable\(through\)\);$/                self.res.made_durable(through);/'
+  recovery checkpoint-drops-the-reservation    's/None => if self\.floor > 0 \{ Some\(self\.floor - 1\) \} else \{ None \},/None => None,/'
+  recovery recovered-on-any-answer             's/if n > members\.len\(\) \/ 2 \{/if n > 0 {/'
+  recovery fence-undone-by-a-probe             '0,/if !\(self\.probe_at\(\)\.is_some\(\)\) \{/s//if false {/'
+  recovery probe-forgets-the-answers           's/Some\(at\) => \*self = Phase::Recovering \{ probe_at: at, answered \},/Some(at) => *self = Phase::Recovering { probe_at: at, answered: Vec::new() },/'
+  recovery read-catch-up-stops-below-the-mark  's/if committed < mark \{ Some\(peer\) \} else \{ None \}/if committed < mark \&\& mark - committed > 1 { Some(peer) } else { None }/'
+  recovery read-catch-up-asks-a-lower-mark     's/Some\(b\) => answers\[i\]\.1 < answers\[b\]\.1,/Some(b) => true,/'
+  recovery timer-ignores-the-read-mark         's/c\.retry\(committed, now, interval, read_from\)/c.retry(committed, now, interval, None)/'
+  recovery page-from-another-peer-moves-it     's/Some\(\(p, _\)\) => p == from,/Some((p, _)) => true,/'
 )
 mkdir -p "$work"
 status=0

@@ -128,7 +128,7 @@ impl Replica {
         // Something past our prefix is decided (or a peer is ahead): keep the next slot
         // driven so a quiet cluster cannot strand us behind.
         let ahead =
-            self.peer_committed > self.committed || self.log.range(Slot(self.committed)..).next().is_some();
+            self.catch_up.ahead_of(self.committed) || self.log.range(Slot(self.committed)..).next().is_some();
         if ahead {
             self.seen.entry(Slot(self.committed)).or_insert(self.now);
         }
