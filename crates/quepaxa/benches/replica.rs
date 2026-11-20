@@ -79,6 +79,18 @@ fn bench(c: &mut Criterion) {
         })
     });
 
+    // A 64 KiB command forwarded by a follower: the leader encodes it into n−1 requests and
+    // n−1 decisions, the large-command case of issue #172.
+    let big = Bytes::from(vec![0x42; 64 << 10]);
+    let mut three = [replica(0, 3), replica(1, 3), replica(2, 3)];
+    settle(&mut three, &mut q);
+    g.bench_function("three_members_follower_propose_to_commit_64k", |b| {
+        b.iter(|| {
+            three[1].propose(Timestamp(1), big.clone()).unwrap();
+            black_box(settle(&mut three, &mut q))
+        })
+    });
+
     // The leader keeps 1,000 of its own entries waiting: each iteration proposes one more and
     // delivers until as many have committed, so every call scans a full backlog.
     const BACKLOG: usize = 1_000;

@@ -660,6 +660,8 @@ impl Replica {
 #[cfg(test)]
 mod disk_tests;
 #[cfg(test)]
+mod egress_tests;
+#[cfg(test)]
 mod placement_tests;
 #[cfg(test)]
 mod proposing_tests;

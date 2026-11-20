@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The project follows
   at 1 ms latency, 22 at 25 ms); it now takes 11.3 s, with no suspicion or hedge. Each
   replica opens two connections to every peer; a snapshot is cut off on a link slower
   than about 16 KiB/s (32 KiB/s before).
+- `examples/kv-tokio`: `STATS` reports `EGRESS <id>=<bytes>,..` before `LEADERS`, the
+  bytes queued to each peer link. `kv-bench --size BYTES` sets the command size (default
+  17). `run-local.sh` takes the command size, a per-replica egress limit (`KV_EGRESS`,
+  needs root for tc and nft), ports, CPU pinning and prebuilt binaries from the
+  environment (#172).
 
 ## 0.7.0 — 2026-11-13
 
