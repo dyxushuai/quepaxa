@@ -145,6 +145,24 @@ fn unresolved_slots_share_one_catch_up_per_peer() {
     assert_eq!(catch_ups(&sent(&mut r)), [(NodeId(2), Slot(0))]);
 }
 
+/// Far ahead, a slot is not asked for at once (bulk catch-up is under way), but it is
+/// remembered: bulk catch-up stops a slot short of the peers, so the timer asks for it.
+#[test]
+fn a_decision_far_ahead_is_asked_for_on_the_timer() {
+    let mut r = replica_as(1);
+    let far = Slot(4 * r.window());
+    let p = with_value(proposal(1, 0, 9), b"far");
+    r.handle(Timestamp(1), from_peer(0, 1, Body::decided(far, p.clone()))).unwrap();
+    assert!(catch_ups(&sent(&mut r)).is_empty());
+    let due = Timestamp(1).after(r.cfg.retransmit_interval);
+    r.handle_timeout(due).unwrap();
+    assert!(catch_ups(&sent(&mut r)).contains(&(NodeId(2), far)));
+    r.handle(due, from_peer(2, 1, Body::Entries { first: far, proposals: alloc::vec![p] })).unwrap();
+    sent(&mut r);
+    assert_eq!(decided_value(&r, far.0).as_deref(), Some(&b"far"[..]));
+    assert!(r.unresolved.is_empty());
+}
+
 /// Leader egress per slot with n = 3: two `RecordRequest`s of 89 + V bytes and two `Decided`
 /// of 80, so (n − 1)(169 + V); the value used to travel in `Decided` too, (n − 1)(174 + 2V).
 #[test]

@@ -81,7 +81,9 @@ What the paper leaves open, the crate fixes as follows (the repository's
   proposer there, or its own batch. A receiver that holds none, having missed the
   requests, asks the sender for the slot with `CatchUp`, again every retransmit interval
   (through the slot's other members, in case the decider is gone) until it learns the
-  slot; one request per peer covers every slot it waits for. The leader so sends each
+  slot; one request per peer covers every slot it waits for. A slot far past its own
+  decided prefix it asks for only on the timer, as bulk catch-up usually brings it first.
+  The leader so sends each
   value once per peer per slot.
 - **Durability.** Recorder state is written before any reply that reports it leaves.
 - **Snapshots, catch-up, membership.** See the other chapters.

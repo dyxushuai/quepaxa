@@ -100,10 +100,14 @@ impl Replica {
             self.learn(slot, Proposal { priority, key, value }, false);
             return;
         }
-        // Far ahead, the bulk catch-up fetches it (the decider's commit index is ahead too).
-        let near = slot.0 <= MAX_SLOT && slot.0 < self.committed + 4 * self.window();
-        if near && !self.unresolved.contains_key(&slot) {
-            self.unresolved.insert(slot, (from, self.now));
+        if slot.0 > MAX_SLOT || self.unresolved.contains_key(&slot) {
+            return;
+        }
+        // Tracked even far ahead: bulk catch-up stops a slot short of the peers' commit
+        // index, and nothing else would ask for it. But only a near slot is asked for at
+        // once; far ones usually arrive in the bulk pages first, else on the timer.
+        self.unresolved.insert(slot, (from, self.now));
+        if slot.0 < self.committed + 4 * self.window() {
             self.send(from, Body::CatchUp { from: slot });
         }
     }
