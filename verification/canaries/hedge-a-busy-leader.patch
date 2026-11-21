@@ -1,11 +1,11 @@
 --- a/crates/quepaxa/src/replica/watch.rs
 +++ b/crates/quepaxa/src/replica/watch.rs
-@@ -282,7 +282,7 @@
-     /// entry held on it had no timer until something else woke this replica.
-     pub(super) fn late_at(&self, at: Timestamp) -> Option<Timestamp> {
+@@ -267,7 +267,7 @@
          let d = self.hedge_delay();
--        let wait = if self.watch.progressed > at { self.busy_delay() } else { d };
-+        let wait = if self.watch.progressed > at { self.busy_delay().min(d) } else { d };
-         let late = at.max(self.watch.disk.resumed()).after(wait);
-         let held = !self.watch.aside
-             && matches!(self.watch.disk.health(self.now, d), Health::SharedStall { since } if since <= late);
+         let (progressed, resumed) = (self.watch.progressed, self.watch.disk.resumed());
+         let busy = progressed > at;
+-        let from = if busy && acked { progressed } else { at };
++        let from = at;
+         let wait = if busy { self.busy_delay() } else { d };
+         let unbounded = from.max(resumed).after(wait);
+         let bound = at.max(resumed).after(self.cfg.hedge_max.saturating_mul(4));

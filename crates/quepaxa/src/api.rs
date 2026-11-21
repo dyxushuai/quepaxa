@@ -59,7 +59,7 @@ pub struct Config {
     /// nanoseconds: a floor, not a period. The first resend waits this or twice the
     /// smoothed round trip of first-step slots never resent, whichever is longer; each
     /// further resend of the same step waits twice as long as the one before, up to
-    /// `hedge_max`. The default (50 ms) suits a LAN; across regions set it above the round
+    /// `hedge_max` (or the floor, if that is longer). The default (50 ms) suits a LAN; across regions set it above the round
     /// trip to the farthest member of a majority, or the first requests are sent twice
     /// before a round trip has been measured. Catch-up, read and probe retries still
     /// repeat at this interval.
@@ -352,6 +352,11 @@ pub struct Metrics {
     pub forwarded: u64,
     /// Own entries proposed directly after the leader did not commit them in time.
     pub hedged: u64,
+    /// Of those, the ones hedged only because 4 · `hedge_max` had passed since the forward,
+    /// although the target kept deciding slots and had acknowledged the forward.
+    pub hedges_at_bound: u64,
+    /// Forwards sent again because the target had not acknowledged them.
+    pub forward_resends: u64,
     /// Times this replica stepped aside because a write waited too long on its disk.
     pub stepped_aside: u64,
     /// Gauge: decided slots held in memory (bounded by compaction).

@@ -4,11 +4,47 @@ use super::disk::Health;
 use super::tests::{announce, from_peer, proposal, r_wire, replica_as};
 use super::*;
 
+mod forwards;
 mod hedging;
 mod step_aside;
 mod suspicion;
 
 const MS: u64 = 1_000_000;
+
+/// The forwards `r` sent to `to` among `out`: their numbers and entries.
+fn forwards_sent(out: &[Action], to: u32) -> Vec<(u64, Vec<batch::Item>)> {
+    out.iter()
+        .filter_map(|a| match a {
+            Action::Send(o) if o.to == NodeId(to) => match Message::decode(&o.bytes, &r_wire()) {
+                Ok(Message { body: Body::Forward { seq, batch }, .. }) => {
+                    Some((seq, batch::decode(&batch).unwrap()))
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Leader 0 announces `slot` decided with a value of its own at `at`; the record is written.
+pub(super) fn leader_decides(r: &mut Replica, at: Timestamp, slot: u64) {
+    let mut out = announce(r, at, 0, Slot(slot), proposal(1, 0, slot));
+    let last = r.watch.disk.in_flight().next_back();
+    if let Some(last) = last {
+        r.handle(at, Input::Persisted(PersistId(last))).unwrap();
+        r.poll_actions(&mut out);
+    }
+}
+
+/// When `r` next hedges an entry or suspects its target (not when it sends a forward again).
+pub(super) fn hedge_deadline(r: &Replica) -> Option<Timestamp> {
+    r.entries.forwarded_since().filter_map(|(id, at)| r.hedge_at(id, at)).min()
+}
+
+/// The numbers of the forwards `r` sent to `to` among `out`.
+fn forward_seqs(out: &[Action], to: u32) -> Vec<u64> {
+    forwards_sent(out, to).into_iter().map(|(seq, _)| seq).collect()
+}
 
 /// Entries `r` handed to `leader` among `out`.
 pub(super) fn forwards_to(out: &[Action], leader: u32) -> usize {

@@ -82,10 +82,13 @@ impl SimConfig {
     /// How long a write proposed at a member of a connected majority may take to commit
     /// (R4), or `None` if links lose too much for a majority to count as connected.
     ///
-    /// A forward the network loses is retried only once the entry is late (`hedge_max` while
-    /// the leader makes progress) and the hedged slot is lost to the leader's (a few
-    /// retransmit intervals). Each loss costs one such round, and each round cuts the tail
-    /// about tenfold or more. At 5% loss the slowest write took 1.8 s over 100,000 hostile
+    /// A forward the network loses is sent again when the leader has not acknowledged it
+    /// within the resend floor (a retransmit interval here), backing off up to `hedge_max`;
+    /// an entry whose forwards are all lost is hedged 4δ (at most `hedge_max`) after the
+    /// first, and the hedged slot is lost to the leader's (a few retransmit intervals, each
+    /// lost record request doubling the wait). An acknowledged entry a busy leader keeps
+    /// waiting is hedged at most 4 · `hedge_max` after its forward. Each loss costs at most
+    /// one such round, and each round cuts the tail about tenfold or more. At 5% loss the slowest write took 1.8 s over 100,000 hostile
     /// seeds, and 2.6 s over 20,000 seeds without crashes and with rarer partitions (longer
     /// windows: 24 writes over 2 s, 3 over 2.4 s). Eight rounds (4 s there) leave three rounds
     /// of margin for the nightly seed count. At 25% loss, chains of losses outlast any bound

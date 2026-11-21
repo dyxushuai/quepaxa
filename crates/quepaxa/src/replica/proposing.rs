@@ -71,30 +71,32 @@ impl Replica {
         *avg = if sample < *avg { *avg - *avg / 8 + sample / 8 } else { sample };
     }
 
-    /// The wait before a step's requests are first sent again: `retransmit_interval`, or
-    /// twice the smoothed first-step round trip (`request_rtt`) if that is longer.
-    fn resend_floor(&self) -> u64 {
-        let floor = self.cfg.retransmit_interval;
-        self.request_rtt.map_or(floor, |rtt| rtt.saturating_mul(2).max(floor))
+    /// How long to wait for an answer before sending again, after `resent` earlier resends
+    /// (`None`: a first send). Each resend waits twice as long as the one before, from the
+    /// floor up to `hedge_max` (or the floor, if that is longer) (#231). The floor is
+    /// `retransmit_interval`, or twice the smoothed first-step round trip (`request_rtt`) if
+    /// that is longer. On a saturated link an unanswered message is queued, not lost: resent
+    /// at a fixed period shorter than the queue, every request went out again with its value,
+    /// the queue grew, decisions collapsed and the leader rotated. The floor follows the round
+    /// trip, so nothing is resent while its answer can still be on the way.
+    pub(super) fn resend_wait(&self, resent: Option<u32>) -> u64 {
+        let retransmit = self.cfg.retransmit_interval;
+        let floor = self.request_rtt.map_or(retransmit, |rtt| rtt.saturating_mul(2).max(retransmit));
+        let wait = resent.map_or(floor, |k| floor.saturating_mul(1 << (k.min(31) + 1)));
+        wait.min(self.cfg.hedge_max.max(floor))
     }
 
     /// Sends the current step's unanswered requests; `resend` skips the local recorder,
-    /// whose delivery is reliable.
-    ///
-    /// Each resend of a step waits twice as long as the one before, from the floor up to
-    /// `hedge_max` (#231). On a saturated link an unanswered request is queued, not lost:
-    /// resent at a fixed period shorter than the queue, every request went out again with
-    /// its value, the queue grew, decisions collapsed and the leader rotated. The floor
-    /// follows the round trip, so a request is not resent while its answer can still be on
-    /// the way. A new step starts from the floor again.
+    /// whose delivery is reliable. Resends back off (`resend_wait`); a new step starts from
+    /// the floor again.
     pub(super) fn send_requests(&mut self, slot: Slot, resend: bool) {
         let (me, now) = (self.me, self.now);
-        let floor = self.resend_floor();
-        let cap = self.cfg.hedge_max.max(floor);
         let h_ready = self.reservation.covers(slot);
         let Some(a) = self.proposers.get_mut(&slot) else { return };
-        let wait = if resend { floor.saturating_mul(1 << (a.prop.resent().min(31) + 1)) } else { floor };
-        a.resend_at = now.after(wait.min(cap));
+        let resent = resend.then(|| a.prop.resent());
+        let wait = self.resend_wait(resent);
+        let Some(a) = self.proposers.get_mut(&slot) else { return };
+        a.resend_at = now.after(wait);
         let step = a.prop.step();
         let reqs: Vec<(NodeId, Proposal)> =
             a.prop.requests().filter(|(j, _)| !(resend && *j == me)).map(|(j, p)| (j, p.clone())).collect();
@@ -124,11 +126,18 @@ impl Replica {
 
     /// A batch of entries a follower handed to this replica: as the leader, or as the deputy
     /// of a leader that follower suspects (`watch.rs`), which proposes them itself.
-    pub(super) fn on_forward(&mut self, from: NodeId, bytes: &bytes::Bytes) {
-        let Ok(entries) = batch::decode(bytes) else {
+    ///
+    /// Every forward taken is acknowledged by its number (`forwards.rs`). Entries already
+    /// committed are dropped: a forward sent again may carry some.
+    pub(super) fn on_forward(&mut self, from: NodeId, seq: u64, bytes: &bytes::Bytes) {
+        let Ok(mut entries) = batch::decode(bytes) else {
             self.metrics.messages_rejected += 1;
             return;
         };
+        entries.retain(|i| {
+            let (o, inc, id) = i.key();
+            !self.dedup.contains(o, inc, id)
+        });
         let cap =
             self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
         // Stepped aside, this replica hands them on (`watch.rs`); so it does for a follower
@@ -138,6 +147,7 @@ impl Replica {
             self.watch.committed.get(&from).is_some_and(|&c| self.schedule.leader(Slot(c)) == self.me);
         let to_pending = self.leads_now() || self.watch.aside || lagging;
         if self.entries.received(entries, to_pending, cap) {
+            self.watch.fwd.took(from, seq);
             self.ack_forward(from);
         }
     }
@@ -191,13 +201,11 @@ impl Replica {
         let mut chunk = batch::Builder::new(self.cfg.max_batch_bytes as usize);
         for e in entries {
             if !chunk.fits(&e) {
-                self.send(leader, Body::Forward { batch: batch::encode(&chunk.take()) });
-                self.metrics.forwarded += 1;
+                self.send_forward(leader, chunk.take());
             }
             chunk.push(e);
         }
-        self.send(leader, Body::Forward { batch: batch::encode(&chunk.take()) });
-        self.metrics.forwarded += 1;
+        self.send_forward(leader, chunk.take());
     }
 
     /// No longer the leader (an order change took effect): the entries of batches not yet in
@@ -276,7 +284,7 @@ impl Replica {
     pub(super) fn earliest_timer(&self) -> Option<Timestamp> {
         let resend = self.proposers.values().map(|a| a.resend_at);
         let stall = self.stalled().map(|(_, at)| at);
-        let hedge = self.entries.forwarded_since().filter_map(|(_, at)| self.hedge_at(at)).min();
+        let hedge = self.entries.forwarded_since().filter_map(|(id, at)| self.hedge_at(id, at)).min();
         // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
         let catch_up = self.catch_up.deadline(self.committed, self.now, self.cfg.retransmit_interval);
         resend
@@ -287,6 +295,7 @@ impl Replica {
             .chain(self.reads.resend_at())
             .chain(self.phase.probe_at())
             .chain(self.watch.ack_due.values().copied())
+            .chain(self.watch.fwd.due())
             .chain(self.aside_at().filter(|_| !self.watch.aside))
             .chain(self.placement.next_probe)
             .chain(self.earliest_unresolved())
@@ -313,6 +322,7 @@ impl Replica {
             self.metrics.retransmits += 1;
             self.send_requests(slot, true);
         }
+        self.resend_forwards();
         if self.entries.forwarded_since().any(|(_, at)| self.silent_at(at).is_some_and(|t| t <= now)) {
             self.suspect_target();
         }
@@ -323,10 +333,12 @@ impl Replica {
         let late: Vec<_> = self
             .entries
             .forwarded_since()
-            .filter(|(_, at)| self.late_at(*at).is_some_and(|t| t <= now))
-            .map(|(id, _)| id)
+            .filter_map(|(id, at)| self.lateness(id, at).filter(|(t, _)| *t <= now).map(|(_, b)| (id, b)))
             .collect();
-        self.metrics.hedged += self.entries.late(late, aside);
+        if !aside {
+            self.metrics.hedges_at_bound += late.iter().filter(|(_, bound)| *bound).count() as u64;
+        }
+        self.metrics.hedged += self.entries.late(late.into_iter().map(|(id, _)| id).collect(), aside);
         // Outside the membership, the answers' commit indexes may predate the slots the read
         // marks wait for, and the round's resend timer brings this back here until the read
         // is ready.

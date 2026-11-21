@@ -57,7 +57,16 @@ What the paper leaves open, the crate fixes as follows (the repository's
 - **Hedging.** Followers forward entries to the leader and propose them themselves only if
   they are not committed within an adaptive delay; duplicates are filtered when committed.
   A follower whose batch loses its slot forwards the entries to the leader again rather
-  than competing with it for the next slot. With `silent_leader_takeover` (the default), a
+  than competing with it for the next slot. Every forward is numbered and the leader
+  acknowledges each one it takes (`ForwardAck` lists the numbers, still at most once per
+  eighth of `retransmit_interval`); one left unacknowledged is sent again to the same
+  leader, backing off as record requests do, so a forward lost on the wire is retried
+  rather than hedged. A leader that keeps deciding slots of its own is working through a
+  backlog: an acknowledged entry is hedged around it only once it has decided nothing for
+  four hedge delays (at most `hedge_max`), counted from its last decision; an
+  unacknowledged one four hedge delays after the forward. Either way an entry is hedged at
+  most four times `hedge_max` after its forward. On a saturated link, hedges made while
+  the leader still decided took a third of its egress. With `silent_leader_takeover` (the default), a
   leader that says nothing at all for about a commit latency after a forward is suspected
   (it acknowledges forwards at once, before any write, so a slow disk does not make
   it silent): the follower hands its entries to the next member of the leader order,
@@ -78,7 +87,7 @@ What the paper leaves open, the crate fixes as follows (the repository's
   floor: `retransmit_interval`, or twice the smoothed time first-step slots take to decide
   if that is longer (sampled only from slots whose requests were never sent again, so a
   sample answers one copy). Each further resend of the same step waits twice as long as
-  the one before, up to `hedge_max`; a new step starts from the floor. On a saturated link
+  the one before, up to `hedge_max` (or the floor, if longer); a new step starts from the floor. On a saturated link
   a request is queued, not lost, and resending it at a fixed period shorter than the queue
   sends every value again and collapses throughput.
 - **Decisions.** A proposer that decides tells every replica with `Decided`, which names

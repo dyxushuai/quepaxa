@@ -69,7 +69,8 @@ fn the_leader_takes_forwards_up_to_its_cap_and_no_more() {
         let mut out = Vec::new();
         r.cfg.max_outstanding_proposals = 2;
         let entries: Vec<Item> = (1..=n).map(|id| item(1, id, Bytes::from_static(b"x"))).collect();
-        r.handle(Timestamp(1), from_peer(1, 0, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+        r.handle(Timestamp(1), from_peer(1, 0, Body::Forward { seq: 0, batch: batch::encode(&entries) }))
+            .unwrap();
         r.poll_actions(&mut out);
         r.entries.pending().len() + r.entries.batches().values().map(|b| b.entries.len()).sum::<usize>()
     };
@@ -99,7 +100,8 @@ fn a_leader_decision_at_the_instant_a_batch_starts_is_not_progress_since() {
     let mut r = replica_as(1);
     let mut out = Vec::new();
     let entries = [item(2, 7, Bytes::from_static(b"x"))];
-    r.handle(Timestamp(1), from_peer(0, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.handle(Timestamp(1), from_peer(0, 1, Body::Forward { seq: 0, batch: batch::encode(&entries) }))
+        .unwrap();
     r.poll_actions(&mut out);
     let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the entry is proposed here");
     let own = Body::decided(Slot(slot.0 + 1), proposal(1, 0, 1));
@@ -131,7 +133,8 @@ fn aside_with_slots_in_flight() -> (Replica, ProposalId, Timestamp) {
     r.commit_latency = Some(5 * MS);
     r.watch.disk.assume_usual(MS);
     let theirs = [item(2, 7, Bytes::from_static(b"theirs"))];
-    r.handle(Timestamp(MS), from_peer(2, 0, Body::Forward { batch: batch::encode(&theirs) })).unwrap();
+    r.handle(Timestamp(MS), from_peer(2, 0, Body::Forward { seq: 0, batch: batch::encode(&theirs) }))
+        .unwrap();
     r.poll_actions(&mut out);
     r.check_entries().unwrap();
     let own = r.propose(Timestamp(MS), Bytes::from_static(b"own")).unwrap();

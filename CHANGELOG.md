@@ -13,6 +13,32 @@ All notable changes to this project are documented here. The project follows
   a new replica. Nothing produces references yet: a value carrying one is not applied
   (`corrupt_batches`), and a forward carrying one, `Data` and `Fetch` are rejected
   (`messages_rejected`).
+- `quepaxa` (behaviour): `retransmit_interval` is now a floor, not a period. An
+  unanswered record request is first sent again after it or after twice the smoothed
+  first-step round trip (of slots never resent), whichever is longer, and each further
+  resend of the same step waits twice as long, up to `hedge_max` (or the floor, if
+  longer); a new step starts from
+  the floor. Resending every 50 ms on a saturated link sent every value again, grew the
+  leader's queue past the link and collapsed throughput (#231). Catch-up, read and probe
+  retries still repeat at `retransmit_interval`. Recovery from a lost request is slower
+  when several copies in a row are lost.
+- `quepaxa` (wire, breaking): `Forward` carries a number chosen by the sender, and
+  `ForwardAck` lists the numbers of every forward the receiver took since its last
+  acknowledgement (acknowledgements still coalesce, at most one per eighth of
+  `retransmit_interval`); a forward refused because the leader's queue is full is not
+  listed. Part of wire version 2, not yet released.
+- `quepaxa` (behaviour): a forward the target has not acknowledged within the resend floor
+  is sent again to the same target, with the same number and the entries still waiting on
+  it, backing off as record requests do; the target drops entries already committed. A
+  forward lost on the wire is so retried instead of hedged. New metric
+  `forward_resends` (#231).
+- `quepaxa` (behaviour): a follower whose target acknowledged a forward and has decided a
+  slot of its own since hedges the entry 4δ (at most `hedge_max`) after the target's last
+  decision, not after the forward: a target still deciding is not hedged around. Hedges
+  made while it still decided took about a third of the leader's egress on a saturated
+  link. An unacknowledged forward keeps the old rule (4δ after the forward), and every
+  entry is hedged at most 4 · `hedge_max` after its forward however busy the target; new
+  metric `hedges_at_bound` counts those. A silent target is still suspected after σ (#231).
 - `quepaxa` (wire, breaking): `Decided` no longer carries the value, only the slot, the
   priority and the value's key. The receiver takes the value from what it already holds
   under that key (its register for the slot, its proposer there, or its own batch), and

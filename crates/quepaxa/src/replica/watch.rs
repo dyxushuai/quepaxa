@@ -34,7 +34,7 @@ use alloc::collections::BTreeMap;
 use super::Replica;
 use super::disk::{Disk, Health};
 use crate::codec::Body;
-use crate::types::{NodeId, Slot, Timestamp};
+use crate::types::{NodeId, ProposalId, Slot, Timestamp};
 
 /// What a replica knows about the members it hands entries to.
 #[derive(Clone, Debug, Default)]
@@ -63,6 +63,8 @@ pub(super) struct Watch {
     pub(super) acked: BTreeMap<NodeId, Timestamp>,
     /// Coalesced acknowledgements waiting for each member's cooldown to expire.
     pub(super) ack_due: BTreeMap<NodeId, Timestamp>,
+    /// Forwards sent and not yet acknowledged, and those to acknowledge (`forwards.rs`).
+    pub(super) fwd: super::forwards::Forwards,
 }
 
 impl Replica {
@@ -185,6 +187,7 @@ impl Replica {
     pub(super) fn ack_forward(&mut self, from: NodeId) {
         if self.stepped_aside() {
             self.watch.ack_due.remove(&from);
+            let _dropped = self.watch.fwd.take_acks(from);
             return;
         }
         let every = self.ack_every();
@@ -196,7 +199,8 @@ impl Replica {
         }
         self.watch.ack_due.remove(&from);
         self.watch.acked.insert(from, self.now);
-        self.send(from, Body::ForwardAck);
+        let seqs = self.watch.fwd.take_acks(from);
+        self.send(from, Body::ForwardAck { seqs });
     }
 
     /// Entries were just handed to the target.
@@ -240,10 +244,16 @@ impl Replica {
         self.silent_since(target, at).then(|| at.after(sigma))
     }
 
-    /// When an entry forwarded at `at` is hedged although its target talks: after δ, or
-    /// after 4δ (at most `hedge_max`) if the target has decided a slot itself since (it is
-    /// working through a backlog, and hedges would only contend with it; still hedged, in
-    /// case the forward was lost). A slot others took over from it does not count.
+    /// When an entry forwarded at `at` is hedged although its target talks: δ after the
+    /// forward or, once the target has decided a slot itself since, 4δ (at most `hedge_max`)
+    /// later. That 4δ counts from the target's last decision once it acknowledged the forward
+    /// (`acked`, `forwards.rs`): a target still deciding is working through a backlog, and
+    /// hedges only add to it; on a saturated link they took a third of the leader's egress and
+    /// halved throughput (#231). From the forward otherwise: a forward the target never took
+    /// is in no backlog (it is also sent again, `resend_forwards`). Whatever the target's
+    /// progress, the entry is hedged 4 · `hedge_max` after the forward at the latest (the
+    /// returned flag: that bound set the time). A target that falls silent is suspected after
+    /// σ. A slot others took over from it does not count.
     ///
     /// Not while this replica's disk is stuck with nobody deciding (`Health::SharedStall`), and
     /// counted from when it caught up: no slot can be decided meanwhile, and hedges made then
@@ -253,19 +263,35 @@ impl Replica {
     /// Held only once the disk is stuck, not when it would be by `late` if no write completed
     /// meanwhile: a slow disk keeps completing writes and pushing that forecast back, and an
     /// entry held on it had no timer until something else woke this replica.
-    pub(super) fn late_at(&self, at: Timestamp) -> Option<Timestamp> {
+    pub(super) fn late(&self, at: Timestamp, acked: bool) -> Option<(Timestamp, bool)> {
         let d = self.hedge_delay();
-        let wait = if self.watch.progressed > at { self.busy_delay() } else { d };
-        let late = at.max(self.watch.disk.resumed()).after(wait);
+        let (progressed, resumed) = (self.watch.progressed, self.watch.disk.resumed());
+        let busy = progressed > at;
+        let from = if busy && acked { progressed } else { at };
+        let wait = if busy { self.busy_delay() } else { d };
+        let unbounded = from.max(resumed).after(wait);
+        let bound = at.max(resumed).after(self.cfg.hedge_max.saturating_mul(4));
+        let late = unbounded.min(bound);
         let held = !self.watch.aside
             && matches!(self.watch.disk.health(self.now, d), Health::SharedStall { since } if since <= late);
-        (!held).then_some(late)
+        (!held).then_some((late, bound < unbounded))
     }
 
-    /// When an entry forwarded at `at` is acted on: hedged when late, or sooner, with its
-    /// target suspected, if the target stays silent.
-    pub(super) fn hedge_at(&self, at: Timestamp) -> Option<Timestamp> {
-        let (late, silent) = (self.late_at(at), self.silent_at(at));
+    /// `late` without the flag.
+    #[cfg(test)]
+    pub(super) fn late_at(&self, at: Timestamp, acked: bool) -> Option<Timestamp> {
+        self.late(at, acked).map(|(t, _)| t)
+    }
+
+    /// `late` for own entry `id`, forwarded at `at`.
+    pub(super) fn lateness(&self, id: ProposalId, at: Timestamp) -> Option<(Timestamp, bool)> {
+        self.late(at, self.watch.fwd.is_acked(id))
+    }
+
+    /// When own entry `id`, forwarded at `at`, is acted on: hedged when late, or sooner,
+    /// with its target suspected, if the target stays silent.
+    pub(super) fn hedge_at(&self, id: ProposalId, at: Timestamp) -> Option<Timestamp> {
+        let (late, silent) = (self.lateness(id, at).map(|(t, _)| t), self.silent_at(at));
         late.into_iter().chain(silent).min()
     }
 

@@ -18,7 +18,7 @@ fn kind(bytes: &Bytes) -> &'static str {
         Body::CatchUp { .. } => "CatchUp",
         Body::Entries { .. } => "Entries",
         Body::Forward { .. } => "Forward",
-        Body::ForwardAck => "ForwardAck",
+        Body::ForwardAck { .. } => "ForwardAck",
         Body::Compacted { .. } => "Compacted",
         Body::ReadQuery { .. } => "ReadQuery",
         Body::ReadReply { .. } => "ReadReply",
@@ -86,7 +86,7 @@ impl Net {
 /// `RecordRequest` (44 envelope, 8 slot, 4 step, 28 head, 5 value tag and length, then v) and
 /// one `Decided` naming the value by key (44, 8, 28), so (n−1)(169 + v). Before `Decided`
 /// dropped the value (#172 Phase 1) it also carried a tag, a length and v: (n−1)(174 + 2v).
-/// The 44-byte `ForwardAck` to the origin is rate-limited (`ack_every`), so it is not per
+/// The `ForwardAck` to the origin (44 bytes, then 4 and 8 per forward it acknowledges) is rate-limited (`ack_every`), so it is not per
 /// slot: with time standing still only the first slot sends one, and the last slot is the one
 /// measured.
 fn expected(n: usize, v: usize) -> BTreeMap<&'static str, (usize, usize)> {

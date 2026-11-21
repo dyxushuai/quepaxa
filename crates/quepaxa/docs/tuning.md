@@ -42,7 +42,7 @@ The defaults assume round trips of a few milliseconds.
 - **`retransmit_interval`** is a floor, not a period: an unanswered record request is
   first sent again after it or after twice the smoothed first-step round trip, whichever
   is longer, and each further resend of the same step waits twice as long, up to
-  `hedge_max`. Set it above the round trip to the farthest member of a majority, or the
+  `hedge_max` (or the floor, if that is longer). Set it above the round trip to the farthest member of a majority, or the
   first requests are sent twice before a round trip has been measured. Lowering it does
   not resend sooner once the round trip is known.
 - **`hedge_max`** must exceed the slowest client commit path (forward to the leader, one
@@ -96,7 +96,9 @@ Any setting is safe; a bad one is slow.
 ## Observability
 
 [`Replica::metrics`](crate::Replica::metrics) returns counters: rejected messages, retransmits,
-catch-up retries, slots decided, fast-path decisions, forwarded and hedged entries, and
+catch-up retries, slots decided, fast-path decisions, forwarded and hedged entries (with
+`hedges_at_bound`, those hedged only by the four-`hedge_max` bound although the leader kept
+deciding, and `forward_resends`, forwards the leader had not acknowledged in time), and
 how much decided state is held in memory. Rising `hedged` with a healthy leader means
 `hedge_max` is too low; rising `retransmits` means messages are lost or the link stays
 saturated past even the backed-off resend waits; `retained_slots` that keeps growing means the application is not snapshotting.

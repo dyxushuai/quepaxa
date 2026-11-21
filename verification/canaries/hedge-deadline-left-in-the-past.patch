@@ -1,13 +1,11 @@
-diff --git a/crates/quepaxa/src/replica/proposing.rs b/crates/quepaxa/src/replica/proposing.rs
-index 5f3bfa0..3055dd0 100644
 --- a/crates/quepaxa/src/replica/proposing.rs
 +++ b/crates/quepaxa/src/replica/proposing.rs
-@@ -299,7 +299,7 @@ impl Replica {
+@@ -333,7 +333,7 @@
          let late: Vec<_> = self
              .entries
              .forwarded_since()
--            .filter(|(_, at)| self.late_at(*at).is_some_and(|t| t <= now))
-+            .filter(|(_, at)| self.late_at(*at).is_some_and(|t| t < now))
-             .map(|(id, _)| id)
+-            .filter_map(|(id, at)| self.lateness(id, at).filter(|(t, _)| *t <= now).map(|(_, b)| (id, b)))
++            .filter_map(|(id, at)| self.lateness(id, at).filter(|(t, _)| *t < now).map(|(_, b)| (id, b)))
              .collect();
-         self.metrics.hedged += self.entries.late(late, aside);
+         if !aside {
+             self.metrics.hedges_at_bound += late.iter().filter(|(_, bound)| *bound).count() as u64;

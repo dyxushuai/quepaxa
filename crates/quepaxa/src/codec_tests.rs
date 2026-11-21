@@ -125,8 +125,21 @@ fn a_fetch_longer_than_its_bytes_is_rejected() {
 
 #[test]
 fn forward_ack_matches_golden_bytes_v2() {
-    let ack = Message { env: env(), body: Body::ForwardAck };
-    assert_eq!(ack.encode().to_vec(), golden("0a", ""));
+    let ack = Message { env: env(), body: Body::ForwardAck { seqs: alloc::vec![7, 9] } };
+    assert_eq!(ack.encode().to_vec(), golden("0a", "02000000 0700000000000000 0900000000000000"));
+    assert_eq!(Message::decode(&ack.encode(), &CTX), Ok(ack));
+}
+
+#[test]
+fn forward_matches_golden_bytes_v2() {
+    let fwd = Message { env: env(), body: Body::Forward { seq: 7, batch: Bytes::from_static(b"ab") } };
+    // The number, then the batch inline.
+    let inline = alloc::format!("{:02x}", super::VALUE_INLINE);
+    assert_eq!(
+        fwd.encode().to_vec(),
+        golden("06", &alloc::format!("0700000000000000 {inline} 02000000 6162"))
+    );
+    assert_eq!(Message::decode(&fwd.encode(), &CTX), Ok(fwd));
 }
 
 #[test]
@@ -280,11 +293,11 @@ proptest::proptest! {
             Body::CatchUp { from: Slot(from) },
             Body::Decided { slot: Slot(from), priority: round, key: ValueKey { origin: NodeId(round as u32), incarnation: from, seq: round } },
             Body::Entries { first: Slot(from), proposals: ps.clone(), content: Vec::new() },
-            Body::Forward { batch },
+            Body::Forward { seq: round, batch },
             Body::Compacted { through: Slot(from) },
             Body::ReadQuery { incarnation: from, round },
             Body::ReadReply { incarnation: from, round, high: Slot(from) },
-            Body::ForwardAck,
+            Body::ForwardAck { seqs: alloc::vec![from, round] },
             Body::RttProbe { incarnation: 2, sent: from, commit: round, table: alloc::vec![(NodeId(round as u32), from), (NodeId(2), round)] },
             Body::RttReply { incarnation: 2, sent: round },
             Body::Data { id: DataId { origin: NodeId(round as u32), incarnation: from, seq: round }, bytes: ps.first().map(|p| p.value.clone()).unwrap_or_default() },

@@ -107,7 +107,7 @@ fn a_follower_behind_the_deputy_hands_its_entries_to_the_deputy() {
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 1);
     out.clear();
-    let at = r.next_deadline().expect("the hedge is scheduled");
+    let at = hedge_deadline(&r).expect("the hedge is scheduled");
     r.handle_timeout(at).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 1), 1, "everything waiting goes to the deputy");
@@ -128,11 +128,11 @@ fn a_deputy_not_yet_heard_from_is_waited_for_the_hedge_delay() {
     r.cfg.hedge_max = 80 * MS;
     r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
-    let at = r.next_deadline().expect("the hedge is scheduled");
+    let at = hedge_deadline(&r).expect("the hedge is scheduled");
     r.handle_timeout(at).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.watch.asked.map(|(to, _)| to), Some(NodeId(1)), "silence now counts for the deputy");
-    assert_eq!(r.next_deadline(), Some(at.after(80 * MS)), "δ, not the leader's σ");
+    assert_eq!(hedge_deadline(&r), Some(at.after(80 * MS)), "δ, not the leader's σ");
 }
 
 #[test]
@@ -148,7 +148,7 @@ fn a_deputy_proposes_what_it_is_handed() {
         },
         kind: batch::Kind::App,
     }];
-    let forward = Body::Forward { batch: batch::encode(&entries) };
+    let forward = Body::Forward { seq: 0, batch: batch::encode(&entries) };
     r.handle(Timestamp(1), from_peer(2, 1, forward)).unwrap();
     r.poll_actions(&mut out);
     assert!(
@@ -173,7 +173,8 @@ fn a_deputy_proposes_a_handed_entry_again_when_its_batch_loses_the_slot() {
         },
         kind: batch::Kind::App,
     }];
-    r.handle(Timestamp(1), from_peer(2, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.handle(Timestamp(1), from_peer(2, 1, Body::Forward { seq: 0, batch: batch::encode(&entries) }))
+        .unwrap();
     r.poll_actions(&mut out);
     let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the deputy proposes the entry");
     out.clear();
@@ -205,7 +206,8 @@ fn entries_a_leader_handed_over_go_back_to_it_once_it_decides_again() {
         },
         kind: batch::Kind::App,
     }];
-    r.handle(Timestamp(1), from_peer(0, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.handle(Timestamp(1), from_peer(0, 1, Body::Forward { seq: 0, batch: batch::encode(&entries) }))
+        .unwrap();
     r.poll_actions(&mut out);
     let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the entry is proposed here");
     announce(&mut r, Timestamp(2), 0, Slot(slot.0 + 1), proposal(1, 0, 1));
@@ -226,7 +228,7 @@ fn entries_handed_to_a_leader_this_replica_now_is_are_not_left_waiting() {
     let id = r.propose(Timestamp(1), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     r.watch.suspects.insert(NodeId(0), Timestamp(1));
-    let at = r.next_deadline().expect("the hedge is scheduled");
+    let at = hedge_deadline(&r).expect("the hedge is scheduled");
     r.handle_timeout(at).unwrap();
     r.poll_actions(&mut out);
     assert!(!r.entries.forwarded().contains_key(&id));

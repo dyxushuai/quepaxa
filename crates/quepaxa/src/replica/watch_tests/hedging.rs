@@ -8,12 +8,12 @@ fn an_entry_is_hedged_after_sigma_when_the_leader_says_nothing() {
     let mut out = Vec::new();
     r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
-    assert_eq!(r.next_deadline(), Some(Timestamp(MS + 20 * MS)), "σ = max(20 ms, 2 × 5 ms)");
+    assert_eq!(hedge_deadline(&r), Some(Timestamp(MS + 20 * MS)), "σ = max(20 ms, 2 × 5 ms)");
     // Without R, nothing is early.
     let mut plain = with_latency(None);
     plain.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     plain.poll_actions(&mut out);
-    assert_eq!(plain.next_deadline(), Some(Timestamp(MS + 80 * MS)), "δ");
+    assert_eq!(hedge_deadline(&plain), Some(Timestamp(MS + 80 * MS)), "δ");
 }
 
 #[test]
@@ -25,7 +25,7 @@ fn a_leader_that_speaks_after_the_forward_is_waited_for_the_hedge_delay() {
     // Any message will do; a read query starts no slot of its own.
     r.handle(Timestamp(4 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: 0 })).unwrap();
     r.poll_actions(&mut out);
-    assert_eq!(r.next_deadline(), Some(Timestamp(MS + 80 * MS)));
+    assert_eq!(hedge_deadline(&r), Some(Timestamp(MS + 80 * MS)));
     // The 3 ms from the forward to the leader's message is learned as R.
     assert_eq!(r.watch.reply.get(&NodeId(0)), Some(&(5 * MS - 5 * MS / 8 + 3 * MS / 8)));
 }
@@ -40,10 +40,10 @@ fn an_idle_spell_before_the_forward_is_not_silence() {
     let at = Timestamp(10_000 * MS);
     r.propose(at, Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
-    assert_eq!(r.next_deadline(), Some(at.after(20 * MS)), "silence counts from the forward");
+    assert_eq!(hedge_deadline(&r), Some(at.after(20 * MS)), "silence counts from the forward");
     r.handle(at.after(3 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: 1 })).unwrap();
     r.poll_actions(&mut out);
-    assert_eq!(r.next_deadline(), Some(at.after(80 * MS)), "the leader answered in time");
+    assert_eq!(hedge_deadline(&r), Some(at.after(80 * MS)), "the leader answered in time");
 }
 
 #[test]
@@ -94,26 +94,36 @@ fn a_slow_but_talking_leader_is_hedged_around_entry_by_entry_and_not_suspected()
 }
 
 #[test]
-fn a_leader_working_through_a_backlog_is_hedged_around_only_after_4_delta() {
+fn a_leader_that_keeps_deciding_is_not_hedged_around() {
     let mut r = with_latency(Some(5));
     let mut out = Vec::new();
     // δ = 80 ms; 4δ stays under hedge_max.
     r.cfg.hedge_max = 400 * MS;
     let id = r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
-    // A value of the leader's own is decided after the forward: it is busy, not stuck.
-    out.extend(announce(&mut r, Timestamp(4 * MS), 0, Slot(0), proposal(1, 0, 0)));
-    // Its disk works: the decision's record is written.
-    let last = r.watch.disk.in_flight().next_back().expect("the decision is being written");
-    r.handle(Timestamp(5 * MS), Input::Persisted(PersistId(last))).unwrap();
+    // The leader took the forward.
+    let seqs = forward_seqs(&out, 0);
+    r.handle(Timestamp(2 * MS), from_peer(0, 1, Body::ForwardAck { seqs })).unwrap();
     r.poll_actions(&mut out);
-    assert_eq!(r.next_deadline(), Some(Timestamp(MS + 4 * 80 * MS)), "4δ, not δ");
-    r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
+    // It decides a slot of its own at once (within σ), then every 100 ms for 1.1 s, long past
+    // 4δ from the forward: it is working through a backlog, and a hedge would only add to it.
+    for slot in 0..12 {
+        let at = Timestamp((4 + slot * 100) * MS);
+        r.handle_timeout(at).unwrap();
+        r.poll_actions(&mut out);
+        assert!(r.entries.forwarded().contains_key(&id), "at {at:?}: hedged around a busy leader");
+        leader_decides(&mut r, at, slot);
+    }
+    // It stops deciding: 4δ after its last decision the entry is hedged, in case the forward
+    // was lost.
+    let stopped = Timestamp(1_104 * MS);
+    assert_eq!(r.next_deadline(), Some(stopped.after(4 * 80 * MS)), "4δ from its last progress");
+    r.handle_timeout(stopped.after(4 * 80 * MS - 1)).unwrap();
     r.poll_actions(&mut out);
-    assert!(r.entries.forwarded().contains_key(&id), "still waiting for the leader after δ");
-    r.handle_timeout(Timestamp(MS + 4 * 80 * MS)).unwrap();
+    assert!(r.entries.forwarded().contains_key(&id), "hedged before 4δ from its last progress");
+    r.handle_timeout(stopped.after(4 * 80 * MS)).unwrap();
     r.poll_actions(&mut out);
-    assert!(!r.entries.forwarded().contains_key(&id), "hedged after 4δ, in case the forward was lost");
+    assert!(!r.entries.forwarded().contains_key(&id), "a leader that stopped deciding is hedged around");
 }
 
 #[test]
@@ -152,7 +162,7 @@ fn a_deputy_drives_the_whole_window_for_what_it_is_handed() {
         })
         .collect();
     for e in &entries {
-        let forward = Body::Forward { batch: batch::encode(core::slice::from_ref(e)) };
+        let forward = Body::Forward { seq: 0, batch: batch::encode(core::slice::from_ref(e)) };
         r.handle(Timestamp(MS), from_peer(2, 1, forward)).unwrap();
         r.poll_actions(&mut out);
     }
@@ -218,9 +228,14 @@ fn progress_announced_at_the_forward_itself_is_not_a_backlog() {
     r.cfg.hedge_max = 400 * MS;
     let at = Timestamp(10 * MS);
     r.watch.progressed = at;
-    assert_eq!(r.late_at(at), Some(at.after(80 * MS)), "nothing decided after the forward: δ");
+    assert_eq!(r.late_at(at, true), Some(at.after(80 * MS)), "nothing decided after the forward: δ");
     r.watch.progressed = at.after(1);
-    assert_eq!(r.late_at(at), Some(at.after(4 * 80 * MS)));
+    assert_eq!(r.late_at(at, true), Some(at.after(1 + 4 * 80 * MS)), "4δ from the progress");
+    r.watch.progressed = at.after(500 * MS);
+    assert_eq!(r.late_at(at, true), Some(at.after(500 * MS + 4 * 80 * MS)), "not from the forward");
+    assert_eq!(r.late_at(at, false), Some(at.after(4 * 80 * MS)), "unacknowledged: from the forward");
+    r.watch.progressed = at.after(2_000 * MS);
+    assert_eq!(r.late(at, true), Some((at.after(4 * 400 * MS), true)), "at most 4 · hedge_max");
 }
 
 #[test]
@@ -230,7 +245,7 @@ fn without_silent_leader_takeover_a_silent_leader_is_waited_for_the_hedge_delay(
     let mut out = Vec::new();
     r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
-    assert_eq!(r.next_deadline(), Some(Timestamp(MS + 80 * MS)), "δ, as before the option");
+    assert_eq!(hedge_deadline(&r), Some(Timestamp(MS + 80 * MS)), "δ, as before the option");
     r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
     r.poll_actions(&mut out);
     out.clear();
@@ -258,12 +273,16 @@ fn a_leader_acknowledges_a_forward_before_its_writes_are_durable() {
         },
         kind: batch::Kind::App,
     }];
-    r.handle(Timestamp(2), from_peer(1, 0, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.handle(Timestamp(2), from_peer(1, 0, Body::Forward { seq: 0, batch: batch::encode(&entries) }))
+        .unwrap();
     r.poll_actions(&mut out);
     let acked = out.iter().any(|a| match a {
         Action::Send(o) => {
             o.to == NodeId(1)
-                && matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck, .. }))
+                && matches!(
+                    Message::decode(&o.bytes, &r_wire()),
+                    Ok(Message { body: Body::ForwardAck { .. }, .. })
+                )
         }
         _ => false,
     });
@@ -271,10 +290,11 @@ fn a_leader_acknowledges_a_forward_before_its_writes_are_durable() {
     // Another forward within an eighth of the retransmit interval goes unacknowledged.
     let acks = |r: &mut Replica, at: u64| {
         let mut out = Vec::new();
-        r.handle(Timestamp(at), from_peer(1, 0, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+        r.handle(Timestamp(at), from_peer(1, 0, Body::Forward { seq: 0, batch: batch::encode(&entries) }))
+            .unwrap();
         r.poll_actions(&mut out);
         out.iter()
-            .filter(|a| matches!(a, Action::Send(o) if matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck, .. }))))
+            .filter(|a| matches!(a, Action::Send(o) if matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck { .. }, .. }))))
             .count()
     };
     let every = r.cfg.retransmit_interval / 8;
@@ -288,7 +308,7 @@ fn a_leader_acknowledges_a_forward_before_its_writes_are_durable() {
     r.poll_actions(&mut out);
     assert!(
         out.iter().any(|a| matches!(a, Action::Send(o) if o.to == NodeId(1)
-        && matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck, .. })))),
+        && matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck { .. }, .. })))),
         "a suppressed ack is eventually sent without another forward or durable write"
     );
 }

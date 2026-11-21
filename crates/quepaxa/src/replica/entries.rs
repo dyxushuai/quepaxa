@@ -268,6 +268,11 @@ impl Entries {
         self.forwarded.iter().map(|(id, (_, at))| (*id, *at))
     }
 
+    /// Own entry `id`, if it waits on the target.
+    pub(super) fn forwarded_item(&self, id: ProposalId) -> Option<&Item> {
+        self.forwarded.get(&id).map(|(i, _)| i)
+    }
+
     /// The key of the value batch `seq` proposes.
     pub(super) fn batch_key(&self, seq: u64) -> Option<ValueKey> {
         self.batches.get(&seq).map(|b| b.key)
