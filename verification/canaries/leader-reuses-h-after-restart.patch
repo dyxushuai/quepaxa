@@ -1,12 +1,12 @@
 diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
 --- a/crates/quepaxa/src/replica/mod.rs
 +++ b/crates/quepaxa/src/replica/mod.rs
-@@ -248,7 +248,7 @@ impl Replica {
-             commit_latency: None,
-             next_proposal: 0,
-             next_alloc: 0,
--            reservation: recovery::Reservation::recovered(reservation),
-+            reservation: recovery::Reservation::recovered(None),
-             floor,
-             snapshot_state: snapshot.map(|(_, b)| b),
-             snapshot_asked: None,
+@@ -206,7 +206,7 @@ impl Replica {
+                 "leader_order differs from the one this replica's durable state was built with",
+             ));
+         }
+-        let reservation = recovery::Reservation::recovered(reservation.map(|(t, _)| t))
++        let reservation = recovery::Reservation::recovered(None)
+             .ok_or(Error::CorruptRecord { index: reservation.map_or(0, |(_, i)| i) })?;
+         let floor = snapshot.as_ref().map_or(0, |(s, _)| s.next);
+         log = log.split_off(&Slot(floor));

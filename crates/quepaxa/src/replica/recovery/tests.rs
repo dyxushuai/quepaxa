@@ -181,7 +181,7 @@ fn a_retry_prefers_the_most_advanced_peer_and_else_the_read_mark() {
 
 #[test]
 fn a_fresh_replica_may_lead_every_slot() {
-    let r = Reservation::recovered(None);
+    let r = Reservation::recovered(None).unwrap();
     assert!(r.may_lead(Slot(0)));
     assert_eq!(r.checkpoint(), None);
     assert!(!r.covers(Slot(0)));
@@ -189,15 +189,22 @@ fn a_fresh_replica_may_lead_every_slot() {
 
 #[test]
 fn a_restart_leads_only_past_what_it_reserved_before() {
-    let r = Reservation::recovered(Some(40));
+    let r = Reservation::recovered(Some(40)).unwrap();
     assert!(!r.may_lead(Slot(40)));
     assert!(r.may_lead(Slot(41)));
     assert_eq!(r.checkpoint(), Some(40), "a checkpoint keeps the recovered reservation");
 }
 
 #[test]
+fn a_reservation_through_the_last_slot_is_not_recovered() {
+    assert!(Reservation::recovered(Some(u64::MAX)).is_none());
+    let r = Reservation::recovered(Some(u64::MAX - 1)).unwrap();
+    assert!(!r.may_lead(Slot(u64::MAX - 1)) && r.may_lead(Slot(u64::MAX)));
+}
+
+#[test]
 fn leading_past_the_reservation_extends_it() {
-    let mut r = Reservation::recovered(Some(40));
+    let mut r = Reservation::recovered(Some(40)).unwrap();
     assert_eq!(r.extend(Slot(41), 16), Some(57));
     assert_eq!(r.extend(Slot(57), 16), None, "still covered");
     assert_eq!(r.extend(Slot(58), 16), Some(74));
@@ -206,7 +213,7 @@ fn leading_past_the_reservation_extends_it() {
 
 #[test]
 fn a_durable_reservation_covers_its_slots() {
-    let mut r = Reservation::recovered(None);
+    let mut r = Reservation::recovered(None).unwrap();
     r.extend(Slot(0), 16);
     r.extend(Slot(17), 16);
     assert!(!r.covers(Slot(0)));
