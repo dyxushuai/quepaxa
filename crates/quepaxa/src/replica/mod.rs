@@ -152,8 +152,11 @@ impl Replica {
     /// - [`Error::InvalidConfig`] if `cfg` breaks a rule documented on [`Config`]; the
     ///   message says which.
     /// - [`Error::CorruptRecord`] if a record fails its checksum, does not decode, or holds
-    ///   a value this replica never writes (a slot past the last valid one, a reservation
-    ///   through `u64::MAX`); `index` is its position in `durable`. Records are never skipped.
+    ///   a value no further incarnation can follow (a slot past the last valid one, a
+    ///   reservation through `u64::MAX`, incarnation `u64::MAX`); `index` is its position in
+    ///   `durable`. Records are never skipped. Incarnation `u64::MAX` is also what a replica
+    ///   restarted from `u64::MAX - 1` writes: after that, the counter is exhausted and
+    ///   further restarts fail here, which is not corruption.
     /// - [`Error::InvalidConfig`] also if the durable state was built under another
     ///   [`Config::leader_order`].
     ///
@@ -172,7 +175,8 @@ impl Replica {
     /// ```
     pub fn new(cfg: Config, durable: impl IntoIterator<Item = Bytes>, now: Timestamp) -> Result<Self, Error> {
         cfg.validate()?;
-        let mut last_incarnation = 0;
+        // The next incarnation: one past the largest recorded, 1 on a fresh start.
+        let mut incarnation = 1;
         let mut registers = BTreeMap::new();
         let mut log = BTreeMap::new();
         // The largest reservation, and the index of its record.
@@ -180,7 +184,10 @@ impl Replica {
         let mut snapshot: Option<(CoreState, Bytes)> = None;
         for (index, bytes) in durable.into_iter().enumerate() {
             match Record::decode(&bytes).map_err(|_| Error::CorruptRecord { index })? {
-                Record::Incarnation(n) => last_incarnation = last_incarnation.max(n),
+                Record::Incarnation(n) => {
+                    let next = n.checked_add(1).ok_or(Error::CorruptRecord { index })?;
+                    incarnation = incarnation.max(next);
+                }
                 Record::Recorder { slot, reg } => {
                     if reg.step > MAX_STEP || slot.0 > MAX_SLOT {
                         return Err(Error::CorruptRecord { index });
@@ -225,7 +232,7 @@ impl Replica {
             .as_ref()
             .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone());
         let leader = schedule.leader(Slot(floor));
-        let entries = entries::Entries::new(cfg.id, last_incarnation + 1);
+        let entries = entries::Entries::new(cfg.id, incarnation);
         let mut r = Self {
             me: cfg.id,
             wire,
@@ -233,11 +240,11 @@ impl Replica {
             schedule: schedule.clone(),
             applied_schedule: schedule,
             cfg,
-            incarnation: last_incarnation + 1,
+            incarnation,
             now,
-            phase: recovery::Phase::start(last_incarnation > 0, now),
+            phase: recovery::Phase::start(incarnation > 1, now),
             metrics: Metrics::default(),
-            gate: Gate::new(Record::Incarnation(last_incarnation + 1).encode()),
+            gate: Gate::new(Record::Incarnation(incarnation).encode()),
             actions: Vec::new(),
             inbox: VecDeque::new(),
             registers,
@@ -276,7 +283,7 @@ impl Replica {
         }
         // After a restart, ask every known replica where the log is: one that was away, even
         // through its own removal, learns what it missed without waiting for someone to write.
-        if last_incarnation > 0 {
+        if incarnation > 1 {
             r.probe_peers();
         }
         // Nothing leaves this replica until its new incarnation is durable.
