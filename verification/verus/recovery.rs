@@ -16,7 +16,8 @@
 // (a) a restarted replica never proposes at the top priority in a slot at or below a
 //     reservation it made durable before the crash, nor in any slot where a top-priority
 //     request of an earlier incarnation left it: those are all at or below the largest
-//     reservation on disk, which never goes down (checkpoints included);
+//     reservation on disk, which never goes down (checkpoints included); a recovered
+//     reservation through u64::MAX, which no slot lies past, is rejected, never saturated;
 // (b) the phase goes `Recovering → Live → Fenced`, skipping any, and never back; it leaves
 //     `Recovering` for `Live` only once a majority of the members at the decided prefix,
 //     counting this replica, answered, or when there is nobody to ask; fenced, it stays so
@@ -504,17 +505,19 @@ impl Reservation {
         }
     }
 
-    // DEV: the recovered reservation is below u64::MAX (the replica's own writes are).
-    pub fn recovered(through: Option<u64>) -> (r: Reservation)
-        requires val(through) < u64::MAX,
-        ensures r.floor as int == val(through) + 1, r.through is None, r.durable is None,
+    /// `None` exactly for a reservation through `u64::MAX` (a corrupt record).
+    pub fn recovered(through: Option<u64>) -> (r: Option<Reservation>)
+        ensures
+            r is None <==> through == Some(u64::MAX),
+            r matches Some(res) ==> res.floor as int == val(through) + 1 && res.through is None
+                && res.durable is None,
     {
-        // DEV: `map_or` as a match.
+        // DEV: `map_or` and `checked_add` as matches, `?` as a return.
         let floor = match through {
-            Some(r) => r + 1,
+            Some(r) => if r < u64::MAX { r + 1 } else { return None; },
             None => 0,
         };
-        Reservation { floor, through: None, durable: None }
+        Some(Reservation { floor, through: None, durable: None })
     }
 
     pub fn may_lead(&self, slot: u64) -> (r: bool)
@@ -719,8 +722,15 @@ impl Host {
     pub fn fresh() -> (h: Host)
         ensures h.inv(), h.escaped_before@.is_empty(), h.reserved_before@.is_empty(),
     {
+        let res = match Reservation::recovered(None) {
+            Some(res) => res,
+            None => {
+                proof { assert(false); }
+                Reservation { floor: 0, through: None, durable: None }
+            },
+        };
         Host {
-            res: Reservation::recovered(None),
+            res,
             waits: Vec::new(),
             tags: Ghost(Seq::empty()),
             ops: Ghost(Seq::empty()),
@@ -951,7 +961,14 @@ impl Host {
             self.lemma_prefix(self.ops@.len() as int);
             assert(self.ops@.take(self.ops@.len() as int) =~= self.ops@);
         }
-        let res = Reservation::recovered(recovered);
+        // `Replica::new` fails on `None`; the replica's own writes never get there.
+        let res = match Reservation::recovered(recovered) {
+            Some(res) => res,
+            None => {
+                proof { assert(false); }
+                return;
+            },
+        };
         self.res = res;
         self.waits = Vec::new();
         proof {

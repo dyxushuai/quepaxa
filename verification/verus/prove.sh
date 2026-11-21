@@ -19,7 +19,8 @@
 # back only entries not yet committed, and none of another member's from a batch handed on
 # when stepping aside; recovery (recovery.rs, from crates/quepaxa/src/replica/recovery.rs)
 # never lets a restarted replica propose at the top priority in a slot it may have reserved
-# before the crash, leaves Recovering only once a majority answered, and stops catching up
+# before the crash, rejects a recovered reservation through u64::MAX rather than saturate
+# it, leaves Recovering only once a majority answered, and stops catching up
 # only once caught up with its peers and its read mark. Uses
 # Verus, fetched (pinned, checksum verified) into target/verus-<digest>, and the Rust
 # toolchain that
@@ -110,7 +111,8 @@ bugs=(
   entries lost-slot-ignores-handed       's/^        let handed = b\.handed;$/        let handed = false;/'
   entries step-aside-forgets-handed      's/^                self\.set_handed\(j\);$//'
   recovery restart-leads-below-its-reservation 's/let leader = leads \&\& self\.res\.may_lead\(slot\);/let leader = leads;/'
-  recovery restart-ignores-the-reservation     's/let res = Reservation::recovered\(recovered\);/let res = Reservation::recovered(None);/'
+  recovery restart-ignores-the-reservation     's/match Reservation::recovered\(recovered\) \{/match Reservation::recovered(None) {/'
+  recovery recovered-reservation-saturates     's/if r < u64::MAX \{ r \+ 1 \} else \{ return None; \}/if r < u64::MAX { r + 1 } else { r }/'
   recovery top-request-not-held                's/let gate = step == 4 \&\& top \&\& !h_ready \&\& !to_me;/let gate = false;/'
   recovery reservation-durable-at-once         's/^                self\.waits\.push\(Wait::Durable\(through\)\);$/                self.res.made_durable(through);/'
   recovery checkpoint-drops-the-reservation    's/None => if self\.floor > 0 \{ Some\(self\.floor - 1\) \} else \{ None \},/None => None,/'

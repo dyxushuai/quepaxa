@@ -148,8 +148,9 @@ impl Replica {
     ///
     /// - [`Error::InvalidConfig`] if `cfg` breaks a rule documented on [`Config`]; the
     ///   message says which.
-    /// - [`Error::CorruptRecord`] if a record fails its checksum or does not decode;
-    ///   `index` is its position in `durable`. Records are never skipped.
+    /// - [`Error::CorruptRecord`] if a record fails its checksum, does not decode, or holds
+    ///   a value this replica never writes (a slot past the last valid one, a reservation
+    ///   through `u64::MAX`); `index` is its position in `durable`. Records are never skipped.
     /// - [`Error::InvalidConfig`] also if the durable state was built under another
     ///   [`Config::leader_order`].
     ///
@@ -171,7 +172,8 @@ impl Replica {
         let mut last_incarnation = 0;
         let mut registers = BTreeMap::new();
         let mut log = BTreeMap::new();
-        let mut reservation: Option<u64> = None;
+        // The largest reservation, and the index of its record.
+        let mut reservation: Option<(u64, usize)> = None;
         let mut snapshot: Option<(CoreState, Bytes)> = None;
         for (index, bytes) in durable.into_iter().enumerate() {
             match Record::decode(&bytes).map_err(|_| Error::CorruptRecord { index })? {
@@ -182,7 +184,7 @@ impl Replica {
                     }
                     registers.insert(slot, reg);
                 }
-                Record::Reservation { through } => reservation = reservation.max(Some(through.0)),
+                Record::Reservation { through } => reservation = reservation.max(Some((through.0, index))),
                 Record::Decided { slot, proposal } => {
                     if slot.0 > MAX_SLOT {
                         return Err(Error::CorruptRecord { index });
@@ -204,6 +206,8 @@ impl Replica {
                 "leader_order differs from the one this replica's durable state was built with",
             ));
         }
+        let reservation = recovery::Reservation::recovered(reservation.map(|(t, _)| t))
+            .ok_or(Error::CorruptRecord { index: reservation.map_or(0, |(_, i)| i) })?;
         let floor = snapshot.as_ref().map_or(0, |(s, _)| s.next);
         log = log.split_off(&Slot(floor));
         registers = registers.split_off(&Slot(floor));
@@ -248,7 +252,7 @@ impl Replica {
             commit_latency: None,
             next_proposal: 0,
             next_alloc: 0,
-            reservation: recovery::Reservation::recovered(reservation),
+            reservation,
             floor,
             snapshot_state: snapshot.map(|(_, b)| b),
             snapshot_asked: None,
