@@ -38,6 +38,7 @@ impl Replica {
         if req_step != active.prop.step() {
             return;
         }
+        let (started, resent) = (active.started, active.prop.was_resent());
         let Some(request) = active.prop.request_for(from).cloned() else { return };
         let resolve = |w: Option<WireProposal>| w.map(|w| w.resolve(&request).ok_or(())).transpose();
         let (Ok(first), Ok(prev_agg)) = (resolve(first), resolve(prev_agg)) else {
@@ -51,6 +52,11 @@ impl Replica {
                 if req_step == 4 && p.priority == LEADER_PRIORITY {
                     self.metrics.fast_path_decisions += 1;
                 }
+                // The first step is the slot's first: never resent, the decision answers the
+                // one copy of each request, so the sample is a true round trip.
+                if req_step == 4 && !resent {
+                    self.note_request_rtt(self.now.0.saturating_sub(started.0));
+                }
                 #[cfg(feature = "model")]
                 self.decided_steps.insert(slot, (p.clone(), req_step));
                 self.learn(slot, p, true);
@@ -58,14 +64,37 @@ impl Replica {
         }
     }
 
+    /// Rises at once to a slower sample and decays by an eighth toward a faster one, as R
+    /// does (`watch.rs`): a link that starts queueing is followed at once.
+    fn note_request_rtt(&mut self, sample: u64) {
+        let avg = self.request_rtt.get_or_insert(sample);
+        *avg = if sample < *avg { *avg - *avg / 8 + sample / 8 } else { sample };
+    }
+
+    /// The wait before a step's requests are first sent again: `retransmit_interval`, or
+    /// twice the smoothed first-step round trip (`request_rtt`) if that is longer.
+    fn resend_floor(&self) -> u64 {
+        let floor = self.cfg.retransmit_interval;
+        self.request_rtt.map_or(floor, |rtt| rtt.saturating_mul(2).max(floor))
+    }
+
     /// Sends the current step's unanswered requests; `resend` skips the local recorder,
     /// whose delivery is reliable.
+    ///
+    /// Each resend of a step waits twice as long as the one before, from the floor up to
+    /// `hedge_max` (#231). On a saturated link an unanswered request is queued, not lost:
+    /// resent at a fixed period shorter than the queue, every request went out again with
+    /// its value, the queue grew, decisions collapsed and the leader rotated. The floor
+    /// follows the round trip, so a request is not resent while its answer can still be on
+    /// the way. A new step starts from the floor again.
     pub(super) fn send_requests(&mut self, slot: Slot, resend: bool) {
-        let me = self.me;
-        let resend_at = self.now.after(self.cfg.retransmit_interval);
+        let (me, now) = (self.me, self.now);
+        let floor = self.resend_floor();
+        let cap = self.cfg.hedge_max.max(floor);
         let h_ready = self.reservation.covers(slot);
         let Some(a) = self.proposers.get_mut(&slot) else { return };
-        a.resend_at = resend_at;
+        let wait = if resend { floor.saturating_mul(1 << (a.prop.resent().min(31) + 1)) } else { floor };
+        a.resend_at = now.after(wait.min(cap));
         let step = a.prop.step();
         let reqs: Vec<(NodeId, Proposal)> =
             a.prop.requests().filter(|(j, _)| !(resend && *j == me)).map(|(j, p)| (j, p.clone())).collect();

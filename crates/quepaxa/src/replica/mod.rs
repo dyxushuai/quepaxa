@@ -121,6 +121,9 @@ pub struct Replica {
     /// Smoothed propose-to-commit latency of own proposals that were not hedged, in
     /// nanoseconds.
     commit_latency: Option<u64>,
+    /// Smoothed time from starting a slot to its decision at the first step, over slots
+    /// whose requests were never sent again, in nanoseconds (`send_requests`).
+    request_rtt: Option<u64>,
     next_proposal: u64,
     next_alloc: u64,
     /// The slots this incarnation may lead at the top priority (`recovery.rs`).
@@ -279,6 +282,7 @@ impl Replica {
             placement: placement::Placement::new(now, leader),
             reads: reads::Reads::default(),
             commit_latency: None,
+            request_rtt: None,
             next_proposal: 0,
             next_alloc: 0,
             reservation,

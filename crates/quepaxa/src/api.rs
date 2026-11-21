@@ -55,9 +55,14 @@ pub struct Config {
     pub max_in_flight_slots: u32,
     /// How many local proposals may be pending before [`Error::Busy`].
     pub max_outstanding_proposals: u32,
-    /// How often an unanswered record request is re-sent, in nanoseconds. The default
-    /// (50 ms) suits a LAN; across regions set it above the round trip to the farthest
-    /// member of a majority, or every request is sent several times.
+    /// The shortest wait before an unanswered record request is sent again, in
+    /// nanoseconds: a floor, not a period. The first resend waits this or twice the
+    /// smoothed round trip of first-step slots never resent, whichever is longer; each
+    /// further resend of the same step waits twice as long as the one before, up to
+    /// `hedge_max`. The default (50 ms) suits a LAN; across regions set it above the round
+    /// trip to the farthest member of a majority, or the first requests are sent twice
+    /// before a round trip has been measured. Catch-up, read and probe retries still
+    /// repeat at this interval.
     pub retransmit_interval: u64,
     /// Lower bound of the adaptive hedge delay, in nanoseconds.
     pub hedge_min: u64,
@@ -332,7 +337,7 @@ pub enum Action {
 pub struct Metrics {
     /// Network messages that failed to decode or came from a non-member.
     pub messages_rejected: u64,
-    /// Record requests re-sent after `retransmit_interval`.
+    /// Times a step's unanswered record requests were sent again (`retransmit_interval`).
     pub retransmits: u64,
     /// Bulk catch-up requests re-sent after `retransmit_interval`.
     pub catch_up_retries: u64,

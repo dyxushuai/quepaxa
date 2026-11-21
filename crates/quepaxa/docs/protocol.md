@@ -74,6 +74,13 @@ What the paper leaves open, the crate fixes as follows (the repository's
   contend with the leader's slots, off its fast path, the moment the disks resume. A disk
   that keeps completing writes is slow, not stuck, and does not hold hedges; nor does
   one that would be stuck by the time a hedge is due, until it is.
+- **Retransmission.** A record request left unanswered is sent again after the resend
+  floor: `retransmit_interval`, or twice the smoothed time first-step slots take to decide
+  if that is longer (sampled only from slots whose requests were never sent again, so a
+  sample answers one copy). Each further resend of the same step waits twice as long as
+  the one before, up to `hedge_max`; a new step starts from the floor. On a saturated link
+  a request is queued, not lost, and resending it at a fixed period shorter than the queue
+  sends every value again and collapses throughput.
 - **Decisions.** A proposer that decides tells every replica with `Decided`, which names
   the value by its key (and priority) without carrying it, as does a recorder asked about
   a slot it already knows decided. A key names exactly one value, so the receiver takes it

@@ -190,3 +190,81 @@ fn a_stepped_aside_leader_losing_its_slots_proposes_nothing_and_hands_its_own_on
     assert!(!r.entries.relayed().iter().any(|i| i.entry.id == own), "not also relayed");
     assert!(r.entries.batches().values().all(|b| !b.entries.iter().any(|e| e.2 == own)), "in no batch");
 }
+
+/// Recorders 1 and 2 answer `slot`'s first step at `at` with `own` first: decided there.
+fn decide_at_the_first_step(r: &mut Replica, at: Timestamp, slot: Slot, own: &Proposal) {
+    let mut out = Vec::new();
+    for from in [1, 2] {
+        let first = Some(reply_proposal(own, own.key));
+        let reply = Body::RecordReply { slot, req_step: 4, step: 4, first, prev_agg: None };
+        r.handle(at, from_peer(from, 0, reply)).unwrap();
+        r.poll_actions(&mut out);
+    }
+    assert!(r.log.contains_key(&slot), "decided at the first step");
+}
+
+/// Waits from each retransmission of `slot`'s current step to the next, in ms.
+fn resend_gaps(r: &mut Replica, slot: Slot, n: usize) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut at = r.proposers[&slot].resend_at;
+    (0..n)
+        .map(|_| {
+            r.handle_timeout(at).unwrap();
+            r.poll_actions(&mut out);
+            let next = r.proposers[&slot].resend_at;
+            let gap = (next.0 - at.0) / MS;
+            at = next;
+            gap
+        })
+        .collect()
+}
+
+#[test]
+fn resends_of_a_step_back_off_up_to_hedge_max() {
+    let (mut r, slot, own) = leading();
+    assert_eq!(r.proposers[&slot].resend_at, Timestamp(1).after(50 * MS), "retransmit_interval");
+    // A request queued behind a saturated link is not lost: each resend waits twice as long.
+    assert_eq!(resend_gaps(&mut r, slot, 6), [100, 200, 400, 800, 1000, 1000], "doubling to hedge_max");
+    assert_eq!(r.metrics().retransmits, 6);
+    // Recorder 1 is at step 6 already: the new step starts from the floor again.
+    let first = Some(reply_proposal(&own, own.key));
+    let now = r.now;
+    let reply = Body::RecordReply { slot, req_step: 4, step: 6, first, prev_agg: None };
+    r.handle(now, from_peer(1, 0, reply)).unwrap();
+    r.poll_actions(&mut Vec::new());
+    assert_eq!(r.proposers[&slot].prop.step(), 6);
+    assert_eq!(r.proposers[&slot].resend_at, now.after(50 * MS), "a new step is not backed off");
+    assert_eq!(resend_gaps(&mut r, slot, 2), [100, 200]);
+}
+
+#[test]
+fn resends_wait_at_least_twice_the_first_step_round_trip() {
+    let (mut r, slot, own) = leading();
+    // Decided at the first step 40 ms after it started, never resent.
+    let at = Timestamp(1 + 40 * MS);
+    decide_at_the_first_step(&mut r, at, slot, &own);
+    assert_eq!(r.request_rtt, Some(40 * MS));
+    r.propose(at, Bytes::from_static(b"y")).unwrap();
+    r.poll_actions(&mut Vec::new());
+    let (&next, a) = r.proposers.iter().next().expect("the next slot is driven");
+    assert_eq!(a.resend_at, at.after(80 * MS), "2 × 40 ms, above retransmit_interval");
+    assert_eq!(resend_gaps(&mut r, next, 2), [160, 320]);
+    // A faster slot pulls the round trip down slowly; a slower one raises it at once.
+    let (mut r, slot, own) = leading();
+    r.request_rtt = Some(80 * MS);
+    decide_at_the_first_step(&mut r, Timestamp(1 + 40 * MS), slot, &own);
+    assert_eq!(r.request_rtt, Some(80 * MS - 10 * MS + 5 * MS));
+    let (mut r, slot, own) = leading();
+    r.request_rtt = Some(10 * MS);
+    decide_at_the_first_step(&mut r, Timestamp(1 + 40 * MS), slot, &own);
+    assert_eq!(r.request_rtt, Some(40 * MS));
+}
+
+#[test]
+fn a_slot_resent_before_its_decision_teaches_no_round_trip() {
+    let (mut r, slot, own) = leading();
+    assert_eq!(resend_gaps(&mut r, slot, 1), [100]);
+    let at = r.now.after(MS);
+    decide_at_the_first_step(&mut r, at, slot, &own);
+    assert_eq!(r.request_rtt, None, "the answer may be to either copy of the request");
+}

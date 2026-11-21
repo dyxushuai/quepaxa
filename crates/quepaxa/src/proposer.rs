@@ -48,6 +48,8 @@ pub(crate) struct SlotProposer {
     /// Same-step replies at the current step, one per recorder.
     replies: BTreeMap<NodeId, Reply>,
     decided: Option<Proposal>,
+    /// How many times the current step's requests were sent again.
+    resends: u32,
 }
 
 impl SlotProposer {
@@ -64,6 +66,7 @@ impl SlotProposer {
             sent: BTreeMap::new(),
             replies: BTreeMap::new(),
             decided: None,
+            resends: 0,
         };
         s.prepare(rng);
         s
@@ -100,6 +103,17 @@ impl SlotProposer {
         self.sent.get(&j)
     }
 
+    /// Counts a retransmission of the current step's requests; returns how many came before.
+    pub fn resent(&mut self) -> u32 {
+        self.resends = self.resends.saturating_add(1);
+        self.resends - 1
+    }
+
+    /// Whether the current step's requests were sent again.
+    pub fn was_resent(&self) -> bool {
+        self.resends > 0
+    }
+
     /// Current-step requests not yet answered (for first send and retransmission).
     pub fn requests(&self) -> impl Iterator<Item = (NodeId, &Proposal)> {
         self.sent.iter().filter(|(j, _)| !self.replies.contains_key(j)).map(|(j, p)| (*j, p))
@@ -117,6 +131,7 @@ impl SlotProposer {
             })
             .collect();
         self.replies.clear();
+        self.resends = 0;
         // Later phases may carry an adopted leader proposal, so only phase 0 is checked.
         debug_assert!(
             !self.step.is_multiple_of(4)
