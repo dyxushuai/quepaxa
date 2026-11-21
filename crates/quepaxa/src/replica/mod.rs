@@ -152,9 +152,11 @@ impl Replica {
     /// - [`Error::InvalidConfig`] if `cfg` breaks a rule documented on [`Config`]; the
     ///   message says which.
     /// - [`Error::CorruptRecord`] if a record fails its checksum, does not decode, or holds
-    ///   a value this replica never writes (a slot past the last valid one, a reservation
-    ///   through `u64::MAX`, incarnation `u64::MAX`); `index` is its position in `durable`.
-    ///   Records are never skipped.
+    ///   a value no further incarnation can follow (a slot past the last valid one, a
+    ///   reservation through `u64::MAX`, incarnation `u64::MAX`); `index` is its position in
+    ///   `durable`. Records are never skipped. Incarnation `u64::MAX` is also what a replica
+    ///   restarted from `u64::MAX - 1` writes: after that, the counter is exhausted and
+    ///   further restarts fail here, which is not corruption.
     /// - [`Error::InvalidConfig`] also if the durable state was built under another
     ///   [`Config::leader_order`].
     ///
