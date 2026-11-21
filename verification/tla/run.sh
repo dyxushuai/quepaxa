@@ -8,6 +8,7 @@
 # - Reads.tla, linearizable reads on top of it: exhaustive with fixed membership, simulated
 #   across membership changes (too large to exhaust).
 # - Entries.tla, where entries wait until they commit (#187): exhaustive, liveness included.
+# - Content.tla, batch content behind references (#172): exhaustive, liveness included.
 # Then every seeded bug must be found (within TLA_BUG_SECONDS), so the check cannot
 # silently stop checking anything.
 #
@@ -15,7 +16,7 @@
 # QuePaxa.tla.
 #
 # Needs Java 11+ (or Docker) and cargo. Usage: verification/tla/run.sh [part...], where a part
-# is quepaxa, membership, reads, entries, bugs or traces (all of them by default); nightly runs
+# is quepaxa, membership, reads, entries, content, bugs or traces (all of them by default); nightly runs
 # them as parallel jobs, since together they outlast one job's time limit. TLA_WORKERS sets
 # TLC's worker count (auto by default).
 set -uo pipefail
@@ -27,9 +28,9 @@ membership_seconds=${TLA_MEMBERSHIP_SECONDS:-1800}
 source "$here/lib.sh"
 
 parts=("$@")
-[[ ${#parts[@]} -eq 0 ]] && parts=(quepaxa membership reads entries bugs traces)
+[[ ${#parts[@]} -eq 0 ]] && parts=(quepaxa membership reads entries content bugs traces)
 for part in "${parts[@]}"; do
-  [[ $part =~ ^(quepaxa|membership|reads|entries|bugs|traces)$ ]] || { echo "unknown part: $part"; exit 2; }
+  [[ $part =~ ^(quepaxa|membership|reads|entries|content|bugs|traces)$ ]] || { echo "unknown part: $part"; exit 2; }
 done
 runs() { [[ " ${parts[*]} " == *" $1 "* ]]; }
 
@@ -98,19 +99,23 @@ if runs reads; then
   done
 fi
 
-if runs entries; then
-  mkdir "$work/Entries"
-  cp "$here/Entries.tla" "$here/Entries.cfg" "$work/Entries/"
-  out=$(tlc "$work/Entries" "$membership_seconds" Entries -config Entries.cfg 2>&1)
+# exhaustive <spec>: <spec>.cfg checked exhaustively, liveness included.
+exhaustive() {
+  local spec=$1 out status
+  mkdir "$work/$spec"
+  cp "$here/$spec.tla" "$here/$spec.cfg" "$work/$spec/"
+  out=$(tlc "$work/$spec" "$membership_seconds" "$spec" -config "$spec.cfg" 2>&1)
   status=$?
   if [[ $status -ne 0 ]] || ! grep -q "0 states left on queue" <<< "$out"; then
-    echo "FAIL    Entries.tla (Entries.cfg): TLC ended with status $status:"
+    echo "FAIL    $spec.tla ($spec.cfg): TLC ended with status $status:"
     grep -E -A30 "violated|^Error" <<< "$out" | head -60; tail -5 <<< "$out"
     failed=1
   else
-    echo "OK      Entries.tla (Entries.cfg): exhaustive, liveness included, $(grep -oE '[0-9,]+ distinct states found' <<< "$out" | tail -1)"
+    echo "OK      $spec.tla ($spec.cfg): exhaustive, liveness included, $(grep -oE '[0-9,]+ distinct states found' <<< "$out" | tail -1)"
   fi
-fi
+}
+runs entries && exhaustive Entries
+runs content && exhaustive Content
 
 # spec, its configuration, name, invariant it must violate, seconds to find it ("-" for
 # TLA_BUG_SECONDS), then a sed expression planting the bug. Configurations too large to
@@ -138,6 +143,8 @@ bugs=(
   Entries Entries "hand-on-unstarted-forgets" HeldDownstream - 's/!\[old\] = @ \\cup UNION \{Keep\(b\) : b \\in unstarted\}\]/![old] = @]/'
   Entries Entries "suspect-forgets" NoSilentLoss - 's/EXCEPT !\[Origin\] = @ \\cup fwd\]/EXCEPT ![Origin] = @]/'
   Entries Entries "route-without-the-forwarded-record" NoSilentLoss - "s/fwd' = IF r = Origin THEN fwd \\\\cup pending\\[r\\] ELSE fwd/fwd' = fwd/"
+  Content Content "record-without-the-content" DecidedContentDurable - 's/^    \/\\ v \\subseteq data\[r\]$/    \/\\ TRUE/'
+  Content Content "evict-content-a-register-holds" DecidedContentDurable - 's/^    \\\/ \\E t \\in Slots : b \\in reg\[r\]\[t\]$/    \\\/ FALSE/'
 )
 runs bugs && for ((i = 0; i < ${#bugs[@]}; i += 6)); do
   spec=${bugs[i]} cfg=${bugs[i + 1]} name=${bugs[i + 2]} invariant=${bugs[i + 3]} limit=${bugs[i + 4]}
