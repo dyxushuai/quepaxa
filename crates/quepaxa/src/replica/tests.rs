@@ -193,6 +193,17 @@ fn restart_rejects_a_reservation_through_the_last_slot() {
 }
 
 #[test]
+fn restart_rejects_the_last_incarnation() {
+    let cfg = || Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    let inc = |n| Record::Incarnation(n).encode();
+    assert_eq!(Replica::new(cfg(), [inc(u64::MAX - 1)], Timestamp(0)).map(|r| r.incarnation()), Ok(u64::MAX));
+    assert_eq!(
+        Replica::new(cfg(), [inc(4), inc(u64::MAX), inc(5)], Timestamp(0)).err(),
+        Some(Error::CorruptRecord { index: 1 })
+    );
+}
+
+#[test]
 fn snapshots_may_cover_slots_up_to_the_last_valid_one() {
     let members = [NodeId(0), NodeId(1), NodeId(2)];
     let state = |next| {
