@@ -11,7 +11,7 @@ use crate::proposal::{Proposal, ValueKey};
 use crate::types::{NodeId, Slot, Step};
 
 pub(crate) const MAGIC: [u8; 2] = *b"QP";
-pub(crate) const WIRE_VERSION: u8 = 1;
+pub(crate) const WIRE_VERSION: u8 = 2;
 
 const KIND_RECORD_REQUEST: u8 = 1;
 const KIND_RECORD_REPLY: u8 = 2;
@@ -80,10 +80,13 @@ pub(crate) enum Body {
         first: Option<WireProposal>,
         prev_agg: Option<WireProposal>,
     },
-    /// A slot's decided value, broadcast by the decider or sent instead of a record reply.
+    /// A slot's decided value by its priority and key, broadcast by the decider or sent
+    /// instead of a record reply. The receiver resolves the value from what it holds under
+    /// that key, else catches up from the sender (a key names exactly one value).
     Decided {
         slot: Slot,
-        proposal: Proposal,
+        priority: u64,
+        key: ValueKey,
     },
     /// Asks a peer for decided slots starting at `from`.
     CatchUp {
@@ -139,15 +142,24 @@ pub(crate) struct Message {
     pub body: Body,
 }
 
+#[cfg(test)]
+impl Body {
+    /// The announcement of `p` decided in `slot`.
+    pub fn decided(slot: Slot, p: Proposal) -> Self {
+        Body::Decided { slot, priority: p.priority, key: p.key }
+    }
+}
+
 impl Body {
     fn largest_value(&self) -> usize {
         let wire = |p: &Option<WireProposal>| p.as_ref().and_then(|p| p.value.as_ref()).map_or(0, Bytes::len);
         match self {
-            Body::RecordRequest { proposal, .. } | Body::Decided { proposal, .. } => proposal.value.len(),
+            Body::RecordRequest { proposal, .. } => proposal.value.len(),
             Body::RecordReply { first, prev_agg, .. } => wire(first).max(wire(prev_agg)),
             Body::Entries { proposals, .. } => proposals.iter().map(|p| p.value.len()).max().unwrap_or(0),
             Body::Forward { batch } => batch.len(),
-            Body::CatchUp { .. }
+            Body::Decided { .. }
+            | Body::CatchUp { .. }
             | Body::Compacted { .. }
             | Body::ReadQuery { .. }
             | Body::ReadReply { .. }
@@ -228,9 +240,9 @@ impl Message {
                 put_wire_proposal(&mut out, first.as_ref());
                 put_wire_proposal(&mut out, prev_agg.as_ref());
             }
-            Body::Decided { slot, proposal } => {
+            Body::Decided { slot, priority, key } => {
                 out.put_u64_le(slot.0);
-                put_proposal(&mut out, proposal);
+                put_head(&mut out, *priority, *key);
             }
             Body::CatchUp { from } => out.put_u64_le(from.0),
             Body::Entries { first, proposals } => {
@@ -273,9 +285,10 @@ impl Message {
     fn payload_len(&self) -> usize {
         let len = |p: &Option<WireProposal>| p.as_ref().and_then(|p| p.value.as_ref()).map_or(0, Bytes::len);
         match &self.body {
-            Body::RecordRequest { proposal, .. } | Body::Decided { proposal, .. } => proposal.value.len(),
+            Body::RecordRequest { proposal, .. } => proposal.value.len(),
             Body::RecordReply { first, prev_agg, .. } => len(first) + len(prev_agg),
-            Body::CatchUp { .. }
+            Body::Decided { .. }
+            | Body::CatchUp { .. }
             | Body::Compacted { .. }
             | Body::ReadQuery { .. }
             | Body::ReadReply { .. }
@@ -328,7 +341,11 @@ impl Message {
                 first: r.wire_proposal()?,
                 prev_agg: r.wire_proposal()?,
             },
-            KIND_DECIDED => Body::Decided { slot: Slot(r.u64()?), proposal: r.proposal()? },
+            KIND_DECIDED => {
+                let slot = Slot(r.u64()?);
+                let (priority, key) = r.head()?;
+                Body::Decided { slot, priority, key }
+            }
             KIND_CATCH_UP => Body::CatchUp { from: Slot(r.u64()?) },
             KIND_ENTRIES => {
                 let first = Slot(r.u64()?);
@@ -521,7 +538,7 @@ mod tests {
     }
 
     const ENVELOPE_HEX: &str =
-        "5150 01 KK abababababababababababababababab 0700000000000000 01000000 02000000 0900000000000000";
+        "5150 02 KK abababababababababababababababab 0700000000000000 01000000 02000000 0900000000000000";
 
     fn golden(kind: &str, body: &str) -> Vec<u8> {
         hex(&ENVELOPE_HEX.replace("KK", kind).replace(' ', "")).into_iter().chain(hex(body)).collect()
@@ -537,13 +554,13 @@ mod tests {
     }
 
     #[test]
-    fn record_request_matches_golden_bytes_v1() {
+    fn record_request_matches_golden_bytes_v2() {
         let body = "0600000000000000 04000000 0201000000000000 03000000 0400000000000000 0500000000000000 00 02000000 6869";
         assert_eq!(request().encode().to_vec(), golden("01", body));
     }
 
     #[test]
-    fn record_reply_matches_golden_bytes_v1() {
+    fn record_reply_matches_golden_bytes_v2() {
         let first = WireProposal {
             priority: 1,
             key: ValueKey { origin: NodeId(3), incarnation: 4, seq: 5 },
@@ -564,13 +581,25 @@ mod tests {
     }
 
     #[test]
-    fn forward_ack_matches_golden_bytes_v1() {
+    fn decided_matches_golden_bytes_v2_without_its_value() {
+        let key = ValueKey { origin: NodeId(3), incarnation: 4, seq: 5 };
+        let msg = Message { env: env(), body: Body::Decided { slot: Slot(6), priority: 0x0102, key } };
+        let body = "0600000000000000 0201000000000000 03000000 0400000000000000 0500000000000000";
+        let bytes = msg.encode();
+        assert_eq!(bytes.to_vec(), golden("03", body));
+        // Envelope 44 bytes, body 36: the leader's per-peer cost of a decision.
+        assert_eq!(bytes.len(), 80);
+        assert_eq!(Message::decode(&bytes, &CTX), Ok(msg));
+    }
+
+    #[test]
+    fn forward_ack_matches_golden_bytes_v2() {
         let ack = Message { env: env(), body: Body::ForwardAck };
         assert_eq!(ack.encode().to_vec(), golden("0a", ""));
     }
 
     #[test]
-    fn rtt_messages_match_golden_bytes_v1() {
+    fn rtt_messages_match_golden_bytes_v2() {
         let probe = Message {
             env: env(),
             body: Body::RttProbe {
@@ -599,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn read_query_and_reply_match_golden_bytes_v1() {
+    fn read_query_and_reply_match_golden_bytes_v2() {
         let query = Message { env: env(), body: Body::ReadQuery { incarnation: 3, round: 7 } };
         assert_eq!(query.encode().to_vec(), golden("08", "0300000000000000 0700000000000000"));
         let reply =
@@ -629,7 +658,7 @@ mod tests {
         other.config_epoch = 8;
         assert_eq!(Message::decode(&bytes, &other), Err(DecodeError::WrongEpoch));
         let mut v = bytes.to_vec();
-        v[2] = 2;
+        v[2] = 1;
         assert_eq!(Message::decode(&Bytes::from(v), &CTX), Err(DecodeError::BadVersion));
     }
 
@@ -729,6 +758,7 @@ mod tests {
             let batch = ps.first().map(|p| p.value.clone()).unwrap_or_default();
             for body in [
                 Body::CatchUp { from: Slot(from) },
+                Body::Decided { slot: Slot(from), priority: round, key: ValueKey { origin: NodeId(round as u32), incarnation: from, seq: round } },
                 Body::Entries { first: Slot(from), proposals: ps.clone() },
                 Body::Forward { batch },
                 Body::Compacted { through: Slot(from) },

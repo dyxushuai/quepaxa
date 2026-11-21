@@ -93,6 +93,9 @@ pub struct Replica {
     emitted: u64,
     /// Undecided slots someone else drives, with when they last made progress.
     seen: BTreeMap<Slot, Timestamp>,
+    /// Slots announced decided whose value this replica does not hold, with the peer last
+    /// asked for it and when (`log.rs`).
+    unresolved: BTreeMap<Slot, (NodeId, Timestamp)>,
     /// How far peers are ahead, and the bulk request in flight (`recovery.rs`).
     catch_up: recovery::CatchUp,
     /// Leader schedule as of the decided prefix (`committed`), used to drive slots.
@@ -242,6 +245,7 @@ impl Replica {
             committed: floor,
             emitted: floor,
             seen: BTreeMap::new(),
+            unresolved: BTreeMap::new(),
             catch_up: recovery::CatchUp::default(),
             dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
             proposers: BTreeMap::new(),
@@ -622,6 +626,7 @@ impl Replica {
         }
         self.drop_reads();
         self.proposers.clear();
+        self.unresolved.clear();
         self.inbox.clear();
         self.gate.fence();
     }
@@ -661,6 +666,8 @@ impl Replica {
     }
 }
 
+#[cfg(test)]
+mod decided_tests;
 #[cfg(test)]
 mod disk_tests;
 #[cfg(test)]

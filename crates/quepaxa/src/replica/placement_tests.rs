@@ -1,7 +1,7 @@
 //! Leader placement measurement: round-trip probes and write counts.
 
 use super::placement::{ACTIVE_FOR, PROBE_INTERVAL};
-use super::tests::{from_peer, r_wire, replica_as};
+use super::tests::{announce, from_peer, r_wire, replica_as};
 use super::*;
 use crate::proposal::ValueKey;
 
@@ -76,9 +76,7 @@ fn apply_items(r: &mut Replica, at: Timestamp, items: &[Item]) {
         value: batch::encode(items),
     };
     let slot = Slot(r.committed);
-    r.handle(at, from_peer(1, r.me.0, Body::Decided { slot, proposal: decided })).unwrap();
-    let mut out = Vec::new();
-    r.poll_actions(&mut out);
+    announce(r, at, 1, slot, decided);
 }
 
 #[test]

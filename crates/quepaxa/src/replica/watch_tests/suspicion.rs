@@ -44,7 +44,7 @@ fn a_suspecting_follower_proposes_a_lost_batch_again_itself() {
     let mut out = Vec::new();
     let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the hedged batch has a slot");
     // Another follower's value takes the slot (the leader is still silent).
-    r.handle(r.now, from_peer(2, 1, Body::Decided { slot, proposal: proposal(1, 2, 0) })).unwrap();
+    r.handle(r.now, from_peer(2, 1, Body::decided(slot, proposal(1, 2, 0)))).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 0, "not handed back to the silent leader");
     assert!(
@@ -59,7 +59,7 @@ fn the_dead_leaders_own_value_deciding_does_not_end_the_suspicion() {
     let mut out = Vec::new();
     // A slot the leader started, taken over by another follower: it decides with the
     // leader's value, but the leader itself said nothing.
-    r.handle(r.now, from_peer(2, 1, Body::Decided { slot: Slot(0), proposal: proposal(1, 0, 7) })).unwrap();
+    r.handle(r.now, from_peer(2, 1, Body::decided(Slot(0), proposal(1, 0, 7)))).unwrap();
     r.poll_actions(&mut out);
     let next = r.propose(r.now, Bytes::from_static(b"y")).unwrap();
     r.poll_actions(&mut out);
@@ -178,7 +178,7 @@ fn a_deputy_proposes_a_handed_entry_again_when_its_batch_loses_the_slot() {
     let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the deputy proposes the entry");
     out.clear();
     // Another value takes the slot; this replica itself never suspected leader 0.
-    r.handle(r.now, from_peer(0, 1, Body::Decided { slot, proposal: proposal(1, 0, 0) })).unwrap();
+    r.handle(r.now, from_peer(0, 1, Body::decided(slot, proposal(1, 0, 0)))).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(forwards_to(&out, 0), 0, "not handed to the leader replica 2 gave up on");
     assert!(
@@ -208,12 +208,9 @@ fn entries_a_leader_handed_over_go_back_to_it_once_it_decides_again() {
     r.handle(Timestamp(1), from_peer(0, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
     r.poll_actions(&mut out);
     let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the entry is proposed here");
-    let own = Body::Decided { slot: Slot(slot.0 + 1), proposal: proposal(1, 0, 1) };
-    r.handle(Timestamp(2), from_peer(0, 1, own)).unwrap();
-    r.poll_actions(&mut out);
+    announce(&mut r, Timestamp(2), 0, Slot(slot.0 + 1), proposal(1, 0, 1));
     out.clear();
-    r.handle(Timestamp(3), from_peer(0, 1, Body::Decided { slot, proposal: proposal(1, 0, 0) })).unwrap();
-    r.poll_actions(&mut out);
+    out.extend(announce(&mut r, Timestamp(3), 0, slot, proposal(1, 0, 0)));
     assert!(r.entries.batches().is_empty(), "not proposed again, to lose to the leader slot after slot");
     assert_eq!(forwards_to(&out, 0), 1, "handed back to the leader");
 }

@@ -80,7 +80,7 @@ fn the_move_never_reaches_the_application() {
         .unwrap();
     let slot = Slot(r.committed);
     let decided = Proposal { priority: 1, key, value };
-    r.handle(r.now, tests::from_peer(1, 0, Body::Decided { slot, proposal: decided })).unwrap();
+    r.handle(r.now, tests::from_peer(1, 0, Body::decided(slot, decided))).unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
     assert!(out.iter().any(|a| matches!(a, Action::Reconfigured { .. })), "{out:?}");

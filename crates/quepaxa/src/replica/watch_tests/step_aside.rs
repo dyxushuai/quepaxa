@@ -7,7 +7,7 @@ fn a_leader_whose_disk_is_stuck_hands_its_entries_on_while_others_decide() {
     let (mut r, id) = leader_with_a_stuck_disk();
     let mut out = Vec::new();
     // The two others decide a slot without it: their disks work.
-    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 1, 0) };
+    let decided = Body::decided(Slot(9), proposal(1, 1, 0));
     r.handle(Timestamp(10 * MS), from_peer(1, 0, decided)).unwrap();
     r.poll_actions(&mut out);
     r.handle_timeout(Timestamp(MS + 79 * MS)).unwrap();
@@ -72,9 +72,7 @@ fn a_follower_whose_disk_is_stuck_does_not_step_aside() {
     r.watch.disk.assume_usual(MS);
     r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
-    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 0, 0) };
-    r.handle(Timestamp(10 * MS), from_peer(0, 1, decided)).unwrap();
-    r.poll_actions(&mut out);
+    out.extend(announce(&mut r, Timestamp(10 * MS), 0, Slot(9), proposal(1, 0, 0)));
     assert!(r.watch.disk.in_flight().len() > 0, "a write is stuck");
     assert_eq!(r.aside_at(), None);
     r.handle_timeout(Timestamp(MS + 200 * MS)).unwrap();
@@ -90,7 +88,7 @@ fn a_follower_does_not_hedge_while_every_disk_seems_stuck() {
     let mut out = Vec::new();
     // A decision made durable before the disks stopped, arriving before the write was due
     // (four usual write times), says nothing about them.
-    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 2, 0) };
+    let decided = Body::decided(Slot(9), proposal(1, 2, 0));
     r.handle(Timestamp(3 * MS), from_peer(2, 1, decided)).unwrap();
     r.poll_actions(&mut out);
     r.handle_timeout(Timestamp(150 * MS)).unwrap();
@@ -162,7 +160,7 @@ fn a_follower_whose_disk_alone_is_stuck_still_hedges() {
     for at in [10, 85] {
         let (mut r, id) = follower_with_a_stuck_disk();
         let mut out = Vec::new();
-        let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 2, 0) };
+        let decided = Body::decided(Slot(9), proposal(1, 2, 0));
         r.handle(Timestamp(at * MS), from_peer(2, 1, decided)).unwrap();
         r.poll_actions(&mut out);
         r.handle_timeout(Timestamp(85 * MS)).unwrap();
@@ -178,7 +176,7 @@ fn a_repeat_of_a_slot_already_applied_is_not_progress_elsewhere() {
     let (mut r, _) = leader_with_a_stuck_disk();
     let mut out = Vec::new();
     r.emitted = 10;
-    let decided = Body::Decided { slot: Slot(5), proposal: proposal(1, 1, 0) };
+    let decided = Body::decided(Slot(5), proposal(1, 1, 0));
     r.handle(Timestamp(10 * MS), from_peer(1, 0, decided)).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.watch.disk.last_decided_elsewhere(), Timestamp(0));
@@ -202,7 +200,7 @@ fn a_stepped_aside_deputy_hands_on_what_it_is_handed() {
     r.watch.suspects.insert(NodeId(0), Timestamp(0));
     r.propose(Timestamp(MS), Bytes::from_static(b"own")).unwrap();
     r.poll_actions(&mut out);
-    let decided = Body::Decided { slot: Slot(9), proposal: proposal(1, 2, 0) };
+    let decided = Body::decided(Slot(9), proposal(1, 2, 0));
     r.handle(Timestamp(10 * MS), from_peer(2, 1, decided)).unwrap();
     r.poll_actions(&mut out);
     r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();

@@ -260,6 +260,7 @@ impl Replica {
             .chain(self.watch.ack_due.values().copied())
             .chain(self.aside_at().filter(|_| !self.watch.aside))
             .chain(self.placement.next_probe)
+            .chain(self.earliest_unresolved())
             .min()
     }
 
@@ -276,6 +277,7 @@ impl Replica {
             self.probe_peers();
         }
         self.fire_probe();
+        self.retry_unresolved();
         let due: Vec<Slot> =
             self.proposers.iter().filter(|(_, a)| a.resend_at <= now).map(|(s, _)| *s).collect();
         for slot in due {

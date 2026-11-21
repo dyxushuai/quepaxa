@@ -1,7 +1,9 @@
 //! Recorder side and the decided log: answering record requests, learning decisions,
 //! serving catch-up, and emitting commits in order.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use bytes::Bytes;
 
 use super::entries::Own;
 use super::{Decision, Effect, Replica};
@@ -9,8 +11,8 @@ use crate::api::{Action, DropReason};
 use crate::batch::{self, Kind};
 use crate::codec::{Body, reply_proposal};
 use crate::durable::Record;
-use crate::proposal::Proposal;
-use crate::types::{MAX_SLOT, MAX_STEP, NodeId, ProposalId, Slot};
+use crate::proposal::{Proposal, ValueKey};
+use crate::types::{MAX_SLOT, MAX_STEP, NodeId, ProposalId, Slot, Timestamp};
 
 impl Replica {
     pub(super) fn on_request(&mut self, from: NodeId, slot: Slot, step: u32, proposal: Proposal) {
@@ -23,8 +25,8 @@ impl Replica {
             return;
         }
         if let Some(d) = self.log.get(&slot) {
-            let proposal = d.proposal.clone();
-            self.send(from, Body::Decided { slot, proposal });
+            let (priority, key) = (d.proposal.priority, d.proposal.key);
+            self.send(from, Body::Decided { slot, priority, key });
             return;
         }
         if slot.0 < self.committed || slot.0 >= self.committed + 4 * self.window() {
@@ -81,7 +83,79 @@ impl Replica {
         self.send_gated(to, Body::Entries { first: start, proposals });
     }
 
+    /// A peer announced `slot` decided with the value under `key`.
+    pub(super) fn on_decided(&mut self, from: NodeId, slot: Slot, priority: u64, key: ValueKey) {
+        if slot.0 < self.emitted || self.log.contains_key(&slot) {
+            return;
+        }
+        // A majority made a value durable without this replica (`aside_at`).
+        self.watch.disk.decided_elsewhere(self.now);
+        // The target announced a slot it decided itself: it is busy, not stuck (`late_at`).
+        // Not its answer to a request of ours (it may only have cached someone else's
+        // decision).
+        if from == self.target() && !self.proposers.contains_key(&slot) {
+            self.watch.progressed = self.now;
+        }
+        if let Some(value) = self.resolve_decided(slot, key) {
+            self.learn(slot, Proposal { priority, key, value }, false);
+            return;
+        }
+        if slot.0 > MAX_SLOT || self.unresolved.contains_key(&slot) {
+            return;
+        }
+        // Tracked even far ahead: bulk catch-up stops a slot short of the peers' commit
+        // index, and nothing else would ask for it. But only a near slot is asked for at
+        // once; far ones usually arrive in the bulk pages first, else on the timer.
+        self.unresolved.insert(slot, (from, self.now));
+        if slot.0 < self.committed + 4 * self.window() {
+            self.send(from, Body::CatchUp { from: slot });
+        }
+    }
+
+    /// The value a decision names: a key identifies exactly one value, so any copy this
+    /// replica holds under it is the decided one.
+    fn resolve_decided(&self, slot: Slot, key: ValueKey) -> Option<Bytes> {
+        let reg = self.registers.get(&slot).into_iter().flat_map(|r| [&r.first, &r.agg, &r.prev_agg]);
+        let held = reg.flatten().find(|p| p.key == key).map(|p| &p.value);
+        held.or_else(|| self.proposers.get(&slot).and_then(|a| a.prop.value_of(key)))
+            .or_else(|| self.entries.batch_value(key))
+            .cloned()
+    }
+
+    /// Asks again for decided slots still unresolved after a retransmit interval: at most
+    /// one `CatchUp` per peer, from the lowest such slot, each slot's peer rotating through
+    /// its members (the decider may be gone).
+    pub(super) fn retry_unresolved(&mut self) {
+        let (emitted, log) = (self.emitted, &self.log);
+        self.unresolved.retain(|s, _| s.0 >= emitted && !log.contains_key(s));
+        let now = self.now;
+        let due: Vec<(Slot, NodeId)> = self
+            .unresolved
+            .iter()
+            .filter(|(_, (_, t))| t.after(self.cfg.retransmit_interval) <= now)
+            .map(|(s, (peer, _))| (*s, *peer))
+            .collect();
+        let mut asks: BTreeMap<NodeId, Slot> = BTreeMap::new();
+        for (slot, peer) in due {
+            let members = self.schedule.members(slot);
+            let after = members.iter().position(|m| *m == peer).map_or(0, |i| i + 1);
+            let next = members.iter().cycle().skip(after).take(members.len()).find(|m| **m != self.me);
+            let next = next.copied().unwrap_or(peer);
+            self.unresolved.insert(slot, (next, now));
+            asks.entry(next).or_insert(slot);
+        }
+        for (peer, slot) in asks {
+            self.metrics.catch_up_retries += 1;
+            self.send(peer, Body::CatchUp { from: slot });
+        }
+    }
+
+    pub(super) fn earliest_unresolved(&self) -> Option<Timestamp> {
+        self.unresolved.values().map(|(_, t)| t.after(self.cfg.retransmit_interval)).min()
+    }
+
     pub(super) fn learn(&mut self, slot: Slot, proposal: Proposal, broadcast: bool) {
+        self.unresolved.remove(&slot);
         if slot.0 < self.emitted || slot.0 > MAX_SLOT || self.log.contains_key(&slot) {
             return;
         }
@@ -96,7 +170,7 @@ impl Replica {
             // Everyone in the current or a pending epoch: joining replicas catch up early.
             let peers: Vec<NodeId> = self.schedule.everyone().into_iter().filter(|&m| m != self.me).collect();
             for peer in peers {
-                self.send(peer, Body::Decided { slot, proposal: proposal.clone() });
+                self.send(peer, Body::Decided { slot, priority: proposal.priority, key: proposal.key });
             }
         }
         self.log.insert(slot, Decision { proposal });
