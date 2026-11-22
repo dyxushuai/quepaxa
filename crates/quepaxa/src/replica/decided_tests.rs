@@ -121,7 +121,7 @@ fn an_unknown_value_is_caught_up_from_the_sender_and_retried_on_the_timer() {
     r.handle_timeout(due).unwrap();
     // The decider may be gone: the retry goes to the slot's next member.
     assert_eq!(catch_ups(&sent(&mut r)), [(NodeId(2), Slot(0))]);
-    let entries = Body::Entries { first: Slot(0), proposals: alloc::vec![p] };
+    let entries = Body::Entries { first: Slot(0), proposals: alloc::vec![p], content: Vec::new() };
     r.handle(due, from_peer(2, 1, entries)).unwrap();
     sent(&mut r);
     assert_eq!(decided_value(&r, 0).as_deref(), Some(&b"unseen"[..]));
@@ -157,7 +157,11 @@ fn a_decision_far_ahead_is_asked_for_on_the_timer() {
     let due = Timestamp(1).after(r.cfg.retransmit_interval);
     r.handle_timeout(due).unwrap();
     assert!(catch_ups(&sent(&mut r)).contains(&(NodeId(2), far)));
-    r.handle(due, from_peer(2, 1, Body::Entries { first: far, proposals: alloc::vec![p] })).unwrap();
+    r.handle(
+        due,
+        from_peer(2, 1, Body::Entries { first: far, proposals: alloc::vec![p], content: Vec::new() }),
+    )
+    .unwrap();
     sent(&mut r);
     assert_eq!(decided_value(&r, far.0).as_deref(), Some(&b"far"[..]));
     assert!(r.unresolved.is_empty());

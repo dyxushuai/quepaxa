@@ -99,6 +99,7 @@ extern crate alloc;
 mod api;
 mod batch;
 mod codec;
+mod content;
 mod core_state;
 mod crc;
 mod dedup;

@@ -80,7 +80,8 @@ impl Replica {
             }
             proposals.push(d.proposal.clone());
         }
-        self.send_gated(to, Body::Entries { first: start, proposals });
+        // Values hold no references yet (#172): every page is self-contained without content.
+        self.send_gated(to, Body::Entries { first: start, proposals, content: Vec::new() });
     }
 
     /// A peer announced `slot` decided with the value under `key`.

@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
+--- a/crates/quepaxa/src/replica/mod.rs
++++ b/crates/quepaxa/src/replica/mod.rs
+@@ -193,7 +193,7 @@
+                     // Records are durable in order, and a register's content is written
+                     // ahead of it: a reference without its `Data` record breaks promise 1.
+                     for p in [&reg.first, &reg.agg, &reg.prev_agg].into_iter().flatten() {
+-                        content.pin_refs(&p.value, slot).map_err(|_| Error::CorruptRecord { index })?;
++                        let _ = content.pin_refs(&p.value, slot);
+                     }
+                     registers.insert(slot, reg);
+                 }

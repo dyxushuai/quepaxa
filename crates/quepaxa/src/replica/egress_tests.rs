@@ -24,6 +24,8 @@ fn kind(bytes: &Bytes) -> &'static str {
         Body::ReadReply { .. } => "ReadReply",
         Body::RttProbe { .. } => "RttProbe",
         Body::RttReply { .. } => "RttReply",
+        Body::Data { .. } => "Data",
+        Body::Fetch { .. } => "Fetch",
     }
 }
 

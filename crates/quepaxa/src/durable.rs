@@ -5,14 +5,16 @@
 use alloc::vec::Vec;
 use bytes::{BufMut, Bytes};
 
-use crate::codec::{DecodeError, Reader, put_opt_proposal, put_proposal};
+use crate::batch::DataId;
+use crate::codec::{DecodeError, Reader, put_data_id, put_opt_proposal, put_proposal, put_value};
 use crate::crc::crc32c;
 use crate::proposal::Proposal;
 use crate::recorder::Register;
 use crate::types::Slot;
 
 const MAGIC: [u8; 2] = *b"QR";
-const FORMAT_VERSION: u8 = 1;
+/// Version 2 added `KIND_DATA`. A version reads only its own records (no migration before 1.0).
+const FORMAT_VERSION: u8 = 2;
 
 const KIND_INCARNATION: u8 = 1;
 const KIND_RESERVATION: u8 = 3;
@@ -21,6 +23,7 @@ const KIND_COMPACTED: u8 = 5;
 /// A recorder register whose `agg` and `prev_agg` may refer to an earlier field instead of
 /// repeating its value (on the fast path `agg` is `first`). Kind 2 was an earlier encoding.
 const KIND_RECORDER: u8 = 6;
+const KIND_DATA: u8 = 7;
 
 // Field tags of `KIND_RECORDER` beyond the codec's nil/present.
 const SAME_AS_FIRST: u8 = 3;
@@ -38,6 +41,8 @@ pub(crate) enum Record {
     Decided { slot: Slot, proposal: Proposal },
     /// Every slot up to `through` is covered by an application snapshot carrying `core_state`.
     Compacted { through: Slot, core_state: Bytes },
+    /// A data batch's content, written ahead of the first record that references it.
+    Data { id: DataId, bytes: Bytes },
 }
 
 impl Record {
@@ -71,7 +76,12 @@ impl Record {
             Record::Compacted { through, core_state } => {
                 out.put_u8(KIND_COMPACTED);
                 out.put_u64_le(through.0);
-                crate::codec::put_value(&mut out, core_state);
+                put_value(&mut out, core_state);
+            }
+            Record::Data { id, bytes } => {
+                out.put_u8(KIND_DATA);
+                put_data_id(&mut out, *id);
+                put_value(&mut out, bytes);
             }
         }
         let crc = crc32c(&out);
@@ -107,6 +117,7 @@ impl Record {
             KIND_RESERVATION => Record::Reservation { through: Slot(r.u64()?) },
             KIND_DECIDED => Record::Decided { slot: Slot(r.u64()?), proposal: r.proposal()? },
             KIND_COMPACTED => Record::Compacted { through: Slot(r.u64()?), core_state: r.value()? },
+            KIND_DATA => Record::Data { id: r.data_id()?, bytes: r.value()? },
             _ => return Err(DecodeError::UnknownKind),
         };
         r.finish()?;
@@ -140,7 +151,11 @@ mod tests {
     use super::*;
     use crate::proposal::tests::prop;
 
-    fn samples() -> [Record; 6] {
+    fn data_id() -> DataId {
+        DataId { origin: crate::types::NodeId(3), incarnation: 4, seq: 5 }
+    }
+
+    fn samples() -> [Record; 7] {
         let v = prop(9, 1, 0);
         [
             Record::Incarnation(3),
@@ -165,6 +180,7 @@ mod tests {
             Record::Reservation { through: Slot(40) },
             Record::Decided { slot: Slot(9), proposal: prop(8, 2, 1) },
             Record::Compacted { through: Slot(7), core_state: Bytes::from_static(b"state") },
+            Record::Data { id: data_id(), bytes: Bytes::from_static(b"batch") },
         ]
     }
 
@@ -208,7 +224,7 @@ mod tests {
 
     #[test]
     fn an_earlier_recorder_encoding_is_rejected() {
-        let mut old = b"QR\x01\x02".to_vec();
+        let mut old = b"QR\x02\x02".to_vec();
         old.extend_from_slice(&9u64.to_le_bytes());
         old.extend_from_slice(&6u32.to_le_bytes());
         old.extend_from_slice(&[0, 0, 0]);
@@ -219,7 +235,7 @@ mod tests {
 
     #[test]
     fn a_reference_to_an_absent_field_is_rejected() {
-        let mut bad = b"QR\x01\x06".to_vec();
+        let mut bad = b"QR\x02\x06".to_vec();
         bad.extend_from_slice(&9u64.to_le_bytes());
         bad.extend_from_slice(&6u32.to_le_bytes());
         bad.extend_from_slice(&[0, SAME_AS_FIRST, 0]);
@@ -228,13 +244,32 @@ mod tests {
         assert_eq!(Record::decode(&Bytes::from(bad)), Err(DecodeError::BadTag));
     }
 
+    fn sealed(mut body: Vec<u8>) -> Vec<u8> {
+        let crc = crc32c(&body);
+        body.extend_from_slice(&crc.to_le_bytes());
+        body
+    }
+
     #[test]
-    fn incarnation_matches_golden_bytes_v1() {
-        let mut expected = b"QR\x01\x01".to_vec();
-        expected.extend_from_slice(&3u64.to_le_bytes());
-        let crc = crc32c(&expected);
-        expected.extend_from_slice(&crc.to_le_bytes());
+    fn incarnation_matches_golden_bytes_v2() {
+        let expected = sealed([b"QR\x02\x01".as_slice(), &3u64.to_le_bytes()].concat());
         assert_eq!(Record::Incarnation(3).encode().to_vec(), expected);
+    }
+
+    #[test]
+    fn data_matches_golden_bytes_v2() {
+        let id = [3u32.to_le_bytes().as_slice(), &4u64.to_le_bytes(), &5u64.to_le_bytes()].concat();
+        let value = [[0u8].as_slice(), &2u32.to_le_bytes(), b"hi"].concat();
+        let expected = sealed([b"QR\x02\x07".as_slice(), &id, &value].concat());
+        let rec = Record::Data { id: data_id(), bytes: Bytes::from_static(b"hi") };
+        assert_eq!(rec.encode().to_vec(), expected);
+    }
+
+    #[test]
+    fn a_record_of_the_previous_format_is_refused() {
+        // A valid version-1 record: an incarnation, checksum and all.
+        let old = sealed([b"QR\x01\x01".as_slice(), &3u64.to_le_bytes()].concat());
+        assert_eq!(Record::decode(&Bytes::from(old)), Err(DecodeError::BadVersion));
     }
 
     #[test]
