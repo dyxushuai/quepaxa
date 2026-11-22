@@ -59,8 +59,9 @@ What the paper leaves open, the crate fixes as follows (the repository's
   A follower whose batch loses its slot forwards the entries to the leader again rather
   than competing with it for the next slot. Every forward is numbered and the leader
   acknowledges each one it takes (`ForwardAck` lists the numbers, still at most once per
-  eighth of `retransmit_interval`); one left unacknowledged is sent again to the same
-  leader, backing off as record requests do, so a forward lost on the wire is retried
+  eighth of `retransmit_interval`); one left unacknowledged for twice the usual delay of
+  those acknowledgements is sent again to the same leader, backing off as record requests
+  do, so a forward lost on the wire is retried
   rather than hedged. A leader that keeps deciding slots of its own is working through a
   backlog: an acknowledged entry is hedged around it only once it has decided nothing for
   four hedge delays (at most `hedge_max`), counted from its last decision; an

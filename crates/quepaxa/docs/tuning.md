@@ -98,7 +98,8 @@ Any setting is safe; a bad one is slow.
 [`Replica::metrics`](crate::Replica::metrics) returns counters: rejected messages, retransmits,
 catch-up retries, slots decided, fast-path decisions, forwarded and hedged entries (with
 `hedges_at_bound`, those hedged only by the four-`hedge_max` bound although the leader kept
-deciding, and `forward_resends`, forwards the leader had not acknowledged in time), and
+deciding, and `forward_resends` and `forward_resent_bytes`, forwards the leader had not
+acknowledged in time), and
 how much decided state is held in memory. Rising `hedged` with a healthy leader means
 `hedge_max` is too low; rising `retransmits` means messages are lost or the link stays
 saturated past even the backed-off resend waits; `retained_slots` that keeps growing means the application is not snapshotting.

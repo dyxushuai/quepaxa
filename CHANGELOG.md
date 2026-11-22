@@ -27,11 +27,13 @@ All notable changes to this project are documented here. The project follows
   acknowledgement (acknowledgements still coalesce, at most one per eighth of
   `retransmit_interval`); a forward refused because the leader's queue is full is not
   listed. Part of wire version 2, not yet released.
-- `quepaxa` (behaviour): a forward the target has not acknowledged within the resend floor
-  is sent again to the same target, with the same number and the entries still waiting on
-  it, backing off as record requests do; the target drops entries already committed. A
-  forward lost on the wire is so retried instead of hedged. New metric
-  `forward_resends` (#231).
+- `quepaxa` (behaviour): a forward the target has not acknowledged is sent again to the
+  same target, with the same number and the entries still waiting on it; the target drops
+  entries already committed. The first resend waits twice the smoothed delay from sending a
+  forward to its acknowledgement (at least that delay plus the acknowledgement cooldown, and
+  `retransmit_interval`), or `hedge_max` before any acknowledgement was seen; each further
+  one twice as long, up to `hedge_max`. A forward lost on the wire is so retried instead of
+  hedged. New metrics `forward_resends` and `forward_resent_bytes` (#231).
 - `quepaxa` (behaviour): a follower whose target acknowledged a forward and has decided a
   slot of its own since hedges the entry 4δ (at most `hedge_max`) after the target's last
   decision, not after the forward: a target still deciding is not hedged around. Hedges

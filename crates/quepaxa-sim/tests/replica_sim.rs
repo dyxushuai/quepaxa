@@ -293,7 +293,7 @@ fn no_slow_machine_leaves_the_schedule_unchanged() {
     // The default configuration must not draw from the random stream or reorder events
     // differently because slow machines exist. A change to how replicas behave changes these
     // hashes too: re-record them then, from a run without slow machines.
-    for (n, seed, hash) in [(3, 7, 0x1cb9_6c94_d406_3339_u64), (5, 3, 0x652f_3979_3e75_39b0)] {
+    for (n, seed, hash) in [(3, 7, 0xabad_9bb7_d9e4_7291_u64), (5, 3, 0xa46b_36c0_c9df_fe39)] {
         let r = Sim::new(SimConfig::hostile(n, seed)).run().unwrap();
         assert_eq!(r.trace_hash, hash, "{n} replicas, seed {seed}");
     }

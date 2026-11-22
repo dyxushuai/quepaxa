@@ -357,6 +357,8 @@ pub struct Metrics {
     pub hedges_at_bound: u64,
     /// Forwards sent again because the target had not acknowledged them.
     pub forward_resends: u64,
+    /// Bytes of entries those resends carried.
+    pub forward_resent_bytes: u64,
     /// Times this replica stepped aside because a write waited too long on its disk.
     pub stepped_aside: u64,
     /// Gauge: decided slots held in memory (bounded by compaction).

@@ -2,13 +2,15 @@
 
 use super::*;
 
-/// Follower 1 (δ = 80 ms, 4δ = 320 ms, hedge_max = 400 ms, resend floor 10 ms) with one
-/// entry forwarded to the leader at 1 ms, which the leader then decides around at 4 ms: the
+/// Follower 1 (δ = 80 ms, 4δ = 320 ms, hedge_max = 400 ms; the leader acknowledged earlier
+/// forwards within 5 ms, so the resend floor is retransmit_interval, 10 ms) with one entry
+/// forwarded to the leader at 1 ms, which the leader then decides around at 4 ms: the
 /// entry's id and the forward.
 fn forwarded() -> (Replica, ProposalId, (u64, Vec<batch::Item>)) {
     let mut r = with_latency(Some(5));
     let mut out = Vec::new();
     r.cfg.hedge_max = 400 * MS;
+    r.watch.fwd.ack_delay.insert(NodeId(0), 5 * MS);
     let id = r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
     r.poll_actions(&mut out);
     let mut sent = forwards_sent(&out, 0);
@@ -131,4 +133,51 @@ fn every_forward_taken_is_acknowledged_by_its_number() {
     r.handle_timeout(Timestamp(1).after(r.cfg.retransmit_interval / 8)).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(acks(&out), [alloc::vec![6]], "every forward taken, none refused");
+}
+
+#[test]
+fn the_forward_resend_floor_follows_the_acknowledgement_delay() {
+    let mut r = with_latency(Some(5));
+    r.cfg.hedge_max = 400 * MS;
+    // R (5 ms here) is not the acknowledgement delay: before one is seen, hedge_max.
+    assert_eq!(r.forward_wait(NodeId(0), None), 400 * MS, "no acknowledgement yet: hedge_max");
+    let mut out = Vec::new();
+    r.propose(Timestamp(MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    let seq = forward_seqs(&out, 0)[0];
+    // Acknowledged 30 ms after it was sent, behind a busy link.
+    r.handle(Timestamp(31 * MS), from_peer(0, 1, Body::ForwardAck { seqs: alloc::vec![seq] })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.watch.fwd.ack_delay(NodeId(0)), Some(30 * MS));
+    assert_eq!(r.forward_wait(NodeId(0), None), 60 * MS, "twice the acknowledgement delay");
+    assert_eq!(r.forward_wait(NodeId(0), Some(1)), 240 * MS, "backed off from there");
+    r.watch.fwd.ack_delay.insert(NodeId(0), MS);
+    assert_eq!(r.forward_wait(NodeId(0), None), 10 * MS, "never below retransmit_interval");
+}
+
+#[test]
+fn an_acknowledgement_of_a_resent_forward_only_raises_the_delay() {
+    let (mut r, _, (seq, _)) = forwarded();
+    // Sent at 1 ms, again at 11 ms; acknowledged at 13 ms. Either copy may be the one
+    // answered: 2 ms since the last copy does not pull 5 ms down.
+    busy_until(&mut r, Timestamp(11 * MS), 1);
+    r.handle(Timestamp(13 * MS), from_peer(0, 1, Body::ForwardAck { seqs: alloc::vec![seq] })).unwrap();
+    r.poll_actions(&mut Vec::new());
+    assert_eq!(r.watch.fwd.ack_delay(NodeId(0)), Some(5 * MS), "a resent forward's ack is no sample");
+    // Another forward, resent at its floor, acknowledged 40 ms after the copy: raised at once.
+    let mut out = Vec::new();
+    r.propose(Timestamp(20 * MS), Bytes::from_static(b"y")).unwrap();
+    r.poll_actions(&mut out);
+    let next = forward_seqs(&out, 0)[0];
+    busy_until(&mut r, Timestamp(30 * MS), 2);
+    r.handle(Timestamp(70 * MS), from_peer(0, 1, Body::ForwardAck { seqs: alloc::vec![next] })).unwrap();
+    r.poll_actions(&mut Vec::new());
+    assert_eq!(r.watch.fwd.ack_delay(NodeId(0)), Some(40 * MS), "a slower link is followed at once");
+}
+
+#[test]
+fn resends_count_the_bytes_they_carry() {
+    let (mut r, _, (_, items)) = forwarded();
+    busy_until(&mut r, Timestamp(11 * MS), 1);
+    assert_eq!(r.metrics().forward_resent_bytes, batch::encode(&items).len() as u64);
 }

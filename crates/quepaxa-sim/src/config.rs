@@ -83,7 +83,8 @@ impl SimConfig {
     /// (R4), or `None` if links lose too much for a majority to count as connected.
     ///
     /// A forward the network loses is sent again when the leader has not acknowledged it
-    /// within the resend floor (a retransmit interval here), backing off up to `hedge_max`;
+    /// within twice its acknowledgement delay (at least a retransmit interval; `hedge_max`
+    /// before any acknowledgement), backing off up to `hedge_max`;
     /// an entry whose forwards are all lost is hedged 4δ (at most `hedge_max`) after the
     /// first, and the hedged slot is lost to the leader's (a few retransmit intervals, each
     /// lost record request doubling the wait). An acknowledged entry a busy leader keeps

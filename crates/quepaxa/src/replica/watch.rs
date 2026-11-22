@@ -175,7 +175,7 @@ impl Replica {
     }
 
     /// How long a forward may wait for its acknowledgement after an earlier one was sent.
-    fn ack_every(&self) -> u64 {
+    pub(super) fn ack_every(&self) -> u64 {
         self.cfg.retransmit_interval / 8
     }
 
