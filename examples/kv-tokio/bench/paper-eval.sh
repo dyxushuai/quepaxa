@@ -14,7 +14,9 @@
 #   LAN_SECS (60), RAMP_SECS (20, per Fig. 7 step), SIZES (Fig. 7 replica counts,
 #   "3 5 7 9 11 13"); WAN_RATES (Fig. 6 WAN offered rates); LADDER_RATE (40000), LADDER_SECS
 #   (240), LADDER_REPLICA_CPUS ("0 1-2 3-4 5-7 8-11") and LADDER_CPUS ("1 1.5 2 3 4": the
-#   quota on each cpuset; the second member's makes it 1.5 CPUs), LADDER_GEN_CPUS (12-15).
+#   quota on each cpuset; the second member's makes it 1.5 CPUs), LADDER_GEN_CPUS (12-15);
+#   SNAPSHOT_EVERY (kv-tokio --snapshot-every for every figure, default 10^12: never, as the
+#   paper's prototype does no log compaction, §7.1 footnote 8; 10000 is kv-tokio's default).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
@@ -35,6 +37,7 @@ ladder_rate=${LADDER_RATE:-40000} ladder_secs=${LADDER_SECS:-240}
 # smallest leading first.
 ladder_replica_cpus=${LADDER_REPLICA_CPUS:-0 1-2 3-4 5-7 8-11} ladder_cpus=${LADDER_CPUS:-1 1.5 2 3 4}
 ladder_gen_cpus=${LADDER_GEN_CPUS:-12-15}
+snapshots="--snapshot-every ${SNAPSHOT_EVERY:-1000000000000}"
 # Fig. 7's bound: the paper's saturation point in Fig. 6a.
 median_bound_us=5800
 
@@ -74,7 +77,7 @@ lan() {
   local dir=$1 name=$2 nodes=$3 rate=$4 secs=$5 flags=${6:-} cpus="$leader_cpus"
   for _ in $(seq 2 "$nodes"); do cpus+=" $follower_cpus"; done
   KV_BIN=$bin KV_NODES=$nodes KV_CPUS=$cpus KV_BENCH_CPUS=$bench_cpus KV_PORT=$port KV_GETS=0 \
-    KV_DATA_ROOT=/dev/shm/qpx-paper-eval KV_FLAGS=$flags \
+    KV_DATA_ROOT=/dev/shm/qpx-paper-eval KV_FLAGS="$snapshots $flags" \
     "$root/examples/kv-tokio/run-local.sh" "$rate" "$secs" > "$dir/$name.txt" 2>&1
 }
 
@@ -93,7 +96,7 @@ sustained() {
 fig6_lan() {
   local dir=$out/fig6-lan-$stamp run rate
   mkdir -p "$dir"; describe > "$dir/env.txt"
-  echo "layout: 3 replicas, leader $leader_cpus, followers $follower_cpus, kv-bench $bench_cpus; tmpfs; all PUTs; ${lan_secs}s per point" >> "$dir/env.txt"
+  echo "layout: 3 replicas, leader $leader_cpus, followers $follower_cpus, kv-bench $bench_cpus; tmpfs; all PUTs; ${lan_secs}s per point; $snapshots" >> "$dir/env.txt"
   for run in $(seq 1 "$repeats"); do
     for rate in $lan_rates; do
       echo "fig6-lan run $run: $rate/s" >&2
@@ -123,7 +126,7 @@ ramp() {
 fig7() {
   local dir=$out/fig7-$stamp run n
   mkdir -p "$dir"; describe > "$dir/env.txt"
-  echo "layout: leader $leader_cpus, followers share $follower_cpus, kv-bench $bench_cpus; tmpfs; all PUTs; ${ramp_secs}s per step; bound p50 <= ${median_bound_us}us" >> "$dir/env.txt"
+  echo "layout: leader $leader_cpus, followers share $follower_cpus, kv-bench $bench_cpus; tmpfs; all PUTs; ${ramp_secs}s per step; bound p50 <= ${median_bound_us}us; $snapshots" >> "$dir/env.txt"
   for run in $(seq 1 "$repeats"); do
     for n in $sizes; do
       echo "fig7 run $run: $n replicas" >&2
@@ -141,7 +144,7 @@ fig6_wan() {
   [ $smoke = 1 ] && smokeflag=(--smoke)
   mkdir -p "$dir"
   SYSTEMS=quepaxa DATA_TMPFS=1 REPEATS=$repeats LOAD_RATES=$wan_rates RESULTS_DIR=$dir \
-    QUEPAXA_FLAGS="--max-in-flight-slots 10" \
+    QUEPAXA_FLAGS="--max-in-flight-slots 10 $snapshots" \
     "$here/etcd/wan.sh" "${smokeflag[@]}" load > "$dir/wan.log" 2>&1
   describe > "$dir/host.txt"
   echo "$dir"
@@ -156,7 +159,7 @@ fig10() {
     SYSTEMS=quepaxa DATA_TMPFS=1 REPEATS=$repeats RATE=$ladder_rate RESULTS_DIR=$dir SAMPLE_S=1 \
       REPLICA_CPUS=$ladder_replica_cpus LADDER_CPUS=$ladder_cpus GEN_CPUS=$ladder_gen_cpus \
       POLICY="--placement $policy --placement-periods 10000,10000" POLICY_SECS=$ladder_secs \
-      SETTLED_FROM=$((ladder_secs * 2 / 3)) \
+      SETTLED_FROM=$((ladder_secs * 2 / 3)) QUEPAXA_FLAGS=$snapshots \
       "$here/etcd/wan.sh" "${smokeflag[@]}" ladder > "$dir/wan.log" 2>&1
   done
   describe > "$base/host.txt"
