@@ -1,6 +1,8 @@
 # Batch IDs: agree on references, not contents
 
-Status: **proposed** (design only, nothing implemented). Tracking: #172. Related: #155
+Status: **in progress**. Phase 1 (`Decided` without value) is implemented; Phase 2 has its
+formats and data store (PR 3: `ENTRY_REF`, `Data`, `Fetch`, `Entries` content, `KIND_DATA`,
+`content.rs`), with references refused until rules R and P land. Tracking: #172. Related: #155
 (saturation profile, a prerequisite), #152 (bulk transfers off the consensus link).
 Paper: *QuePaxa*, SOSP 2023, §6.1. Line numbers below refer to the extracted paper text.
 

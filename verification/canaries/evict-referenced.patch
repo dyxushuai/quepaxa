@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/content.rs b/crates/quepaxa/src/content.rs
+--- a/crates/quepaxa/src/content.rs
++++ b/crates/quepaxa/src/content.rs
+@@ -31,7 +31,7 @@
+
+ impl Held {
+     fn pinned(&self, floor: u64) -> bool {
+-        self.kept || self.slot.is_some_and(|s| s.0 >= floor)
++        self.kept || self.slot.is_some_and(|s| s.0 < floor)
+     }
+ }
+

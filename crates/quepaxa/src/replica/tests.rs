@@ -51,9 +51,12 @@ fn arb_body() -> impl Strategy<Value = Body> {
             }),
         (slot.clone(), p.clone()).prop_map(|(slot, proposal)| Body::decided(slot, proposal)),
         slot.clone().prop_map(|from| Body::CatchUp { from }),
-        (slot.clone(), proptest::collection::vec(p, 0..3))
-            .prop_map(|(first, proposals)| Body::Entries { first, proposals }),
-        slot.prop_map(|through| Body::Compacted { through }),
+        (slot.clone(), proptest::collection::vec(p, 0..3)).prop_map(|(first, proposals)| Body::Entries {
+            first,
+            proposals,
+            content: Vec::new()
+        }),
+        slot.clone().prop_map(|through| Body::Compacted { through }),
         (any::<u64>(), proptest::collection::vec((0u32..4, any::<u64>()), 0..4)).prop_map(|(sent, rows)| {
             Body::RttProbe {
                 incarnation: 1,
@@ -63,7 +66,13 @@ fn arb_body() -> impl Strategy<Value = Body> {
             }
         }),
         (0u64..3, any::<u64>()).prop_map(|(incarnation, sent)| Body::RttReply { incarnation, sent }),
+        (0u32..4, 0u64..3).prop_map(|(o, seq)| Body::Data { id: data_id(o, seq), bytes: batch::encode(&[]) }),
+        (slot, 0u32..4).prop_map(|(slot, o)| Body::Fetch { slot, ids: alloc::vec![data_id(o, 0)] }),
     ]
+}
+
+pub(super) fn data_id(origin: u32, seq: u64) -> crate::batch::DataId {
+    crate::batch::DataId { origin: NodeId(origin), incarnation: 1, seq }
 }
 
 #[test]
@@ -145,7 +154,7 @@ fn a_decided_value_that_is_not_a_batch_commits_nothing_and_is_counted() {
     let env =
         Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 0 };
     let proposal = Proposal { value: Bytes::from_static(b"garbage"), ..proposal(1, 1, 0) };
-    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![proposal] };
+    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![proposal], content: Vec::new() };
     r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
@@ -164,7 +173,11 @@ fn decisions_are_learned_up_to_the_last_valid_slot() {
             to: NodeId(0),
             commit_index: 0,
         };
-        let body = Body::Entries { first: Slot(slot), proposals: alloc::vec![proposal(1, 1, 0)] };
+        let body = Body::Entries {
+            first: Slot(slot),
+            proposals: alloc::vec![proposal(1, 1, 0)],
+            content: Vec::new(),
+        };
         r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
         assert_eq!(r.metrics().slots_decided, learned, "slot {slot}");
     }
@@ -417,7 +430,11 @@ fn an_empty_catch_up_page_is_retried_only_on_the_timer() {
     // A peer advertises ten slots; the catch-up request comes back empty.
     r.handle(Timestamp(1), from_peer(10, Body::CatchUp { from: Slot(0) })).unwrap();
     r.poll_actions(&mut out);
-    r.handle(Timestamp(2), from_peer(10, Body::Entries { first: Slot(0), proposals: Vec::new() })).unwrap();
+    r.handle(
+        Timestamp(2),
+        from_peer(10, Body::Entries { first: Slot(0), proposals: Vec::new(), content: Vec::new() }),
+    )
+    .unwrap();
     r.poll_actions(&mut out);
     let retry = r.next_deadline().expect("a retry is scheduled");
     assert!(retry >= Timestamp(2).after(r.cfg.retransmit_interval), "{retry:?}");
@@ -570,7 +587,11 @@ fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
     // Slot 0 removes replica 0 from slot 64 on; slots 1-63 are empty.
     let mut first = alloc::vec![decided(0, &[change(0, 0, &[1, 2, 3])])];
     first.extend((1..64).map(|s| decided(s, &[])));
-    r.handle(Timestamp(1), from_peer(Body::Entries { first: Slot(0), proposals: first })).unwrap();
+    r.handle(
+        Timestamp(1),
+        from_peer(Body::Entries { first: Slot(0), proposals: first, content: Vec::new() }),
+    )
+    .unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.schedule.epoch(), (1, 64), "removed from slot 64 on");
     let barrier = r.submit(Bytes::new(), Kind::Barrier).unwrap();
@@ -581,7 +602,11 @@ fn a_catch_up_page_that_also_adds_the_replica_back_does_not_retire_it() {
     };
     out.clear();
     let page = alloc::vec![decided(64, &[own]), decided(65, &[change(1, 1, &[0, 1, 2, 3])])];
-    r.handle(Timestamp(2), from_peer(Body::Entries { first: Slot(64), proposals: page })).unwrap();
+    r.handle(
+        Timestamp(2),
+        from_peer(Body::Entries { first: Slot(64), proposals: page, content: Vec::new() }),
+    )
+    .unwrap();
     r.poll_actions(&mut out);
     assert!(out.iter().any(|a| matches!(a, Action::Reconfigured { epoch: 2, .. })), "{out:?}");
     assert!(!out.iter().any(|a| matches!(a, Action::Retired { .. })), "retired although added back: {out:?}");
@@ -603,7 +628,7 @@ fn a_change_learned_from_others_blocks_another_until_it_takes_effect() {
     };
     let env =
         Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 0 };
-    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![decided] };
+    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![decided], content: Vec::new() };
     r.handle(Timestamp(1), Input::Message(Message { env, body }.encode())).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.schedule.epoch(), (1, 64));
@@ -643,7 +668,7 @@ fn a_local_change_overtaken_by_another_is_dropped_as_superseded() {
     ];
     let env =
         Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 0 };
-    let body = Body::Entries { first: Slot(0), proposals };
+    let body = Body::Entries { first: Slot(0), proposals, content: Vec::new() };
     r.handle(Timestamp(2), Input::Message(Message { env, body }.encode())).unwrap();
     out.clear();
     r.poll_actions(&mut out);
@@ -688,7 +713,8 @@ fn a_peers_superseded_change_does_not_drop_a_local_entry_with_the_same_id() {
         decided(0, &[change(1, ProposalId(0), &[0, 1])]),
         decided(1, &[change(2, mine, &[0, 2]), own]),
     ];
-    r.handle(Timestamp(2), from_peer(1, 0, Body::Entries { first: Slot(0), proposals })).unwrap();
+    r.handle(Timestamp(2), from_peer(1, 0, Body::Entries { first: Slot(0), proposals, content: Vec::new() }))
+        .unwrap();
     out.clear();
     r.poll_actions(&mut out);
     assert_eq!(r.schedule.epoch(), (1, 64), "only the first change applies");
@@ -719,7 +745,7 @@ fn a_local_change_decided_twice_in_one_batch_commits_once() {
     };
     let env =
         Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(1), to: NodeId(0), commit_index: 0 };
-    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![decided] };
+    let body = Body::Entries { first: Slot(0), proposals: alloc::vec![decided], content: Vec::new() };
     r.handle(Timestamp(2), Input::Message(Message { env, body }.encode())).unwrap();
     out.clear();
     r.poll_actions(&mut out);
@@ -880,7 +906,15 @@ pub(super) fn announce(r: &mut Replica, at: Timestamp, from: u32, slot: Slot, p:
     };
     if let Some(i) = out.iter().position(asks) {
         out.remove(i);
-        r.handle(at, from_peer(from, me, Body::Entries { first: slot, proposals: alloc::vec![p] })).unwrap();
+        r.handle(
+            at,
+            from_peer(
+                from,
+                me,
+                Body::Entries { first: slot, proposals: alloc::vec![p], content: Vec::new() },
+            ),
+        )
+        .unwrap();
         r.poll_actions(&mut out);
     }
     out
@@ -1079,7 +1113,8 @@ fn the_leader_leaves_the_next_leaders_slots_to_it() {
     };
     let mut proposals = alloc::vec![decided(0, &[change])];
     proposals.extend((1..60).map(|s| decided(s, &[])));
-    r.handle(Timestamp(1), from_peer(1, 0, Body::Entries { first: Slot(0), proposals })).unwrap();
+    r.handle(Timestamp(1), from_peer(1, 0, Body::Entries { first: Slot(0), proposals, content: Vec::new() }))
+        .unwrap();
     r.poll_actions(&mut out);
     assert_eq!((r.committed, r.schedule.leader(Slot(64))), (60, NodeId(1)));
     for k in 0..20u32 {
@@ -1091,7 +1126,11 @@ fn the_leader_leaves_the_next_leaders_slots_to_it() {
     // Its slots decide elsewhere; past the change it hands its entries to the new leader.
     out.clear();
     let rest = (60..64).map(|s| decided(s, &[])).collect();
-    r.handle(Timestamp(3), from_peer(1, 0, Body::Entries { first: Slot(60), proposals: rest })).unwrap();
+    r.handle(
+        Timestamp(3),
+        from_peer(1, 0, Body::Entries { first: Slot(60), proposals: rest, content: Vec::new() }),
+    )
+    .unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.committed, 64);
     let forwarded = out.iter().any(|a| {

@@ -162,6 +162,7 @@ impl Replica {
         self.log = self.log.split_off(&floor);
         self.registers = self.registers.split_off(&floor);
         self.seen = self.seen.split_off(&floor);
+        self.content.raise_floor(next);
         #[cfg(feature = "model")]
         {
             self.decided_steps = self.decided_steps.split_off(&floor);
@@ -182,6 +183,10 @@ impl Replica {
                 Record::Compacted { through: Slot(self.floor - 1), core_state: state.clone() }.encode(),
             );
         }
+        // Content ahead of the registers and decisions that reference it (promise 1).
+        records.extend(
+            self.content.referenced().map(|(id, bytes)| Record::Data { id, bytes: bytes.clone() }.encode()),
+        );
         records.extend(
             self.registers
                 .iter()

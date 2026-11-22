@@ -83,7 +83,9 @@ impl Replica {
                     }
                     Body::Decided { slot, priority, key } => self.on_decided(from, slot, priority, key),
                     Body::CatchUp { from: start } => self.on_catch_up(from, start),
-                    Body::Entries { first, proposals } => {
+                    // Content resolves references, which are refused until rules R and P
+                    // (#172): a value holding one never commits its entries.
+                    Body::Entries { first, proposals, content: _ } => {
                         let empty = proposals.is_empty();
                         for (i, p) in proposals.into_iter().enumerate() {
                             let Some(slot) = first.0.checked_add(i as u64) else { break };
@@ -108,6 +110,8 @@ impl Replica {
                         self.on_rtt_probe(from, incarnation, sent, commit, table)
                     }
                     Body::RttReply { incarnation, sent } => self.on_rtt_reply(from, incarnation, sent),
+                    // Nothing references a data batch yet (#172), so none is stored or served.
+                    Body::Data { .. } | Body::Fetch { .. } => self.metrics.messages_rejected += 1,
                 }
             }
             // Before driving: a retirement barrier it submits is proposed in this round.

@@ -29,6 +29,7 @@ use bytes::Bytes;
 use crate::api::{Action, Config, DropReason, Error, Input, MemberView, Metrics, Outbound};
 use crate::batch::{self, Entry, Item, Kind};
 use crate::codec::{Body, Envelope, Message, WireCtx};
+use crate::content::{PinError, Store};
 use crate::core_state::CoreState;
 use crate::dedup::Dedup;
 use crate::durable::Record;
@@ -103,6 +104,8 @@ pub struct Replica {
     /// The same schedule as of the emitted prefix (`emitted`), carried in `core_state`.
     applied_schedule: Schedule,
     dedup: Dedup,
+    /// Content of the data batches that values reference (`content.rs`).
+    content: Store,
 
     // Proposer side.
     proposers: BTreeMap<Slot, Active>,
@@ -182,6 +185,8 @@ impl Replica {
         // The largest reservation, and the index of its record.
         let mut reservation: Option<(u64, usize)> = None;
         let mut snapshot: Option<(CoreState, Bytes)> = None;
+        let cap = (cfg.max_batch_bytes as usize).saturating_mul(cfg.max_in_flight_slots as usize);
+        let mut content = Store::new(cap);
         for (index, bytes) in durable.into_iter().enumerate() {
             match Record::decode(&bytes).map_err(|_| Error::CorruptRecord { index })? {
                 Record::Incarnation(n) => {
@@ -192,11 +197,21 @@ impl Replica {
                     if reg.step > MAX_STEP || slot.0 > MAX_SLOT {
                         return Err(Error::CorruptRecord { index });
                     }
+                    // Records are durable in order, and a register's content is written
+                    // ahead of it: a reference without its `Data` record breaks promise 1.
+                    for p in [&reg.first, &reg.agg, &reg.prev_agg].into_iter().flatten() {
+                        content.pin_refs(&p.value, slot).map_err(|_| Error::CorruptRecord { index })?;
+                    }
                     registers.insert(slot, reg);
                 }
                 Record::Reservation { through } => reservation = reservation.max(Some((through.0, index))),
                 Record::Decided { slot, proposal } => {
                     if slot.0 > MAX_SLOT {
+                        return Err(Error::CorruptRecord { index });
+                    }
+                    // A decision may lack its content (learned, not yet fetched), but not
+                    // hold other bytes under a reference's id.
+                    if content.pin_refs(&proposal.value, slot) == Err(PinError::Mismatch) {
                         return Err(Error::CorruptRecord { index });
                     }
                     log.insert(slot, Decision { proposal });
@@ -208,6 +223,7 @@ impl Replica {
                         snapshot = Some((state, core_state));
                     }
                 }
+                Record::Data { id, bytes } => content.restore(id, bytes),
             }
         }
         // A checkpoint built under another leader order would disagree on who leads.
@@ -222,6 +238,7 @@ impl Replica {
         log = log.split_off(&Slot(floor));
         registers = registers.split_off(&Slot(floor));
         registers.retain(|slot, _| !log.contains_key(slot));
+        content.raise_floor(floor);
         let wire = WireCtx {
             cluster_id: cfg.wire_cluster_id(),
             config_epoch: 0,
@@ -255,6 +272,7 @@ impl Replica {
             unresolved: BTreeMap::new(),
             catch_up: recovery::CatchUp::default(),
             dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
+            content,
             proposers: BTreeMap::new(),
             entries,
             watch: watch::Watch::default(),
@@ -673,6 +691,8 @@ impl Replica {
     }
 }
 
+#[cfg(test)]
+mod content_tests;
 #[cfg(test)]
 mod decided_tests;
 #[cfg(test)]

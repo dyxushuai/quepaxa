@@ -20,6 +20,7 @@ jobs:
         target:
           - codec::tests::decode_never_panics_on_arbitrary_input
           - codec::tests::decode_never_panics_on_mutated_valid_messages
+          - codec::tests::decode_never_panics_on_mutated_content_messages
           - batch::tests::decode_never_panics
           - durable::tests::decode_never_panics
           - core_state::tests::decode_never_panics

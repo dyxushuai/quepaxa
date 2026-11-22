@@ -5,6 +5,14 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa` (wire and storage, breaking; #172): the formats for batch content behind
+  references. Messages gain `Data` (a data batch by its id) and `Fetch` (ids, with the slot
+  that needs them), `Entries` pages gain a content section, and batches an `ENTRY_REF` item
+  (origin, incarnation, seq, length, CRC-32C). The durable format is version 2 with a new
+  `Data` record: a replica refuses records of version 1 with `CorruptRecord`; upgrade it as
+  a new replica. Nothing produces references yet: a value carrying one is not applied
+  (`corrupt_batches`), and a forward carrying one, `Data` and `Fetch` are rejected
+  (`messages_rejected`).
 - `quepaxa` (wire, breaking): `Decided` no longer carries the value, only the slot, the
   priority and the value's key. The receiver takes the value from what it already holds
   under that key (its register for the slot, its proposer there, or its own batch), and

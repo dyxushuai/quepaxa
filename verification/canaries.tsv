@@ -52,3 +52,5 @@ has-work-ignores-relayed	-	cargo nextest run --no-fail-fast -p quepaxa watch_tes
 route-forgets-the-place	-	cargo nextest run --no-fail-fast -p quepaxa proposing_tests	E1: own entry ProposalId\([0-9]+\) is not at
 lost-slot-reproposes-handed-entries	-	cargo nextest run --no-fail-fast -p quepaxa proposing_tests	nothing proposed here while stepped aside
 decided-resolves-any-key	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	G1 agreement|agreement broken
+evict-referenced	-	cargo nextest run --no-fail-fast -p quepaxa content::tests	evicted while pinned|a_pinned_batch_is_never_evicted
+replay-register-without-data	-	cargo nextest run --no-fail-fast -p quepaxa content_tests	CorruptRecord \{ index: 1 \}
