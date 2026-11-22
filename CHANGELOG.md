@@ -13,6 +13,12 @@ All notable changes to this project are documented here. The project follows
   a new replica. Nothing produces references yet: a value carrying one is not applied
   (`corrupt_batches`), and a forward carrying one, `Data` and `Fetch` are rejected
   (`messages_rejected`).
+- `examples/kv-tokio`: a replica answers writes with `Busy` while its own accepted writes
+  not yet committed exceed twice what its slots carry at once (`max_batch_bytes ×
+  max_in_flight_slots × 2`, 16 MiB by default), instead of queueing up to 65,536 of them
+  behind a saturated link (#231). `kv-bench` counts `Busy` as `busy=`, not as an error,
+  and backs that connection off (10 ms, doubling to 200 ms); arrivals due meanwhile are
+  counted as `shed=`.
 - `quepaxa` (behaviour): `retransmit_interval` is now a floor, not a period. An
   unanswered record request is first sent again after it or after twice the smoothed
   first-step round trip (of slots never resent), whichever is longer, and each further

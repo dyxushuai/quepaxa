@@ -12,6 +12,11 @@
 //! `--size BYTES` (line protocol only) sets the command size in the same terms, 1 + 8 + the
 //! value, so a PUT's value is `BYTES - 9` long: 8 random letters padded with `x`.
 //!
+//! A replica's `Busy` (too many outstanding proposals) is counted as `busy`, not as an
+//! error, and pauses that connection: 10 ms, doubling up to 200 ms while it keeps answering
+//! `Busy`, until a request succeeds. Arrivals due during a pause are not sent and are
+//! counted as `shed`, so the offered rate stays the schedule's.
+//!
 //! Prints achieved throughput and latency percentiles. Results are measurements of one
 //! machine and configuration, not production claims.
 //!
@@ -84,7 +89,23 @@ struct Stats {
     unanswered: u64,
     /// Arrivals skipped because the sender fell more than a second behind schedule.
     missed: u64,
+    /// Requests the replica refused with `Busy`.
+    busy: u64,
+    /// Arrivals not sent because the connection was backing off after a `Busy`.
+    shed: u64,
 }
+
+/// A connection's pause after `Busy`: until when, and how long the next one lasts.
+struct Backoff {
+    until: Option<Instant>,
+    next: Duration,
+}
+
+const BACKOFF_MIN: Duration = Duration::from_millis(10);
+const BACKOFF_MAX: Duration = Duration::from_millis(200);
+
+/// The text of `quepaxa::Error::Busy` after `ERR `.
+const BUSY: &str = "ERR too many outstanding proposals";
 
 async fn connection(
     addr: SocketAddr,
@@ -102,16 +123,24 @@ async fn connection(
     let _ = s.set_nodelay(true);
     let (r, mut w) = s.into_split();
     let sent = Arc::new(Mutex::new(VecDeque::<Instant>::new()));
+    let backoff = Arc::new(Mutex::new(Backoff { until: None, next: BACKOFF_MIN }));
     let reader_sent = sent.clone();
     let reader_stats = stats.clone();
+    let reader_backoff = backoff.clone();
     let reader = tokio::spawn(async move {
         let mut lines = BufReader::new(r).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let Some(at) = reader_sent.lock().unwrap().pop_front() else { continue };
             let mut st = reader_stats.lock().unwrap();
-            if line.starts_with("ERR") {
+            let mut b = reader_backoff.lock().unwrap();
+            if line.starts_with(BUSY) {
+                st.busy += 1;
+                b.until = Some(Instant::now() + b.next);
+                b.next = (b.next * 2).min(BACKOFF_MAX);
+            } else if line.starts_with("ERR") {
                 st.errors += 1;
             } else {
+                b.next = BACKOFF_MIN;
                 st.latencies_us.push(at.elapsed().as_micros() as u64);
             }
         }
@@ -128,6 +157,10 @@ async fn connection(
         tokio::time::sleep_until(next.into()).await;
         if Instant::now() > next + Duration::from_secs(1) {
             stats.lock().unwrap().missed += 1;
+            continue;
+        }
+        if backoff.lock().unwrap().until.is_some_and(|u| Instant::now() < u) {
+            stats.lock().unwrap().shed += 1;
             continue;
         }
         sent.lock().unwrap().push_back(Instant::now());
@@ -292,7 +325,7 @@ async fn main() {
         st.latencies_us.sort_unstable();
         let done = st.latencies_us.len();
         println!(
-            "offered={rate:.0}/s completed={done} throughput={:.0}/s errors={} unanswered={} missed={} p50={}us p90={}us p99={}us max={}us",
+            "offered={rate:.0}/s completed={done} throughput={:.0}/s errors={} unanswered={} missed={} p50={}us p90={}us p99={}us max={}us busy={} shed={}",
             done as f64 / secs,
             st.errors,
             st.unanswered,
@@ -301,6 +334,8 @@ async fn main() {
             percentile(&st.latencies_us, 0.9),
             percentile(&st.latencies_us, 0.99),
             st.latencies_us.last().copied().unwrap_or(0),
+            st.busy,
+            st.shed,
         );
     }
     for addr in targets {
