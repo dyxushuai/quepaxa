@@ -738,6 +738,140 @@ The data: `target/bench-etcd/wan-20261114-094533/` (the three runs) and
 `wan-20261114-004901/` (one earlier run in the fast regime: ap-ne as follower p90 10.2 ms
 against 9.7 ms for us-east; as leader 14.6 against 9.7-9.8).
 
+## The paper's evaluation (§7, #174)
+
+Figs. 6, 7 and 10 of the paper (Tennage et al., SOSP'23, §7.2, §7.3, §7.6), rerun on this
+host with `examples/kv-tokio/bench/paper-eval.sh`, which drives `run-local.sh` (LAN) and
+`bench/etcd/wan.sh` (emulated WAN and Fig. 10). Figs. 8 and 9 (adversarial egress delay,
+leader failure across hedging delays) depend on the hedging and resend timing being changed
+in #231 and come in a follow-up.
+
+```sh
+examples/kv-tokio/bench/paper-eval.sh fig6-lan fig7 fig6-wan fig10
+examples/kv-tokio/bench/paper-eval.sh --smoke fig6-lan fig7 fig6-wan fig10
+```
+
+Each figure takes the shared bench lock (`target/ops/bench.lock` in the main checkout) from
+its build through its last run and writes raw outputs, `env.txt`/`host.txt` and `summary.md`
+(`paper-summarize.sh`) under `~/.local/share/quepaxa-eval/paper-eval/`. All runs below were
+taken on 2026-11-22 at `17e983d` on the 16-vCPU VM above (78 GiB RAM, Linux
+`7.0.14-17-pve`, tmpfs data, 17-byte `PUT` commands, `--snapshot-every 1000000000000` so
+log compaction stays off as in the paper's prototype, §7.1 footnote 8). Values are medians
+over three runs with min–max ranges in parentheses.
+
+These are single-host measurements, not production claims. The paper ran each replica on its
+own 16-vCPU EC2 `c4.4xlarge` and each submitter on a `c4.2xlarge`; here every replica and
+every generator share one 16-vCPU VM, and unlocked work on the host raised 1-minute load to
+6.2–13.7 during the matrix (recorded per figure).
+
+### Fig. 6a–b: LAN, 3 replicas
+
+Leader pinned to CPUs 0–1, followers sharing 2–11, `kv-bench` on 12–15; 60 s per offered
+rate (`fig6-lan-20261122-124323`, start load 6.25).
+
+| Offered (/s) | Throughput (/s) | p50 (ms) | p99 (ms) | Errors + unanswered + missed |
+|---|---|---|---|---|
+| 50,000 | 50,021 | 0.36 (0.35–0.38) | 1.35 (1.27–1.65) | 0 |
+| 100,000 | 99,992 (99,991–99,992) | 0.46 (0.44–0.46) | 2.12 (1.55–2.66) | 0 |
+| 200,000 | 200,015 (200,014–200,015) | 0.66 (0.60–0.67) | 5.27 (1.73–187) | 0 |
+| 300,000 | 300,067 (300,066–300,067) | 1.21 (1.11–1.31) | 7.58 (2.71–36.67) | 0 |
+| 400,000 | 351,929 (351,050–358,323) | 2.13 (1.98–2.35) | 27.66 (6.56–31.62) | 2,890,937 (2,506,851–2,941,789) |
+| 500,000 | 338,330 (314,711–340,546) | 1.68 (1.54–1.79) | 6.80 (5.51–8.50) | 9,703,389 (9,564,483–11,112,692) |
+| 600,000 | 298,274 (296,899–308,276) | 1.45 (1.32–1.51) | 4.39 (4.32–4.59) | 18,100,591 (17,496,716–18,176,060) |
+
+- **Next to the paper:** §7.2 reports 584k cmd/s under 5.8 ms median on dedicated
+  `c4.4xlarge` replicas with §6.1 submitter-driven batch dissemination (400k cmd/s for
+  Multi-Paxos without it). Here `quepaxa` does not yet ship §6.1 (#172), and the 4-CPU
+  `kv-bench` generator reaches its open-loop pacing ceiling near 350k/s (`missed` starts
+  growing at 400k/s while median latency is still 2.13 ms).
+- **Cost of compaction:** an earlier pass with `kv-tokio`'s default `--snapshot-every 10000`
+  (`fig6-lan-snapshots-20261122-121713`, load 1.98) stayed clean at 100k/s (p50 0.63 ms,
+  p99 67.9 ms) but jumped to p50 10.65 ms and p99 6.91 s at 200k/s as background snapshot
+  encoding ran continuously, capping throughput near 295k/s.
+
+### Fig. 7: LAN scalability, 3 to 13 replicas
+
+Leader on CPUs 0–1, all followers sharing 2–11, `kv-bench` on 12–15; 20 s per ramp step
+(100k/s steps plus one midpoint), sustained when throughput ≥ 97% of offered, 0
+errors/unanswered/missed and p50 ≤ 5.8 ms (`fig7-20261122-124323`, start load 13.66).
+`3-pipe1` pins `--max-in-flight-slots 1` (the paper disabled pipelining on the LAN).
+
+| Replicas | Saturation throughput (/s) | p50 at it (ms) | p99 at it (ms) |
+|---|---|---|---|
+| 3 | 300,000 | 1.06 (0.93–1.08) | 20.93 (5.04–21.72) |
+| 3 (`--max-in-flight-slots 1`) | 300,000 (300,000–350,000) | 0.78 (0.76–1.43) | 6.59 (2.11–23) |
+| 5 | 300,000 | 1.29 (1.26–1.65) | 5.57 (4.45–10.64) |
+| 7 | 300,000 | 2.03 (1.90–3.51) | 14.63 (9.77–26.72) |
+| 9 | 300,000 | 4.08 (4.08–4.28) | 35.58 (21.44–73.86) |
+| 11 | 200,000 (200,000–250,000) | 2.06 (1.75–5.45) | 12 (8.92–120) |
+| 13 | 200,000 (150,000–200,000) | 5.12 (2.46–5.30) | 46.03 (6.91–110) |
+
+- **Two regimes end the ramps:** for 3–7 replicas (and two of three `3-pipe1` runs), the
+  350k/s step failed because `kv-bench` missed arrivals (`missed` 5k–63k) while median
+  latency was still 1.3–1.8 ms, so 300k/s is the generator-limited floor rather than the
+  5.8 ms knee. From 9 replicas on, `missed` was 0 and the cluster itself crossed 5.8 ms
+  (9 replicas at 350k/s: p50 19.7–45.9 ms; 11 at 250k/s: 5.5–11.5 ms; 13 at 200k/s:
+  5.1–27.0 ms, at 250k/s: 87–95 ms).
+- **Next to the paper:** §7.3 reports 584k down to 467k cmd/s (−20%) from 3 to 13 replicas,
+  each on its own machine with §6.1. Here leader fan-out plus 12 followers sharing 10 CPUs
+  (and start load 13.7 from unlocked work) drops sustained throughput from 300k/s (at 9) to
+  200k/s (150k–200k at 13).
+
+### Fig. 6c–d: emulated WAN, 5 replicas, pipeline 10
+
+Five Docker containers on CPUs `0-1 2-3 4-5 6-7 8-9`, five generators on `10-15`, `tc netem`
+emulated links across the `wan_leaders` five-region matrix (70–300 ms RTT; best-placed
+leader `us-east`), `--max-in-flight-slots 10`, WAN timers (`retransmit 400 ms`, `hedge_max
+3 s`), 60 s per rate (`fig6-wan-20261122-124323`, load 12.95 at start, 12.58 at end).
+
+| Offered (/s) | Throughput (/s) | p50 (ms) | p99 (ms) | Errors + unanswered |
+|---|---|---|---|---|
+| 1,000 | 997 (988–1,000) | 197 (197–199) | 321 (320–322) | 0 |
+| 5,000 | 4,996 (4,983–5,002) | 214 (213–214) | 345 (343–451) | 0 |
+| 10,000 | 10,000 (9,979–10,001) | 219 (218–219) | 1,482 (434–1,557) | 0 |
+| 20,000 | 19,982 (19,976–20,022) | 228 (226–303) | 2,476 (1,935–6,882) | 0 |
+| 30,000 | 29,972 (29,932–30,011) | 310 (232–325) | 5,548 (3,424–9,984) | 0 (0–1,439) |
+| 40,000 | 39,860 (39,081–40,010) | 321 (257–321) | 8,178 (7,479–10,338) | 5,639 (1,414–53,688) |
+| 60,000 | 58,197 (56,435–59,787) | 326 (250–335) | 9,677 (5,636–12,113) | 112,605 (11,604–212,575) |
+| 100,000 | 91,723 (88,038–97,932) | 290 (275–345) | 9,587 (5,876–11,153) | 492,466 (121,967–726,402) |
+
+- **Next to the paper:** §7.2 (real AWS regions Tokyo, Mumbai, Singapore, Ireland, São
+  Paulo, 16-vCPU replicas) keeps median latency near 300 ms up to ~150k cmd/s with p99
+  300–1,000 ms. Here median latency stays at 197–326 ms across the sweep (lower than the
+  paper's at low load because our five-region matrix has shorter RTTs to `us-east`), while
+  p99 climbs past 1.5 s at 10k/s and errors appear past 30k/s as five containers, `tc netem`
+  queues, five generators and the concurrent host load (12.6–13.0) contend for 16 vCPUs.
+  Real-region numbers wait on #159.
+
+### Fig. 10: convergence to the best leader among heterogeneous machines
+
+Five Docker containers on a LAN (no `netem` delay) with increasing CPU quotas — `1`, `1.5`,
+`2`, `3` and `4` CPUs on disjoint cpusets `0`, `1-2`, `3-4`, `5-7`, `8-11` (`us-east`
+smallest, `sa-east` strongest), generators on `12-15`, initial leader `us-east`, 40,000
+puts/s for 240 s, `--placement-periods 10000,10000`, leader sampled every 1 s
+(`fig10-20261122-124323`, load 12.21 at start).
+
+| Policy | Run | Leader changes | At `sa-east` for good (s) | Final leader | p50 0–10 s (ms) | p50 160–240 s (ms) | p99 160–240 s (ms) |
+|---|---|---|---|---|---|---|---|
+| `--placement on` | 1 | 26 | – | `us-east` | 2.25 | 2.07 | 5.92 |
+| `--placement on` | 2 | 20 | – | `us-east` | 2.06 | 2.05 | 5.01 |
+| `--placement on` | 3 | 16 | – | `us-east` | 2.09 | 2.26 | 5.85 |
+| `--placement off` | 1 | 20 | – | `ap-ne` | 2.08 | 2.08 | 5.40 |
+| `--placement off` | 2 | 0 | – | `us-east` | 2.09 | 2.16 | 4.92 |
+| `--placement off` | 3 | 6 | – | `us-east` | 2.09 | 2.23 | 5.92 |
+
+- **Why this did not reproduce the paper's separation:** §7.6 ran 80k cmd/s across five
+  distinct EC2 types (`t2.large` to `c4.4xlarge`) where the weakest leader kept Raft/Paxos
+  at 5.2 ms and QuePaxa converged in 4 s to 3.8 ms. Here 40k puts/s on tmpfs does not
+  saturate even the 1-CPU `us-east` leader (`placement off` run 2 held `us-east` for all
+  240 s with 0 leader changes at p50 2.16 ms, p99 4.92 ms). Every member delivers ~2.1 ms
+  median and ~5–6 ms p99, so placement sees no member faster by its 10% + 3σ bar.
+- **Frequent rotations under noise:** both `placement on` (16–26 changes, only 2–3 of them
+  `placement_moves` per member) and `placement off` (0–20 changes) rotated repeatedly under
+  the 12.2–17.1 host load (see also #240 for healthy-leader rotations at low load). To test
+  heterogeneous convergence cleanly on this host, the initial leader's quota must actually
+  be bottlenecked by the offered rate while the stronger replicas are not.
+
 ## Not measured
 
 - No comparison against the Go reference implementation: running the Go code was out of
