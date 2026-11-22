@@ -73,7 +73,8 @@ What the paper leaves open, the crate fixes as follows (the repository's
   it silent): the follower hands its entries to the next member of the leader order,
   which proposes them, so followers do not contend for slots before the schedule rotates,
   and the leader's unfinished slots are taken over as soon. Hearing from it ends the
-  suspicion. A leader whose own disk is stuck (a write waiting four hedge delays, while
+  suspicion and still updates the reply delay R (capped at `hedge_max`), so a leader delayed
+  behind a saturated link is not suspected over and over on a stale short σ. A leader whose own disk is stuck (a write waiting four hedge delays, while
   others still decide slots) steps aside the same way: it hands its entries to the next
   member and stops acknowledging forwards until its disk catches up; once it decides
   slots of its own again, the next member hands back what it was given rather than lose

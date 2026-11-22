@@ -279,3 +279,27 @@ fn each_suspicion_is_counted_once() {
     let (r, _) = suspecting();
     assert_eq!(r.metrics().suspicions, 1);
 }
+
+#[test]
+fn a_late_reply_from_a_suspected_leader_raises_its_reply_delay() {
+    // Leader 0 is slow behind a saturated link, not dead: a false suspicion must still
+    // teach R the true delay when the leader speaks, else the next forward suspects it
+    // again on the stale short σ (#231).
+    let mut r = replica_as(1);
+    let mut out = Vec::new();
+    r.commit_latency = Some(20 * MS);
+    r.watch.reply.insert(NodeId(0), 5 * MS);
+    r.cfg.hedge_max = 1_000 * MS;
+    r.propose(Timestamp(10 * MS), Bytes::from_static(b"x")).unwrap();
+    r.poll_actions(&mut out);
+    let at = hedge_deadline(&r).expect("silence deadline");
+    assert_eq!(at, Timestamp(30 * MS));
+    r.handle_timeout(at).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.metrics().suspicions, 1);
+    // The leader's delayed message arrives 150 ms after the forward (capped at hedge_max).
+    r.handle(Timestamp(160 * MS), from_peer(0, 1, Body::ForwardAck { seqs: alloc::vec![0] })).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.watch.reply.get(&NodeId(0)), Some(&(150 * MS)));
+    assert!(r.silence_wait(NodeId(0)).is_none(), "2R >= δ: no early suspicion on the stale σ");
+}

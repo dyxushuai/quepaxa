@@ -46,7 +46,9 @@ All notable changes to this project are documented here. The project follows
   made while it still decided took about a third of the leader's egress on a saturated
   link. An unacknowledged forward keeps the old rule (4δ after the forward), and every
   entry is hedged at most 4 · `hedge_max` after its forward however busy the target; new
-  metric `hedges_at_bound` counts those. A silent target is still suspected after σ (#231).
+  metric `hedges_at_bound` counts those. A silent target is still suspected after σ; when a
+  suspected target speaks again, its delayed reply still updates R (capped at `hedge_max`)
+  so a saturated link does not trigger repeated false suspicions (#231).
 - `quepaxa` (wire, breaking): `Decided` no longer carries the value, only the slot, the
   priority and the value's key. The receiver takes the value from what it already holds
   under that key (its register for the slot, its proposer there, or its own batch), and

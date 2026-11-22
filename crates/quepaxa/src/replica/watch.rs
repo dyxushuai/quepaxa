@@ -150,25 +150,33 @@ impl Replica {
 
     /// An entry handed over stayed uncommitted: suspect the target and hand everything still
     /// waiting to the next member (or propose it here, if the target is now this replica).
+    /// Keep the unanswered forward's timestamp in `suspects` so that if the target was only
+    /// slowed behind a saturated link, hearing from it still raises R (#231).
     pub(super) fn suspect_target(&mut self) {
         let target = self.target();
+        let asked = self.watch.asked.take().filter(|(to, _)| *to == target).map_or(self.now, |(_, at)| at);
         if target != self.me {
-            self.watch.suspects.insert(target, self.now);
+            self.watch.suspects.insert(target, asked);
             self.metrics.suspicions += 1;
         }
-        self.watch.asked = None;
         self.metrics.hedged += self.entries.suspect();
     }
 
-    /// A message arrived from `from`: a suspected member that speaks is alive.
+    /// A message arrived from `from`: a suspected member that speaks is alive, and its
+    /// delayed reply still updates R (capped at `hedge_max`, so a long partition decays
+    /// promptly once it heals).
     pub(super) fn heard_from(&mut self, from: NodeId) {
-        self.watch.suspects.remove(&from);
+        let suspected = self.watch.suspects.remove(&from);
         self.watch.heard.insert(from, self.now);
-        if let Some((to, at)) = self.watch.asked
-            && to == from
-        {
-            self.watch.asked = None;
-            let sample = self.now.0.saturating_sub(at.0);
+        let at = match self.watch.asked {
+            Some((to, at)) if to == from => {
+                self.watch.asked = None;
+                Some(at)
+            }
+            _ => suspected,
+        };
+        if let Some(at) = at {
+            let sample = self.now.0.saturating_sub(at.0).min(self.cfg.hedge_max);
             let avg = self.watch.reply.entry(from).or_insert(sample);
             *avg = if sample < *avg { *avg - *avg / 8 + sample / 8 } else { sample };
         }
