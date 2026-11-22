@@ -267,12 +267,37 @@ Fixed rates are 10k/s, 2k/s and 200/s. Leader egress per slot is the leader's `S
   completes, so the ramp stops where p99 passes 100 ms.
 - **Overload collapses under the cap.** At 2× capacity, throughput drops to 3.1k/s at 4 KiB
   and 134/s at 64 KiB. Followers hedge (44,863 and 6,804 times) and the leader retransmits.
-  Without the cap, 4 KiB and 64 KiB hold at 2×. This is tracked in #231.
+  Without the cap, 4 KiB and 64 KiB hold at 2×. Fixed in #231 (below).
 - Uncapped 64 KiB capacity varies a lot between runs (1,032-3,483/s). With no cap the leader
   sent 413 MB/s at 4 KiB and 609 MB/s at 64 KiB, so CPU and memory copies limit there, not
   the link.
 - Per slot, egress without the cap is larger at 17 B and 4 KiB than with it because slots
   are batched differently, so compare egress per slot only at one size and cap.
+
+### Overload on a capped link (#231)
+
+Same layout and 1 Gbit/s per-replica egress cap as above, with `Decided` already carrying
+keys only (Phase 1 of #172, where 1 Gbit/s line rate is ~15.2k/s at 4 KiB and ~952/s at
+64 KiB for three replicas). Offered rates are ~2× capped capacity (27,000/s at 4 KiB,
+1,800/s at 64 KiB), 10 s per run, interleaved before (`3286eb9`) and after (`3fd34ea`),
+three runs per point under `flock target/ops/bench.lock` at 1-minute load 1.4-2.2.
+Measured 2026-11-23. "In-window" counts completions that finished within the 10 s offered
+window (excluding requests that drained during the 5 s tail).
+
+| Command | Build | In-window median (runs) | Unanswered | Busy | p50 (range) | p99 (range) | Retransmits (cluster) |
+|---|---|---|---|---|---|---|---|
+| 4 KiB @ 27k/s | before | 3,279/s (700-3,293) | 46,602-49,456 | 0 | 1.15-5.04 s | 12.4-13.9 s | 1,697-6,912 |
+| 4 KiB @ 27k/s | after | 14,413/s (13,771-15,098) | 0 | 35,145-43,416 | 0.50-0.69 s | 1.10-2.34 s | 38-63 |
+| 64 KiB @ 1.8k/s | before | 145/s (141-185) | 15,112-16,543 | 0 | 3.79-8.36 s | 4.79-11.4 s | 1,563-4,488 |
+| 64 KiB @ 1.8k/s | after | 933/s (619-943) | 0 | 4,167-7,559 | 0.64-0.90 s | 1.82-3.51 s | 41-118 |
+
+Six pieces together held throughput at the link's capacity with zero unanswered requests:
+RTT-floored exponential backoff on record resends (with slow resent slots still raising
+the floor), numbered forwards with coalesced `ForwardAck`s timed from their own
+acknowledgement delay, holding hedges while a target still decides (up to 4 · `hedge_max`),
+updating reply delay R when a suspected leader speaks, and byte-bounded admission control
+in `kv-tokio` (`max_batch_bytes × max_in_flight_slots × 2`, 16 MiB default) paired with
+connection backoff on `Busy` in `kv-bench`.
 
 Raw data and scripts are kept outside the repo.
 
