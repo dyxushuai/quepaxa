@@ -10,7 +10,10 @@
 #     heterogeneous (no WAN delay, the first leader's container on a CPU quota), shift
 #     (writes move from the regions near us-east to those near ap-ne for good), burst (far
 #     regions write five times as much for 10 s), speedup (heterogeneous with the quota
-#     lifted at 150 s: does the lead come back to the member that got faster)
+#     lifted at 150 s: does the lead come back to the member that got faster), ladder (no WAN
+#     delay, every replica on its own CPU quota from LADDER_CPUS, the slowest leading first:
+#     paper Fig. 10); and load (QuePaxa only, never by default: no fault, the leader in the
+#     best-placed region, one run per rate in LOAD_RATES: paper Fig. 6c-d)
 #   --smoke    short single runs, to check the harness works
 # Environment: RATE (total writes/s, default 1000), REPEATS (runs per case, default 3),
 #   REPLICA_CPUS ("0-1 2-3 4-5 6-7 8-9"), GEN_CPUS (10-15), SLOW_MS (one-way delay added to
@@ -21,8 +24,16 @@
 #   speedup scenarios' quota, default 0.5); SLOW_REGION (the region whose container gets that
 #   quota, default the first leader's); SYSTEMS (default "quepaxa etcd etcd-tuned"); PROBE_CPUS
 #   (the disk probe's cpuset, default the generators'); DATA_TMPFS=1 (each replica's data
-#   on its own tmpfs: no disk in the comparison, and no durability either).
-# Needs Docker and jq. Results go to target/bench-etcd/wan-<time>/.
+#   on its own tmpfs: no disk in the comparison, and no durability either); QUEPAXA_FLAGS
+#   (extra kv-tokio flags for every QuePaxa replica, e.g. "--max-in-flight-slots 10");
+#   LOAD_RATES (total writes/s per load run, default "1000 10000 50000 100000") and
+#   LOAD_SECS (default 60); LADDER_CPUS (one CPU quota per region in order, default
+#   "2 1 1.5 0.5 0.75"; a quota of 2 is none on the two-CPU cpusets) and CPU_PERIOD_US (the
+#   quota's period, default 10000), LADDER_FIRST (the region leading first, default the
+#   slowest); POLICY_SECS and SETTLED_FROM (the policy scenarios' run
+#   length and the start of their reported window); SAMPLE_S (how often the policy scenarios
+#   sample the leader, default 5); CONNS (gRPC connections per generator, default 4).
+# Needs Docker and jq. Results go to RESULTS_DIR, by default target/bench-etcd/wan-<time>/.
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../../.." && pwd)
@@ -32,7 +43,8 @@ scenarios=()
 for a in "$@"; do
   case $a in
     --smoke) smoke=1 ;;
-    calm | crash | partition | slow | jitter | convergence | heterogeneous | shift | burst | speedup) scenarios+=("$a") ;;
+    calm | crash | partition | slow | jitter | convergence | heterogeneous | shift | burst | speedup | ladder | load)
+      scenarios+=("$a") ;;
     *) echo "unknown argument $a" >&2; exit 2 ;;
   esac
 done
@@ -43,7 +55,7 @@ if [ $smoke = 1 ]; then
 else
   secs=40 fault=10 heal=25 repeats=${REPEATS:-3}
 fi
-rate=${RATE:-1000}
+rate=${RATE:-1000} base_rate=${RATE:-1000}
 read -r -a replica_cpus <<< "${REPLICA_CPUS:-0-1 2-3 4-5 6-7 8-9}"
 gen_cpus=${GEN_CPUS:-10-15}
 slow_ms=${SLOW_MS:-100}
@@ -54,14 +66,21 @@ probe_cpus=${PROBE_CPUS:-$gen_cpus}
 data_tmpfs=${DATA_TMPFS:-0}
 # The policy scenarios: run length, when the load changes, and the last stretch whose
 # latency is reported (after the policy has settled), in seconds.
-policy_case() { case $1 in convergence | heterogeneous | shift | burst | speedup) return 0 ;; esac; return 1; }
-# The scenarios with no WAN delay and one member on a CPU quota.
-quota_case() { case $1 in heterogeneous | speedup) return 0 ;; esac; return 1; }
+policy_case() { case $1 in convergence | heterogeneous | shift | burst | speedup | ladder) return 0 ;; esac; return 1; }
+# The scenarios with no WAN delay and members on a CPU quota.
+quota_case() { case $1 in heterogeneous | speedup | ladder) return 0 ;; esac; return 1; }
 if [ $smoke = 1 ]; then
-  policy_secs=30 change_at=15 change_for=5 settled_from=20
+  policy_secs=30 change_at=15 change_for=5 settled_from=20 load_secs=8
 else
-  policy_secs=300 change_at=150 change_for=10 settled_from=240
+  policy_secs=${POLICY_SECS:-300} change_at=150 change_for=10 settled_from=${SETTLED_FROM:-240}
+  load_secs=${LOAD_SECS:-60}
 fi
+read -r -a quepaxa_flags <<< "${QUEPAXA_FLAGS:-}"
+read -r -a load_rates <<< "${LOAD_RATES:-1000 10000 50000 100000}"
+read -r -a ladder_cpus <<< "${LADDER_CPUS:-2 1 1.5 0.5 0.75}"
+cpu_period_us=${CPU_PERIOD_US:-10000}
+sample_s=${SAMPLE_S:-5}
+conns=${CONNS:-4}
 jitter_ms=${JITTER_MS:-50}
 loss=${LOSS:-1}
 
@@ -76,6 +95,13 @@ rtt=(
   "120 170 190 300 0"
 )
 n=${#regions[@]}
+[ ${#ladder_cpus[@]} = "$n" ] || { echo "LADDER_CPUS: one quota per region ($n)" >&2; exit 2; }
+# The ladder's slowest member (the smallest quota) leads first, or LADDER_FIRST's.
+slowest=$(for i in $(seq 0 $((n - 1))); do echo "${ladder_cpus[$i]} $i"; done | sort -g -k1,1 | head -1 | cut -d' ' -f2)
+if [ -n "${LADDER_FIRST:-}" ]; then
+  for i in $(seq 0 $((n - 1))); do [ "${regions[$i]}" = "$LADDER_FIRST" ] && slowest=$i; done
+  [ "${regions[$slowest]}" = "$LADDER_FIRST" ] || { echo "unknown LADDER_FIRST $LADDER_FIRST" >&2; exit 2; }
+fi
 [ -z "$slow_region" ] || printf '%s\n' "${regions[@]}" | grep -qx -- "$slow_region" ||
   { echo "unknown SLOW_REGION $slow_region" >&2; exit 2; }
 rtt_of() { local row; read -r -a row <<< "${rtt[$1]}"; echo "${row[$2]}"; }
@@ -93,7 +119,7 @@ net=qpx-wan
 prefix=172.31.251
 replica_ip() { echo "$prefix.$((10 + $1))"; }
 gen_ip() { echo "$prefix.$((20 + $1))"; }
-results=$root/target/bench-etcd/wan-$(date +%Y%m%d-%H%M%S)
+results=${RESULTS_DIR:-$root/target/bench-etcd/wan-$(date +%Y%m%d-%H%M%S)}
 data=$root/target/bench-etcd/data
 mkdir -p "$results" "$data"
 # shellcheck source-path=SCRIPTDIR source=lib.sh
@@ -117,9 +143,11 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
   echo "slow: +${slow_ms}ms; jitter: ${jitter_ms}ms, ${loss}% loss"
   echo "policy: $policy (everywhere: ${POLICY_EVERYWHERE:-0}); policy runs ${policy_secs}s, change at ${change_at}s for ${change_for}s, settled from ${settled_from}s; heterogeneous and speedup quota $slow_cpus CPUs on ${slow_region:-the first leader} (speedup: until the change)"
   echo "cpus: replicas ${replica_cpus[*]}, generators $gen_cpus, disk probe $probe_cpus"
+  echo "quepaxa extra flags: ${quepaxa_flags[*]:-none}; load rates ${load_rates[*]} for ${load_secs}s each"
+  echo "ladder quotas: ${ladder_cpus[*]} CPUs (period ${cpu_period_us}us), first leader ${regions[$slowest]}; leader sampled every ${sample_s}s"
   # summarize-wan.sh reads this line.
   if [ "$data_tmpfs" = 1 ]; then echo "data: tmpfs"; else echo "data: host disk"; fi
-  echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms; etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
+  echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms (ladder: the library defaults); etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
 } > "$results/env.txt"
 cat "$results/env.txt"
 
@@ -140,18 +168,25 @@ slow_of() {
 # to the policy scenarios (and to all with POLICY_EVERYWHERE=1); the quota scenarios put
 # the first leader's container (or SLOW_REGION's) on a CPU quota.
 start_quepaxa() {
-  local members="" i flags=() quota mount slow
+  local members="" i flags=() quota mount slow timers=(--retransmit-ms 400 --hedge-max-ms 3000)
+  # The ladder is a LAN: the library's default timers.
+  [ "$2" = ladder ] && timers=()
   slow=$(slow_of "$1")
   for i in $(seq 0 $((n - 1))); do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
   if policy_case "$2" || [ "${POLICY_EVERYWHERE:-0}" = 1 ]; then read -r -a flags <<< "$policy"; fi
   for i in $(seq 0 $((n - 1))); do
     quota=()
-    quota_case "$2" && [ "$i" = "$slow" ] && quota=(--cpus "$slow_cpus")
+    if [ "$2" = ladder ]; then
+      quota=(--cpu-period "$cpu_period_us" --cpu-quota "$(awk -v c="${ladder_cpus[$i]}" -v p="$cpu_period_us" 'BEGIN { printf "%d", c * p }')")
+    elif quota_case "$2" && [ "$i" = "$slow" ]; then
+      quota=(--cpus "$slow_cpus")
+    fi
     read -r -a mount <<< "$(data_mount "$i")"
     docker run -d --name "qpx-r$i" --network "$net" --ip "$(replica_ip "$i")" --cpuset-cpus "${replica_cpus[$i]}" \
       "${quota[@]}" "${mount[@]}" "$image" \
       kv-tokio --id "$i" --members "$members" --client 0.0.0.0:7100 --etcd 0.0.0.0:2379 --data /data \
-      --leader-order "$(leader_order "$1")" --retransmit-ms 400 --hedge-max-ms 3000 "${flags[@]}" >/dev/null
+      --leader-order "$(leader_order "$1")" "${timers[@]}" "${flags[@]}" \
+      "${quepaxa_flags[@]}" >/dev/null
   done
 }
 
@@ -384,7 +419,7 @@ sample_leaders() {
   until [ -e "$stop" ]; do
     # The epoch tells a decided order change (it advances) from a rotation (it does not).
     echo "$((($(date +%s%3N) - t0) / 1000)) $(leader_now quepaxa) $(epoch_now)" >> "$out"
-    sleep 5
+    sleep "$sample_s"
   done
 }
 
@@ -418,6 +453,7 @@ run_case() {
   # The policy scenarios report the longest stall after their load changes instead.
   local run_secs=$secs fault_at=$fault lifter=""
   policy_case "$scenario" && run_secs=$policy_secs fault_at=$change_at
+  [ "$scenario" = load ] && run_secs=$load_secs
   # Probes (containers of their own) run before and after the load, never during it; only
   # the policy scenarios sample the leader meanwhile, from the generators' CPUs, and the
   # disk probe (one 512-byte fsync a second, on PROBE_CPUS) runs throughout.
@@ -432,7 +468,7 @@ run_case() {
     docker run --rm --name "qpx-g$i" --network "$net" --ip "$(gen_ip "$i")" --cpuset-cpus "$gen_cpus" \
       -v "$results:/out" "$image" \
       kv-bench --protocol etcd --targets "$(replica_ip "$i"):2379" "${load[@]}" --gets 0 --secs "$run_secs" \
-      --conns 4 --start-at "$t0" --fault-at "$fault_at" --timeline 250 --seed $((run * 10 + i + 1)) \
+      --conns "$conns" --start-at "$t0" --fault-at "$fault_at" --timeline 250 --seed $((run * 10 + i + 1)) \
       --samples "/out/$name-r$i.csv" > "$results/$name-r$i.txt" &
     pids+=($!)
   done
@@ -457,11 +493,16 @@ run_case() {
   if [ -n "$sampler" ]; then
     touch "$results/$name.stop"
     wait "$sampler"
-    # Each replica's counters (placement moves, steps aside, epoch) say who moved the lead.
+  fi
+  if [ -n "$sampler" ] || [ "$scenario" = load ]; then
+    # Each replica's counters (placement moves, steps aside, epoch, hedges) say who moved the
+    # lead and how slots were decided.
     for i in $(seq 0 $((n - 1))); do
       echo "${regions[$i]} $(docker run --rm --network "$net" "$image" bash -c \
         "exec 3<>/dev/tcp/$(replica_ip "$i")/7100 && echo STATS >&3 && head -1 <&3" 2>/dev/null)"
     done > "$results/$name-stats.txt"
+  fi
+  if [ -n "$sampler" ]; then
     # Decided order changes, as each replica logged them; a run without any logs none (grep's
     # status 1), which is no failure.
     for i in $(seq 0 $((n - 1))); do
@@ -500,30 +541,37 @@ stop() {
 read -r -a systems <<< "${SYSTEMS:-quepaxa etcd etcd-tuned}"
 for system in "${systems[@]}"; do
   for scenario in "${scenarios[@]}"; do
-    policy_case "$scenario" && [ "$system" != quepaxa ] && continue
+    { policy_case "$scenario" || [ "$scenario" = load ]; } && [ "$system" != quepaxa ] && continue
     placements=(far)
     [ "$scenario" = calm ] && placements+=(best)
     # The write shift starts where the first writers are best served.
-    [ "$scenario" = shift ] || [ "$scenario" = burst ] && placements=(best)
+    [ "$scenario" = shift ] || [ "$scenario" = burst ] || [ "$scenario" = load ] && placements=(best)
+    # region_load reads $rate: the load scenario sets it per run, the others keep RATE.
+    rates=("$base_rate")
+    [ "$scenario" = load ] && rates=("${load_rates[@]}")
     for placement in "${placements[@]}"; do
-      [ "$placement" = far ] && pinned=$far || pinned=$best
-      label=$scenario
-      [ "$placement" = best ] && label=$scenario-best
-      for run in $(seq 1 "$repeats"); do
-        echo "$system: $label, run $run"
-        case $system in
-          quepaxa) start_quepaxa "$pinned" "$scenario" ;;
-          etcd) start_etcd 100 1000 ;;
-          etcd-tuned) start_etcd "$max_rtt" $((10 * max_rtt)) ;;
-        esac
-        if ! quota_case "$scenario"; then
-          shape_links
-          check_links $(seq 0 $((n - 1)))
-        fi
-        check_generators
-        ready "$system" "$pinned"
-        run_case "$system" "$scenario" "$pinned" "$system-$label-$run" "$run"
-        stop
+      for rate in "${rates[@]}"; do
+        [ "$placement" = far ] && pinned=$far || pinned=$best
+        [ "$scenario" = ladder ] && pinned=$slowest
+        label=$scenario
+        [ "$placement" = best ] && label=$scenario-best
+        [ "$scenario" = load ] && label=load-$rate
+        for run in $(seq 1 "$repeats"); do
+          echo "$system: $label, run $run"
+          case $system in
+            quepaxa) start_quepaxa "$pinned" "$scenario" ;;
+            etcd) start_etcd 100 1000 ;;
+            etcd-tuned) start_etcd "$max_rtt" $((10 * max_rtt)) ;;
+          esac
+          if ! quota_case "$scenario"; then
+            shape_links
+            check_links $(seq 0 $((n - 1)))
+          fi
+          check_generators
+          ready "$system" "$pinned"
+          run_case "$system" "$scenario" "$pinned" "$system-$label-$run" "$run"
+          stop
+        done
       done
     done
   done
