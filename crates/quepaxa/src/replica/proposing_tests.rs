@@ -271,3 +271,23 @@ fn a_slot_resent_before_its_decision_teaches_no_round_trip() {
     decide_at_the_first_step(&mut r, at, slot, &own);
     assert_eq!(r.request_rtt, None, "the answer may be to either copy of the request");
 }
+
+#[test]
+fn a_slow_resent_slot_still_raises_the_round_trip() {
+    let (mut r, slot, own) = leading();
+    r.request_rtt = Some(10 * MS);
+    assert_eq!(resend_gaps(&mut r, slot, 1), [100]);
+    // Decides 60 ms after the resend: whether it answered the first or second copy, the
+    // true round trip is at least 60 ms, so the floor rises instead of resending every slot.
+    let at = r.now.after(60 * MS);
+    decide_at_the_first_step(&mut r, at, slot, &own);
+    assert_eq!(r.request_rtt, Some(60 * MS));
+    assert_eq!(r.resend_wait(None), 120 * MS);
+    // A fast answer right after a resend never pulls the round trip down.
+    let (mut r, slot, own) = leading();
+    r.request_rtt = Some(60 * MS);
+    assert_eq!(resend_gaps(&mut r, slot, 1), [240]);
+    let at = r.now.after(5 * MS);
+    decide_at_the_first_step(&mut r, at, slot, &own);
+    assert_eq!(r.request_rtt, Some(60 * MS));
+}

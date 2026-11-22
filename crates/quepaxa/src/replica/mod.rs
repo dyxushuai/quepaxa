@@ -51,6 +51,8 @@ struct Active {
     prop: SlotProposer,
     batch: u64,
     resend_at: Timestamp,
+    /// When the current step's requests were last sent.
+    sent_at: Timestamp,
     /// When this replica started proposing in the slot.
     started: Timestamp,
 }

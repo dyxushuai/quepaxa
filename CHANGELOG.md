@@ -21,7 +21,9 @@ All notable changes to this project are documented here. The project follows
   counted as `shed=`.
 - `quepaxa` (behaviour): `retransmit_interval` is now a floor, not a period. An
   unanswered record request is first sent again after it or after twice the smoothed
-  first-step round trip (of slots never resent), whichever is longer, and each further
+  first-step round trip (updated both ways by slots never resent, and raised by the time
+  since the last copy of a slow resent slot so the floor cannot stay stuck below a
+  saturated link), whichever is longer, and each further
   resend of the same step waits twice as long, up to `hedge_max` (or the floor, if
   longer); a new step starts from
   the floor. Resending every 50 ms on a saturated link sent every value again, grew the

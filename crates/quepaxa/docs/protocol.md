@@ -87,8 +87,9 @@ What the paper leaves open, the crate fixes as follows (the repository's
   one that would be stuck by the time a hedge is due, until it is.
 - **Retransmission.** A record request left unanswered is sent again after the resend
   floor: `retransmit_interval`, or twice the smoothed time first-step slots take to decide
-  if that is longer (sampled only from slots whose requests were never sent again, so a
-  sample answers one copy). Each further resend of the same step waits twice as long as
+  if that is longer (a slot never resent updates the estimate both ways; a resent slot's
+  time since its last copy only raises it, so a link whose round trip crosses the floor
+  does not keep resending every slot). Each further resend of the same step waits twice as long as
   the one before, up to `hedge_max` (or the floor, if longer); a new step starts from the floor. On a saturated link
   a request is queued, not lost, and resending it at a fixed period shorter than the queue
   sends every value again and collapses throughput.

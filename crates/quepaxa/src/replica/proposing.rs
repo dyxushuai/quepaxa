@@ -38,7 +38,7 @@ impl Replica {
         if req_step != active.prop.step() {
             return;
         }
-        let (started, resent) = (active.started, active.prop.was_resent());
+        let (sent_at, resent) = (active.sent_at, active.prop.was_resent());
         let Some(request) = active.prop.request_for(from).cloned() else { return };
         let resolve = |w: Option<WireProposal>| w.map(|w| w.resolve(&request).ok_or(())).transpose();
         let (Ok(first), Ok(prev_agg)) = (resolve(first), resolve(prev_agg)) else {
@@ -53,9 +53,10 @@ impl Replica {
                     self.metrics.fast_path_decisions += 1;
                 }
                 // The first step is the slot's first: never resent, the decision answers the
-                // one copy of each request, so the sample is a true round trip.
-                if req_step == 4 && !resent {
-                    self.note_request_rtt(self.now.0.saturating_sub(started.0));
+                // one copy of each request, so the sample is a true round trip; if resent,
+                // the time since the last copy is a lower bound that only raises the estimate.
+                if req_step == 4 {
+                    self.note_request_rtt(self.now.0.saturating_sub(sent_at.0), resent);
                 }
                 #[cfg(feature = "model")]
                 self.decided_steps.insert(slot, (p.clone(), req_step));
@@ -65,10 +66,22 @@ impl Replica {
     }
 
     /// Rises at once to a slower sample and decays by an eighth toward a faster one, as R
-    /// does (`watch.rs`): a link that starts queueing is followed at once.
-    fn note_request_rtt(&mut self, sample: u64) {
-        let avg = self.request_rtt.get_or_insert(sample);
-        *avg = if sample < *avg { *avg - *avg / 8 + sample / 8 } else { sample };
+    /// does (`watch.rs`): a link that starts queueing is followed at once. A resent slot's
+    /// decision may answer either copy, so the time since the last copy only raises the
+    /// estimate (or sets it if it already exceeds half the floor), never pulls it down:
+    /// otherwise a link whose round trip crosses `retransmit_interval` resends every slot
+    /// and never gets a clean sample to raise the floor (#231).
+    fn note_request_rtt(&mut self, sample: u64, resent: bool) {
+        let sample = sample.min(self.cfg.hedge_max);
+        match self.request_rtt {
+            Some(avg) if sample >= avg => self.request_rtt = Some(sample),
+            Some(avg) if !resent => self.request_rtt = Some(avg - avg / 8 + sample / 8),
+            Some(_) => {}
+            None if !resent || sample.saturating_mul(2) > self.cfg.retransmit_interval => {
+                self.request_rtt = Some(sample);
+            }
+            None => {}
+        }
     }
 
     /// How long to wait for an answer before sending again, after `resent` earlier resends
@@ -96,6 +109,7 @@ impl Replica {
         let resent = resend.then(|| a.prop.resent());
         let wait = self.resend_wait(resent);
         let Some(a) = self.proposers.get_mut(&slot) else { return };
+        a.sent_at = now;
         a.resend_at = now.after(wait);
         let step = a.prop.step();
         let reqs: Vec<(NodeId, Proposal)> =
@@ -268,7 +282,10 @@ impl Replica {
         // The slot's epoch is fixed: it was decided at least `LAG` slots before any slot we drive.
         let recorders = self.schedule.members(slot).to_vec();
         let prop = SlotProposer::new(recorders, leader, proposal, &mut self.rng);
-        self.proposers.insert(slot, Active { prop, batch: seq, resend_at: self.now, started: self.now });
+        self.proposers.insert(
+            slot,
+            Active { prop, batch: seq, resend_at: self.now, sent_at: self.now, started: self.now },
+        );
         self.send_requests(slot, false);
     }
 
