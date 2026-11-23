@@ -1,10 +1,11 @@
 --- a/crates/quepaxa/src/replica/proposing.rs
 +++ b/crates/quepaxa/src/replica/proposing.rs
-@@ -82,7 +82,7 @@
+@@ -95,7 +95,8 @@
      pub(super) fn resend_wait(&self, resent: Option<u32>) -> u64 {
          let retransmit = self.cfg.retransmit_interval;
          let floor = self.request_rtt.map_or(retransmit, |rtt| rtt.saturating_mul(2).max(retransmit));
 -        let wait = resent.map_or(floor, |k| floor.saturating_mul(1 << (k.min(31) + 1)));
++        let _ = resent;
 +        let wait = floor;
          wait.min(self.cfg.hedge_max.max(floor))
      }

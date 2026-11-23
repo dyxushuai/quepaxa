@@ -1,10 +1,11 @@
 --- a/crates/quepaxa/src/replica/watch.rs
 +++ b/crates/quepaxa/src/replica/watch.rs
-@@ -267,7 +267,7 @@
+@@ -275,7 +275,8 @@
          let d = self.hedge_delay();
          let (progressed, resumed) = (self.watch.progressed, self.watch.disk.resumed());
          let busy = progressed > at;
 -        let from = if busy && acked { progressed } else { at };
++        let _ = acked;
 +        let from = at;
          let wait = if busy { self.busy_delay() } else { d };
          let unbounded = from.max(resumed).after(wait);
