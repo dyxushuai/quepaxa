@@ -35,6 +35,12 @@ All notable changes to this project are documented here. The project follows
   17). `run-local.sh` takes the command size, a per-replica egress limit (`KV_EGRESS`,
   needs root for tc and nft), ports, CPU pinning and prebuilt binaries from the
   environment (#172).
+- `examples/kv-tokio` benchmarks: `bench/paper-eval.sh` reruns the paper's Fig. 6, 7 and
+  10 on one host (`docs/benchmarks.md`, "The paper's evaluation", #174). kv-tokio takes
+  `--max-in-flight-slots` and `--hedge-min-ms`; `run-local.sh` takes the replica count
+  (`KV_NODES`), extra replica flags (`KV_FLAGS`) and the connection count (`KV_CONNS`);
+  `wan.sh` gains the `load` (rate sweep) and `ladder` (replicas of different sizes, the
+  smallest leading first) scenarios, and `RESULTS_DIR`, `QUEPAXA_FLAGS` and `CONNS`.
 
 ## 0.7.0 — 2026-11-13
 

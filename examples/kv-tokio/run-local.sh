@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Starts a 3-replica kv-tokio cluster on loopback, runs kv-bench against it, stops it.
+# Starts a kv-tokio cluster (3 replicas by default) on loopback, runs kv-bench against it,
+# stops it.
 # Usage: run-local.sh [rate] [secs] [netem-delay-ms]
 # With a netem delay (needs `sudo tc`), loopback traffic gets that one-way delay.
 #
@@ -12,8 +13,11 @@
 #                        packets its sockets send, and an HTB class per mark on `lo` limits
 #                        them. Other loopback traffic passes unlimited. Without root, run it
 #                        in a container or VM where you have it.
-#   KV_PORT=BASE         peer ports BASE..BASE+2, client ports BASE+100.. (default 7100)
+#   KV_NODES=N           replicas (default 3, at most 99); replica 0 leads first
+#   KV_PORT=BASE         peer ports BASE..BASE+N-1, client ports BASE+100.. (default 7100)
 #   KV_CPUS="A B C"      taskset CPU list per replica, e.g. "0-1 2-3 4-5"
+#   KV_FLAGS="..."       extra kv-tokio flags for every replica, e.g. "--max-in-flight-slots 1"
+#   KV_CONNS=N           kv-bench connections, spread over the replicas (default 24)
 #   KV_BENCH_CPUS=LIST   taskset CPU list for kv-bench, e.g. 8-15
 #   KV_BIN=DIR           use kv-tokio and kv-bench from DIR instead of building
 #   KV_DATA_ROOT=DIR     where replica data lives (default target/kv-data)
@@ -22,7 +26,11 @@
 set -euo pipefail
 rate=${1:-20000}; secs=${2:-10}; delay=${3:-0}
 size=${KV_SIZE:-17}; gets=${KV_GETS:-0.5}; egress=${KV_EGRESS:-}; port=${KV_PORT:-7100}
+nodes=${KV_NODES:-3}; conns=${KV_CONNS:-24}
 read -r -a cpus <<<"${KV_CPUS:-}"
+read -r -a flags <<<"${KV_FLAGS:-}"
+if [ "$nodes" -lt 1 ] || [ "$nodes" -gt 99 ]; then echo "KV_NODES: 1 to 99, not $nodes" >&2; exit 2; fi
+ids=$(seq 0 $((nodes - 1)))
 root=$(cd "$(dirname "$0")/../.." && pwd)
 if [ -n "${KV_BIN:-}" ]; then
   bin=$KV_BIN
@@ -36,8 +44,8 @@ mkdir -p "$data_root"
 data=$(mktemp -d -p "$data_root")
 fstype=$(df -T "$data" | awk 'NR==2 {print $2}')
 if [ "$fstype" = tmpfs ]; then echo "warning: $data is on tmpfs; fsync is free there" >&2; fi
-members="0=127.0.0.1:$port,1=127.0.0.1:$((port + 1)),2=127.0.0.1:$((port + 2))"
-targets="127.0.0.1:$((port + 100)),127.0.0.1:$((port + 101)),127.0.0.1:$((port + 102))"
+members=$(for i in $ids; do echo "$i=127.0.0.1:$((port + i))"; done | paste -sd,)
+targets=$(for i in $ids; do echo "127.0.0.1:$((port + 100 + i))"; done | paste -sd,)
 pids=()
 owns_qdisc=0
 nft_table=kv_local_$$
@@ -56,10 +64,11 @@ cleanup() {
 trap cleanup EXIT
 fail() {
   echo "FAILED: $*" >&2
-  for i in 0 1 2; do echo "--- replica $i log (tail)" >&2; tail -5 "$data/n$i.log" >&2; done
+  for i in $ids; do echo "--- replica $i log (tail)" >&2; tail -5 "$data/n$i.log" >&2; done
   exit 1
 }
-ports=("$port" $((port + 1)) $((port + 2)) $((port + 100)) $((port + 101)) $((port + 102)))
+ports=()
+for i in $ids; do ports+=($((port + i)) $((port + 100 + i))); done
 bound() { for p in "${ports[@]}"; do ss -Hltn "sport = :$p" | grep -q . && return 0; done; return 1; }
 for _ in $(seq 300); do bound || break; sleep 0.1; done
 if bound; then echo "FAILED: ports ${ports[*]} still bound after 30 s:" >&2; ss -Hltnp >&2; exit 1; fi
@@ -68,13 +77,13 @@ answers() {
   timeout 1 bash -c "exec 3<>/dev/tcp/127.0.0.1/$1 && echo STATS >&3 && head -1 <&3" 2>/dev/null |
     grep -q '^STATS'
 }
-for i in 0 1 2; do
+for i in $ids; do
   launch=()
   if [ -n "$egress" ]; then launch+=(systemd-run --user --scope -q --unit "kv-local-$$-$i"); fi
   if [ -n "${cpus[$i]:-}" ]; then launch+=(taskset -c "${cpus[$i]}"); fi
   # Both exec the command, so the pid is the replica's.
-  "${launch[@]}" "$bin/kv-tokio" --id $i --members "$members" --client "127.0.0.1:$((port + 100 + i))" \
-    --data "$data/n$i" 2>"$data/n$i.log" &
+  "${launch[@]}" "$bin/kv-tokio" --id "$i" --members "$members" --client "127.0.0.1:$((port + 100 + i))" \
+    --data "$data/n$i" "${flags[@]}" 2>"$data/n$i.log" &
   pids+=($!)
 done
 if [ -n "$egress" ] || [ "$delay" != 0 ]; then
@@ -88,7 +97,7 @@ if [ -n "$egress" ]; then
   sudo nft add table inet "$nft_table"
   owns_nft=1
   sudo nft add chain inet "$nft_table" out '{ type filter hook output priority 0; }'
-  for i in 0 1 2; do
+  for i in $ids; do
     cg=$(cut -d: -f3 "/proc/${pids[$i]}/cgroup"); cg=${cg#/}
     sudo nft add rule inet "$nft_table" out socket cgroupv2 level "$(awk -F/ '{print NF}' <<<"$cg")" \
       "\"$cg\"" meta mark set $((0x11 + i))
@@ -100,7 +109,7 @@ fi
 if [ "$delay" != 0 ]; then
   for c in "${classes[@]}"; do sudo tc qdisc add dev lo parent "1:$c" netem delay "${delay}ms"; done
 fi
-for i in 0 1 2; do
+for i in $ids; do
   for _ in $(seq 150); do
     answers $((port + 100 + i)) && break
     kill -0 "${pids[$i]}" 2>/dev/null || break
@@ -110,6 +119,6 @@ for i in 0 1 2; do
 done
 bench=()
 if [ -n "${KV_BENCH_CPUS:-}" ]; then bench+=(taskset -c "$KV_BENCH_CPUS"); fi
-"${bench[@]}" "$bin/kv-bench" --targets "$targets" --rate "$rate" --secs "$secs" --conns 24 --gets "$gets" \
+"${bench[@]}" "$bin/kv-bench" --targets "$targets" --rate "$rate" --secs "$secs" --conns "$conns" --gets "$gets" \
   --size "$size"
-for i in 0 1 2; do kill -0 "${pids[$i]}" 2>/dev/null || fail "replica $i died during the run"; done
+for i in $ids; do kill -0 "${pids[$i]}" 2>/dev/null || fail "replica $i died during the run"; done
