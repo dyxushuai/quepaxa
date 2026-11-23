@@ -4,13 +4,16 @@
 //! kv-tokio --id 0 --members 0=127.0.0.1:7100,1=127.0.0.1:7101,2=127.0.0.1:7102 \
 //!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
 //!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379] [--retransmit-ms 400] [--hedge-max-ms 3000]
-//!          [--placement on] [--placement-periods 30000,120000]
+//!          [--placement on] [--placement-periods 30000,120000] [--max-in-flight-slots 10]
+//!          [--hedge-min-ms 3000]
 //! ```
 //!
-//! `--retransmit-ms` and `--hedge-max-ms` set the replica's `retransmit_interval` and
-//! `hedge_max`; raise them above the longest round trip and commit path on a WAN.
+//! `--retransmit-ms`, `--hedge-min-ms` and `--hedge-max-ms` set the replica's
+//! `retransmit_interval`, `hedge_min` and `hedge_max`; raise the first and last above the
+//! longest round trip and commit path on a WAN.
 //! `--placement on` lets the leader move to the replica where writes commit fastest (set it
 //! on every replica); `--placement-periods` sets its sustained period and hold in ms.
+//! `--max-in-flight-slots` sets how many slots the replica drives at once (the pipeline).
 //! `STATS` ends with `EGRESS <id>=<bytes>,..` (bytes queued to each peer link, framing
 //! included) and `LEADERS <ids>`, the leader order in force.
 //!
@@ -82,9 +85,11 @@ struct Args {
     snapshot_every: u64,
     leader_order: Vec<NodeId>,
     retransmit_ms: Option<u64>,
+    hedge_min_ms: Option<u64>,
     hedge_max_ms: Option<u64>,
     placement: bool,
     placement_periods: Option<(u64, u64)>,
+    max_in_flight_slots: Option<u32>,
 }
 
 const MILLI: u64 = 1_000_000;
@@ -93,7 +98,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut id, mut members, mut client, mut data, mut every) = (None, Vec::new(), None, None, 10_000);
     let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
     let (mut retransmit_ms, mut hedge_max_ms, mut placement) = (None, None, false);
-    let mut placement_periods = None;
+    let (mut placement_periods, mut max_in_flight_slots, mut hedge_min_ms) = (None, None, None);
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -124,6 +129,9 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--retransmit-ms" => {
                 retransmit_ms = Some(value.parse().map_err(|e| format!("--retransmit-ms: {e}"))?)
             }
+            "--hedge-min-ms" => {
+                hedge_min_ms = Some(value.parse().map_err(|e| format!("--hedge-min-ms: {e}"))?)
+            }
             "--hedge-max-ms" => {
                 hedge_max_ms = Some(value.parse().map_err(|e| format!("--hedge-max-ms: {e}"))?)
             }
@@ -139,6 +147,9 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                 let (sustain, hold) =
                     value.split_once(',').ok_or("--placement-periods: expected SUSTAIN_MS,HOLD_MS")?;
                 placement_periods = Some((ms(sustain)?, ms(hold)?));
+            }
+            "--max-in-flight-slots" => {
+                max_in_flight_slots = Some(value.parse().map_err(|e| format!("--max-in-flight-slots: {e}"))?)
             }
             other => return Err(format!("unknown flag {other}")),
         }
@@ -158,9 +169,11 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         snapshot_every: every,
         leader_order,
         retransmit_ms,
+        hedge_min_ms,
         hedge_max_ms,
         placement,
         placement_periods,
+        max_in_flight_slots,
     })
 }
 
@@ -178,6 +191,9 @@ fn config(args: &Args) -> Config {
     if let Some(ms) = args.retransmit_ms {
         cfg.retransmit_interval = ms.saturating_mul(MILLI);
     }
+    if let Some(ms) = args.hedge_min_ms {
+        cfg.hedge_min = ms.saturating_mul(MILLI);
+    }
     if let Some(ms) = args.hedge_max_ms {
         cfg.hedge_max = ms.saturating_mul(MILLI);
     }
@@ -185,6 +201,9 @@ fn config(args: &Args) -> Config {
     if let Some((sustain, hold)) = args.placement_periods {
         cfg.placement_sustain = sustain.saturating_mul(MILLI);
         cfg.placement_hold = hold.saturating_mul(MILLI);
+    }
+    if let Some(slots) = args.max_in_flight_slots {
+        cfg.max_in_flight_slots = slots;
     }
     cfg
 }
@@ -543,6 +562,13 @@ mod tests {
         let periods = config(&args(&format!("{base} --placement-periods 30000,120000")).unwrap());
         assert_eq!((periods.placement_sustain, periods.placement_hold), (30_000 * MILLI, 120_000 * MILLI));
         assert!(args(&format!("{base} --placement-periods 30000")).is_err());
+        assert_eq!(
+            config(&args(&format!("{base} --max-in-flight-slots 10")).unwrap()).max_in_flight_slots,
+            10
+        );
+        assert_eq!(plain.max_in_flight_slots, default.max_in_flight_slots);
+        let pinned_delay = config(&args(&format!("{base} --hedge-min-ms 3000 --hedge-max-ms 3000")).unwrap());
+        assert_eq!((pinned_delay.hedge_min, plain.hedge_min), (3_000 * MILLI, default.hedge_min));
         assert!(Replica::new(zero, [], Timestamp(0)).is_err(), "the replica's own validation refuses it");
         let bad = args(&format!("{base} --retransmit-ms soon")).err().unwrap();
         assert!(bad.starts_with("--retransmit-ms"), "{bad}");
