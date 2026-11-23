@@ -60,6 +60,7 @@ fn sigma_counts_only_below_the_hedge_delay_and_covers_twice_r() {
         Some(MS + 50 * MS),
         "R and the wait for a rate-limited ack (retransmit_interval / 8)"
     );
+    r.cfg.hedge_min = MS;
     r.cfg.retransmit_interval = 10 * MS;
     r.commit_latency = Some(5 * MS);
     r.watch.reply.insert(NodeId(0), MS / 100);

@@ -75,6 +75,10 @@ fn a_stalled_leader_disk_delays_writes_less_than_the_stall() {
         assert!(max < STALL_MS, "seed {seed}: slowest follower write {max} ms");
         // The leader steps aside and hands its own clients' writes to the next member.
         let own = worst(&r, &[0]);
+        assert!(
+            r.metrics[0].stepped_aside > 0,
+            "seed {seed}: leader did not step aside (waited out the stall, slowest write {own} ms)"
+        );
         assert!(own < STALL_MS - 20, "seed {seed}: slowest leader write {own} ms waited out the stall");
     }
 }

@@ -203,4 +203,6 @@ pub struct Report {
     /// Suspected entry combinations (#187) every replica ran into, crashed and retired
     /// incarnations included.
     pub entry_probes: quepaxa::inspect::EntryProbes,
+    /// Total message bytes each replica sent over the network.
+    pub bytes_sent: Vec<u64>,
 }

@@ -15,7 +15,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `max_in_flight_slots` | 8 | Slots one replica drives at once (pipelining), at most 64. |
 | `max_outstanding_proposals` | 4096 | Local proposals not yet committed before [`Busy`](crate::Error::Busy). |
 | `retransmit_interval` | 50 ms | The shortest wait before an unanswered request is sent again; resends back off from there. |
-| `hedge_min`, `hedge_max` | 1 ms, 1 s | Bounds of the adaptive hedge delay. |
+| `hedge_min`, `hedge_max` | 20 ms, 1 s | Bounds of the adaptive hedge delay. |
 | `silent_leader_takeover` | on | Stop waiting for a leader that has said nothing for about a commit latency since a forward. |
 | `placement` | off | Move the leader to the member that gives writers the lowest commit latency. Enable it on every member or on none. |
 | `placement_sustain`, `placement_hold` | 3 min, 10 min | How long a gain must last before a move, and how long any order change is left alone. |
