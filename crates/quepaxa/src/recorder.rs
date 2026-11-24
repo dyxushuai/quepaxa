@@ -45,6 +45,12 @@ impl Register {
         }
     }
 
+    /// Whether `record(s, v)` would change the register (and return true), without changing
+    /// it: rule R holds back exactly these requests until their content is present (#172).
+    pub fn would_change(&self, s: Step, v: &Proposal) -> bool {
+        s > self.step || (s == self.step && self.agg.as_ref().is_none_or(|a| a < v))
+    }
+
     pub fn summary(&self) -> Summary {
         Summary { step: self.step, first: self.first.clone(), prev_agg: self.prev_agg.clone() }
     }
@@ -122,6 +128,17 @@ mod proofs {
         }
         let sum = r.summary();
         assert!(sum.step == r.step && same(&sum.first, &r.first) && same(&sum.prev_agg, &r.prev_agg), "R6");
+    }
+
+    /// Rule R's guard: `would_change` predicts `record` from every register state. If they
+    /// differed, a recorder would reply without content or wait for nothing (#172).
+    #[kani::proof]
+    fn would_change_predicts_record() {
+        let mut r =
+            Register { step: kani::any(), first: any_option(), agg: any_option(), prev_agg: any_option() };
+        let (s, v): (Step, Proposal) = (kani::any(), any_proposal());
+        let predicted = r.would_change(s, &v);
+        assert!(predicted == r.record(s, v), "would_change == record");
     }
 }
 
@@ -214,6 +231,16 @@ mod tests {
                     prop_assert_eq!(&r.first, &Some(v), "first value of new step");
                 }
                 prop_assert_eq!(r.summary(), Summary { step: r.step, first: r.first.clone(), prev_agg: r.prev_agg.clone() }, "R6");
+            }
+        }
+
+        // Rule R's guard (#172): `would_change` predicts `record` exactly.
+        #[test]
+        fn would_change_predicts_record(inputs in proptest::collection::vec(arb_input(), 1..40)) {
+            let mut r = Register::default();
+            for (s, v) in inputs {
+                let predicted = r.would_change(s, &v);
+                prop_assert_eq!(predicted, r.record(s, v));
             }
         }
     }

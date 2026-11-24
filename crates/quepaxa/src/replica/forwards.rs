@@ -27,7 +27,7 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::Replica;
-use crate::batch;
+use crate::batch::{self, Piece, Ref};
 use crate::codec::Body;
 use crate::types::{NodeId, ProposalId, Timestamp};
 
@@ -38,6 +38,9 @@ struct Unacked {
     to: NodeId,
     /// The own entries it carried.
     ids: Vec<ProposalId>,
+    /// Data-batch references for this forward when it carried own entries by reference
+    /// (`inline_batch_bytes < max_batch_bytes`), empty for inline forwards.
+    refs: Vec<Ref>,
     /// How many times it was sent again.
     resends: u32,
     /// When it was last sent.
@@ -65,14 +68,21 @@ pub(super) struct Forwards {
 impl Forwards {
     /// Numbers the next forward, to `to` carrying own entries `ids`, resent at `due` until
     /// acknowledged (if it carries any).
-    pub(super) fn sent(&mut self, to: NodeId, ids: Vec<ProposalId>, now: Timestamp, due: Timestamp) -> u64 {
+    pub(super) fn sent(
+        &mut self,
+        to: NodeId,
+        ids: Vec<ProposalId>,
+        refs: Vec<Ref>,
+        now: Timestamp,
+        due: Timestamp,
+    ) -> u64 {
         let seq = self.next;
         self.next += 1;
         if !ids.is_empty() {
             for id in &ids {
                 self.latest.insert(*id, (seq, false));
             }
-            self.unacked.insert(seq, Unacked { to, ids, resends: 0, sent_at: now, due });
+            self.unacked.insert(seq, Unacked { to, ids, refs, resends: 0, sent_at: now, due });
         }
         seq
     }
@@ -160,14 +170,18 @@ impl Replica {
         wait.min(cap.max(floor))
     }
 
-    /// Sends own and handed-on entries `items` to `to` as one forward.
-    pub(super) fn send_forward(&mut self, to: NodeId, items: Vec<batch::Item>) {
-        let (me, inc) = (self.me, self.incarnation);
-        let ids =
-            items.iter().filter(|i| i.entry.origin == me && i.entry.incarnation == inc).map(|i| i.entry.id);
+    /// Sends `pieces` to `to` as one forward, tracking `own_ids` (and any originated `refs`)
+    /// until acknowledged.
+    pub(super) fn send_forward(
+        &mut self,
+        to: NodeId,
+        pieces: Vec<Piece>,
+        own_ids: Vec<ProposalId>,
+        refs: Vec<Ref>,
+    ) {
         let (now, due) = (self.now, self.now.after(self.forward_wait(to, None)));
-        let seq = self.watch.fwd.sent(to, ids.collect(), now, due);
-        self.send(to, Body::Forward { seq, batch: batch::encode(&items) });
+        let seq = self.watch.fwd.sent(to, own_ids, refs, now, due);
+        self.send(to, Body::Forward { seq, batch: batch::encode_pieces(&pieces) });
         self.metrics.forwarded += 1;
     }
 
@@ -193,12 +207,18 @@ impl Replica {
                 continue;
             }
             let (to, k) = (u.to, u.resends);
+            let refs = u.refs.clone();
             let wait = self.forward_wait(to, Some(k));
             if let Some(u) = self.watch.fwd.unacked.get_mut(&seq) {
                 u.resends = k.saturating_add(1);
                 (u.sent_at, u.due) = (now, now.after(wait));
             }
-            let batch = batch::encode(&items);
+            let batch = if !refs.is_empty() && refs.iter().all(|r| self.content.check(*r).is_ok()) {
+                let pieces: Vec<Piece> = refs.into_iter().map(Piece::Ref).collect();
+                batch::encode_pieces(&pieces)
+            } else {
+                batch::encode(&items)
+            };
             self.metrics.forward_resends += 1;
             self.metrics.forward_resent_bytes += batch.len() as u64;
             self.send(to, Body::Forward { seq, batch });

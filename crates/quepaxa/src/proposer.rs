@@ -81,8 +81,7 @@ impl SlotProposer {
         self.decided.as_ref()
     }
 
-    /// The working proposal `p` (for trace validation).
-    #[cfg(test)]
+    /// The working proposal `p`.
     pub fn working(&self) -> &Proposal {
         &self.p
     }

@@ -105,6 +105,7 @@ impl Replica {
         self.dedup = state.dedup;
         self.emitted = state.next;
         self.committed = state.next;
+        self.held = state.next;
         if self.cfg.placement {
             self.restart_hold();
         }
@@ -128,7 +129,11 @@ impl Replica {
             }
             self.actions.push(Action::Committed { id, slot: through });
         }
-        self.proposers = self.proposers.split_off(&Slot(state.next));
+        let kept_proposers = self.proposers.split_off(&Slot(state.next));
+        let dropped_proposers = core::mem::replace(&mut self.proposers, kept_proposers);
+        for a in dropped_proposers.into_values().filter(|a| a.waiting_content) {
+            self.release_value_refs(&a.prop.working().value);
+        }
         #[cfg(feature = "model")]
         self.probe_released();
         // The snapshot may carry this replica past its last led slot (`advance_committed`).
@@ -137,6 +142,7 @@ impl Replica {
         }
         self.raise_floor(state.next, core_state);
         self.advance_committed();
+        self.advance_held();
         self.emit_commits();
         self.check_reads();
         // Resume fetching whatever the cluster decided after the snapshot. The snapshot
@@ -163,7 +169,7 @@ impl Replica {
         self.log = self.log.split_off(&floor);
         self.registers = self.registers.split_off(&floor);
         self.seen = self.seen.split_off(&floor);
-        self.content.raise_floor(next);
+        self.raise_floor_content(next);
         #[cfg(feature = "model")]
         {
             self.decided_steps = self.decided_steps.split_off(&floor);
@@ -188,6 +194,7 @@ impl Replica {
         records.extend(
             self.content.referenced().map(|(id, bytes)| Record::Data { id, bytes: bytes.clone() }.encode()),
         );
+        self.content.mark_checkpointed();
         records.extend(
             self.registers
                 .iter()
@@ -202,9 +209,11 @@ impl Replica {
         self.gate.checkpoint(records);
     }
 
-    /// A peer no longer has slots we need.
+    /// A peer no longer has slots we need. Guarded by `emitted` (not `committed`): a
+    /// replica blocked on missing content has `emitted < committed` and still needs a
+    /// snapshot when holders compact past `emitted` (#172).
     pub(super) fn on_compacted(&mut self, from: NodeId, through: Slot) {
-        if through.0 < self.committed {
+        if through.0 < self.emitted {
             return;
         }
         let quiet = self.snapshot_asked.is_none_or(|t| t.after(self.cfg.hedge_max) <= self.now);

@@ -27,6 +27,10 @@ struct Held {
     slot: Option<Slot>,
     /// Kept whatever the slots.
     kept: bool,
+    /// Whether a `Record::Data` for this batch is already in the durable log of this
+    /// incarnation (restored on replay, written through the gate, or rewritten by a
+    /// checkpoint).
+    written: bool,
 }
 
 impl Held {
@@ -63,25 +67,81 @@ impl Store {
     }
 
     /// The content of batch `id`, if held.
-    #[cfg_attr(not(test), expect(dead_code, reason = "rules R and P read content (#172)"))]
     pub fn get(&self, id: &DataId) -> Option<&Bytes> {
         self.batches.get(id).map(|h| &h.bytes)
     }
 
+    /// Checks whether `r`'s batch is held and agrees with `r.len` and `r.crc`.
+    pub fn check(&self, r: Ref) -> Result<(), PinError> {
+        let held = self.batches.get(&r.id).ok_or(PinError::Missing)?;
+        if held.bytes.len() != r.len as usize || held.crc != r.crc {
+            return Err(PinError::Mismatch);
+        }
+        Ok(())
+    }
+
+    /// The content of `r`'s batch, if held and matching `r.len` and `r.crc`.
+    pub fn get_checked(&self, r: Ref) -> Option<&Bytes> {
+        let held = self.batches.get(&r.id)?;
+        (held.bytes.len() == r.len as usize && held.crc == r.crc).then_some(&held.bytes)
+    }
+
+    /// Whether a `Record::Data` for `id` has been written in this incarnation's durable view.
+    pub fn is_written(&self, id: &DataId) -> bool {
+        self.batches.get(id).is_some_and(|h| h.written)
+    }
+
+    /// If `id` is held and not yet written to the durable log, marks it written and returns
+    /// its bytes so the caller can emit `Record::Data` ahead of the record referencing it.
+    pub fn take_unwritten(&mut self, id: &DataId) -> Option<Bytes> {
+        let held = self.batches.get_mut(id)?;
+        if held.written {
+            return None;
+        }
+        held.written = true;
+        Some(held.bytes.clone())
+    }
+
+    /// A checkpoint (`replace: true`) just rewrote [`Store::referenced`] and discarded every
+    /// other `Data` record from disk.
+    pub fn mark_checkpointed(&mut self) {
+        let floor = self.floor;
+        for held in self.batches.values_mut() {
+            held.written = held.slot.is_some_and(|s| s.0 >= floor);
+        }
+    }
+
     /// Adds a received batch, unpinned; older unpinned batches of its origin (or this one,
     /// if it is the oldest) are evicted beyond the cap. Whether the store holds it after.
-    #[cfg_attr(not(test), expect(dead_code, reason = "`Data` is stored with rules R and P (#172)"))]
     pub fn insert(&mut self, id: DataId, bytes: Bytes) -> bool {
         if !self.batches.contains_key(&id) {
-            self.restore(id, bytes);
+            self.insert_raw(id, bytes, false);
             self.trim(id.origin);
         }
         self.batches.contains_key(&id)
     }
 
+    /// Adds a received batch without trimming yet, so callers that immediately pin or keep
+    /// a fetched batch do not have it evicted ahead of newer unpinned batches from the same
+    /// origin. Follow with [`Store::trim_origin`].
+    pub fn insert_untrimmed(&mut self, id: DataId, bytes: Bytes) {
+        if !self.batches.contains_key(&id) {
+            self.insert_raw(id, bytes, false);
+        }
+    }
+
+    /// Applies the per-origin unpinned byte cap for `origin`.
+    pub fn trim_origin(&mut self, origin: NodeId) {
+        self.trim(origin);
+    }
+
     /// Adds a batch from a durable `Data` record, unpinned and without evicting anything:
     /// records later in the replay may pin it. [`Store::raise_floor`] applies the cap after.
     pub fn restore(&mut self, id: DataId, bytes: Bytes) {
+        self.insert_raw(id, bytes, true);
+    }
+
+    fn insert_raw(&mut self, id: DataId, bytes: Bytes, written: bool) {
         if let Some(old) = self.batches.get(&id) {
             if old.pinned(self.floor) {
                 return;
@@ -89,7 +149,7 @@ impl Store {
             unloose(&mut self.loose, id.origin, old.bytes.len());
         }
         *self.loose.entry(id.origin).or_default() += bytes.len();
-        let held = Held { crc: crc32c(&bytes), bytes, slot: None, kept: false };
+        let held = Held { crc: crc32c(&bytes), bytes, slot: None, kept: false, written };
         self.batches.insert(id, held);
     }
 
@@ -128,7 +188,6 @@ impl Store {
     }
 
     /// Keeps batch `id` whatever the slots, until [`Store::release`]. Whether it is held.
-    #[cfg_attr(not(test), expect(dead_code, reason = "origins and queues keep batches with rule R (#172)"))]
     pub fn keep(&mut self, id: DataId) -> bool {
         let floor = self.floor;
         let Some(held) = self.batches.get_mut(&id) else { return false };
@@ -141,7 +200,6 @@ impl Store {
     }
 
     /// Ends [`Store::keep`]: the batch stays while a slot pins it, and is loose otherwise.
-    #[cfg_attr(not(test), expect(dead_code, reason = "origins and queues keep batches with rule R (#172)"))]
     pub fn release(&mut self, id: DataId) {
         let floor = self.floor;
         let Some(held) = self.batches.get_mut(&id).filter(|h| h.kept) else { return };

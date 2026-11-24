@@ -102,6 +102,13 @@ pub struct Config {
     /// After any change of the leader order, how long, in nanoseconds, placement leaves it
     /// alone. Default 10 minutes.
     pub placement_hold: u64,
+    /// Largest chunk of forwarded entries, in encoded bytes, that travels inline to the
+    /// member this replica hands entries to. A larger chunk goes by reference: its content
+    /// goes to every member directly as a data batch and the forward names it, so the leader
+    /// stops carrying it to every recorder (#172). At least 64; values at or above
+    /// `max_batch_bytes` keep every chunk inline. Per replica: members may differ. Default
+    /// `u32::MAX` (off); see [`guide::tuning`](crate::guide::tuning) for when to lower it.
+    pub inline_batch_bytes: u32,
 }
 
 impl Config {
@@ -127,6 +134,7 @@ impl Config {
             placement: false,
             placement_sustain: 180_000 * MILLI,
             placement_hold: 600_000 * MILLI,
+            inline_batch_bytes: u32::MAX,
         }
     }
 
@@ -174,6 +182,7 @@ impl Config {
                 u64::from(self.max_message_bytes) >= 2 * u64::from(self.max_batch_bytes) + MESSAGE_OVERHEAD,
                 "max_message_bytes must hold two full batches plus 1 KiB of framing",
             ),
+            (self.inline_batch_bytes >= 64, "inline_batch_bytes must be at least 64"),
             (self.max_in_flight_slots > 0, "max_in_flight_slots must be positive"),
             (
                 u64::from(self.max_in_flight_slots) <= crate::schedule::LAG,
@@ -374,6 +383,18 @@ pub struct Metrics {
     /// Gauge: this replica's position in the leader order in force at the applied prefix (0:
     /// it leads); the number of members if it is not one.
     pub leader_position: u64,
+    /// Data batches this replica sent to members as their origin, one per member
+    /// ([`Config::inline_batch_bytes`]).
+    pub data_sent: u64,
+    /// Data batches this replica asked a holder for: content a record request, a proposal
+    /// or a commit needed and this replica did not hold.
+    pub fetches: u64,
+    /// Fetches asked again of the next holder after `retransmit_interval`.
+    pub fetch_retries: u64,
+    /// Data batches this replica sent to a member that fetched them.
+    pub fetches_served: u64,
+    /// Record requests held back until the content they reference arrived.
+    pub parked_requests: u64,
 }
 
 /// One member of the epoch in force as this replica sees it, from

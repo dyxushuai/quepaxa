@@ -36,6 +36,9 @@ pub const QPX_CONFIG_PLACEMENT: u32 = 8;
 pub const QPX_CONFIG_PLACEMENT_SUSTAIN_NS: u32 = 9;
 /// How long placement leaves any change of the leader order alone, nanoseconds (ABI 0.10).
 pub const QPX_CONFIG_PLACEMENT_HOLD_NS: u32 = 10;
+/// Largest forwarded chunk that travels inline, bytes (`u32`, at least 64; default `u32::MAX`
+/// off). Larger chunks travel by reference as data batches (ABI 0.11).
+pub const QPX_CONFIG_INLINE_BATCH_BYTES: u32 = 11;
 
 /// Creates a configuration with default settings: `cluster_id` (16 bytes; messages from
 /// other clusters are dropped), this replica's `id`, the `members_len` configured members at
@@ -119,6 +122,7 @@ pub unsafe extern "C" fn qpx_config_set(cfg: *mut qpx_config, option: u32, value
             c.placement_hold = value;
             true
         }
+        QPX_CONFIG_INLINE_BATCH_BYTES => narrow(&mut c.inline_batch_bytes, value),
         _ => {
             set_last_error(&format!("unknown config option {option}"));
             return QPX_ERR_INVALID_ARGUMENT;
