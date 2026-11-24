@@ -131,7 +131,7 @@ fn misaddressed_and_out_of_range_messages_are_rejected_at_the_exact_bounds() {
         (1, 0, reply(4, max_step + 1), true),
         (1, 0, reply(4, max_step), false),
         (1, 0, reply(4, 4), false),
-        (1, 0, Body::Forward { batch: Bytes::from_static(b"not a batch") }, true),
+        (1, 0, Body::Forward { seq: 0, batch: Bytes::from_static(b"not a batch") }, true),
     ];
     for (from, to, body, rejected) in cases {
         let mut r = replica();
@@ -846,8 +846,8 @@ fn a_follower_hands_a_hedged_batch_that_lost_its_slot_back_to_the_leader() {
     while r.entries.forwarded().contains_key(&id) {
         let at = r.next_deadline().expect("the hedge is scheduled");
         r.handle_timeout(at).unwrap();
+        r.poll_actions(&mut out);
     }
-    r.poll_actions(&mut out);
     let slot = r.entries.batches().values().find_map(|b| b.slot).expect("the hedged batch has a slot");
     out.clear();
     // The leader's value takes the slot.
@@ -1152,7 +1152,7 @@ fn the_leader_leaves_the_next_leaders_slots_to_it() {
     };
     let env =
         Envelope { cluster_id: [3; 16], config_epoch: 0, from: NodeId(2), to: NodeId(0), commit_index: 62 };
-    let body = Body::Forward { batch: batch::encode(&[entry]) };
+    let body = Body::Forward { seq: 0, batch: batch::encode(&[entry]) };
     r.handle(Timestamp(4), Input::Message(Message { env, body }.encode())).unwrap();
     r.poll_actions(&mut out);
     assert!(r.proposers.is_empty(), "a lagging follower's entries are not proposed here");

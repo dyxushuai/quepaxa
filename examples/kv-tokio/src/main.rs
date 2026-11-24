@@ -461,6 +461,7 @@ async fn main() {
         }
     };
     let cfg = config(&args);
+    let admit = node::admission_bytes(&cfg);
     let cluster_id = cfg.cluster_id;
     let (disk, records) = Disk::open(&args.data).expect("open data directory");
     let replica = Replica::new(cfg, records, Timestamp(0)).expect("recover replica");
@@ -479,6 +480,7 @@ async fn main() {
     // Bounded: a busy replica thread holds peers and clients back; their tasks await room.
     let (events, rx) = tmpsc::channel(65_536);
     let mut node = Node::new(replica, disk, peers, args.snapshot_every, events.clone());
+    node.admit_up_to(admit);
     if let Err(e) = node.restore() {
         eprintln!("kv-tokio: {e}");
         std::process::exit(1);

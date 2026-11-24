@@ -55,9 +55,14 @@ pub struct Config {
     pub max_in_flight_slots: u32,
     /// How many local proposals may be pending before [`Error::Busy`].
     pub max_outstanding_proposals: u32,
-    /// How often an unanswered record request is re-sent, in nanoseconds. The default
-    /// (50 ms) suits a LAN; across regions set it above the round trip to the farthest
-    /// member of a majority, or every request is sent several times.
+    /// The shortest wait before an unanswered record request is sent again, in
+    /// nanoseconds: a floor, not a period. The first resend waits this or twice the
+    /// smoothed round trip of first-step slots never resent, whichever is longer; each
+    /// further resend of the same step waits twice as long as the one before, up to
+    /// `hedge_max` (or the floor, if that is longer). The default (50 ms) suits a LAN; across regions set it above the round
+    /// trip to the farthest member of a majority, or the first requests are sent twice
+    /// before a round trip has been measured. Catch-up, read and probe retries still
+    /// repeat at this interval.
     pub retransmit_interval: u64,
     /// Lower bound of the adaptive hedge delay, in nanoseconds.
     pub hedge_min: u64,
@@ -332,7 +337,7 @@ pub enum Action {
 pub struct Metrics {
     /// Network messages that failed to decode or came from a non-member.
     pub messages_rejected: u64,
-    /// Record requests re-sent after `retransmit_interval`.
+    /// Times a step's unanswered record requests were sent again (`retransmit_interval`).
     pub retransmits: u64,
     /// Bulk catch-up requests re-sent after `retransmit_interval`.
     pub catch_up_retries: u64,
@@ -347,6 +352,13 @@ pub struct Metrics {
     pub forwarded: u64,
     /// Own entries proposed directly after the leader did not commit them in time.
     pub hedged: u64,
+    /// Of those, the ones hedged only because 4 · `hedge_max` had passed since the forward,
+    /// although the target kept deciding slots and had acknowledged the forward.
+    pub hedges_at_bound: u64,
+    /// Forwards sent again because the target had not acknowledged them.
+    pub forward_resends: u64,
+    /// Bytes of entries those resends carried.
+    pub forward_resent_bytes: u64,
     /// Times this replica stepped aside because a write waited too long on its disk.
     pub stepped_aside: u64,
     /// Gauge: decided slots held in memory (bounded by compaction).

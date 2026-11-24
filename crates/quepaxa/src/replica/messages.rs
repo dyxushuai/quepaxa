@@ -98,9 +98,10 @@ impl Replica {
                             self.request_catch_up(peer);
                         }
                     }
-                    Body::Forward { batch } => self.on_forward(from, &batch),
-                    // Arriving at all is the point (`heard_from`, `watch.rs`).
-                    Body::ForwardAck => {}
+                    Body::Forward { seq, batch } => self.on_forward(from, seq, &batch),
+                    // Arriving at all shows the sender alive (`heard_from`, `watch.rs`); the
+                    // numbers say which forwards it took (`forwards.rs`).
+                    Body::ForwardAck { seqs } => self.watch.fwd.acked(from, &seqs, self.now),
                     Body::Compacted { through } => self.on_compacted(from, through),
                     Body::ReadQuery { incarnation, round } => self.on_read_query(from, incarnation, round),
                     Body::ReadReply { incarnation, round, high } => {

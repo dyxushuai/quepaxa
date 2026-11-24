@@ -9,6 +9,7 @@
 
 mod disk;
 mod entries;
+mod forwards;
 mod gate;
 mod log;
 mod messages;
@@ -50,6 +51,8 @@ struct Active {
     prop: SlotProposer,
     batch: u64,
     resend_at: Timestamp,
+    /// When the current step's requests were last sent.
+    sent_at: Timestamp,
     /// When this replica started proposing in the slot.
     started: Timestamp,
 }
@@ -121,6 +124,9 @@ pub struct Replica {
     /// Smoothed propose-to-commit latency of own proposals that were not hedged, in
     /// nanoseconds.
     commit_latency: Option<u64>,
+    /// Smoothed time from starting a slot to its decision at the first step, over slots
+    /// whose requests were never sent again, in nanoseconds (`send_requests`).
+    request_rtt: Option<u64>,
     next_proposal: u64,
     next_alloc: u64,
     /// The slots this incarnation may lead at the top priority (`recovery.rs`).
@@ -279,6 +285,7 @@ impl Replica {
             placement: placement::Placement::new(now, leader),
             reads: reads::Reads::default(),
             commit_latency: None,
+            request_rtt: None,
             next_proposal: 0,
             next_alloc: 0,
             reservation,
@@ -646,6 +653,7 @@ impl Replica {
             self.placement.policy.on_resolved(id);
         }
         let internal = [self.retirement.fence(), moving];
+        self.watch.fwd.clear();
         for id in self.entries.fence().into_iter().map(|l| l.id).filter(|id| !internal.contains(&Some(*id))) {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }

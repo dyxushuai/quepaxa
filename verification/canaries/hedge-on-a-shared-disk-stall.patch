@@ -1,11 +1,11 @@
 --- a/crates/quepaxa/src/replica/watch.rs
 +++ b/crates/quepaxa/src/replica/watch.rs
-@@ -284,7 +284,7 @@
-         let d = self.hedge_delay();
-         let wait = if self.watch.progressed > at { self.busy_delay() } else { d };
-         let late = at.max(self.watch.disk.resumed()).after(wait);
+@@ -272,7 +272,7 @@
+         let unbounded = from.max(resumed).after(wait);
+         let bound = at.max(resumed).after(self.cfg.hedge_max.saturating_mul(4));
+         let late = unbounded.min(bound);
 -        let held = !self.watch.aside
 +        let held = false && !self.watch.aside
              && matches!(self.watch.disk.health(self.now, d), Health::SharedStall { since } if since <= late);
-         (!held).then_some(late)
+         (!held).then_some((late, bound < unbounded))
      }

@@ -184,3 +184,30 @@ fn waiting_for_the_disk_ends_once_the_writer_catches_up() {
     written.advance(u64::MAX, None);
     written.wait_for(u64::MAX - 1);
 }
+
+#[test]
+fn writes_past_the_admission_bound_are_refused_busy_until_earlier_ones_commit() {
+    let mut n = node("admission");
+    let req = |v: &[u8]| Request::Put { key: b"k".to_vec(), value: v.to_vec(), prev_kv: false };
+    let one = req(b"1").encode().len() as u64;
+    n.admit_up_to(one);
+    let _first = ask(&mut n, Cmd::Write(req(b"1")));
+    let mut refused = ask(&mut n, Cmd::Write(req(b"2")));
+    assert!(
+        matches!(refused.try_recv(), Ok(Reply::Failed(Failure::Refused(quepaxa::Error::Busy)))),
+        "the second write would pass the bound"
+    );
+    assert_eq!(n.admitted_bytes, one);
+    // The first commits: room again.
+    settle(&mut n);
+    assert_eq!(n.admitted_bytes, 0, "a committed write leaves the bound");
+    let mut again = ask(&mut n, Cmd::Write(req(b"3")));
+    assert!(again.try_recv().is_err(), "admitted, waiting for its commit");
+}
+
+#[test]
+fn the_admission_bound_is_twice_what_the_slots_carry() {
+    let cfg = quepaxa::Config::new([1; 16], quepaxa::NodeId(0), vec![quepaxa::NodeId(0)], [2; 32]);
+    let carried = u64::from(cfg.max_batch_bytes) * u64::from(cfg.max_in_flight_slots);
+    assert_eq!(admission_bytes(&cfg), 2 * carried);
+}

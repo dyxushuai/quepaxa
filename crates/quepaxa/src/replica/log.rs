@@ -257,6 +257,7 @@ impl Replica {
             self.actions.push(Action::Commit { slot, entries });
             for id in mine {
                 let own = self.entries.resolved(id).map(|l| l.own);
+                self.watch.fwd.forget(id);
                 if self.retirement.committed(id) {
                     continue;
                 }

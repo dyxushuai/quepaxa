@@ -35,9 +35,9 @@ fn a_leader_whose_disk_is_stuck_hands_its_entries_on_while_others_decide() {
         },
         kind: batch::Kind::App,
     }];
-    r.handle(r.now, from_peer(2, 0, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.handle(r.now, from_peer(2, 0, Body::Forward { seq: 0, batch: batch::encode(&entries) })).unwrap();
     r.poll_actions(&mut out);
-    let acked = out.iter().any(|a| matches!(a, Action::Send(o) if matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck, .. }))));
+    let acked = out.iter().any(|a| matches!(a, Action::Send(o) if matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::ForwardAck { .. }, .. }))));
     assert!(!acked, "no acknowledgement while stepped aside");
     // The forward to the deputy was lost: still uncommitted after δ, it is handed over again
     // (not proposed here, where the slots are stuck).
@@ -99,7 +99,7 @@ fn a_follower_does_not_hedge_while_every_disk_seems_stuck() {
     let last = r.watch.disk.in_flight().next_back().expect("writes in flight");
     r.handle(Timestamp(150 * MS), Input::Persisted(PersistId(last))).unwrap();
     r.poll_actions(&mut out);
-    assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(230 * MS)));
+    assert_eq!(r.late_at(Timestamp(2 * MS), false), Some(Timestamp(230 * MS)));
     r.handle_timeout(Timestamp(230 * MS)).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.metrics.hedged, 1);
@@ -127,7 +127,7 @@ fn a_disk_that_keeps_completing_writes_is_slow_not_stuck() {
     r.handle(Timestamp(40 * MS), Input::Persisted(PersistId(first))).unwrap();
     r.poll_actions(&mut out);
     assert!(r.watch.disk.in_flight().len() > 0, "the second write is still in flight");
-    assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(82 * MS)), "not held, δ not restarted");
+    assert_eq!(r.late_at(Timestamp(2 * MS), false), Some(Timestamp(82 * MS)), "not held, δ not restarted");
     r.handle_timeout(Timestamp(82 * MS)).unwrap();
     r.poll_actions(&mut out);
     assert!(!r.entries.forwarded().contains_key(&id), "hedged after δ");
@@ -144,7 +144,7 @@ fn a_hedge_stays_scheduled_until_the_disk_is_actually_stuck() {
     let d = r.hedge_delay();
     assert_eq!(r.watch.disk.health(Timestamp(81 * MS - 1), d), Health::Writing);
     assert_eq!(r.watch.disk.health(Timestamp(81 * MS), d), Health::SharedStall { since: Timestamp(81 * MS) });
-    assert_eq!(r.late_at(Timestamp(2 * MS)), Some(Timestamp(82 * MS)), "the hedge is scheduled");
+    assert_eq!(r.late_at(Timestamp(2 * MS), false), Some(Timestamp(82 * MS)), "the hedge is scheduled");
     assert!(r.next_deadline().is_some_and(|t| t <= Timestamp(82 * MS)));
     // Still nothing written by then: stuck, and held.
     r.handle_timeout(Timestamp(82 * MS)).unwrap();
@@ -216,7 +216,7 @@ fn a_stepped_aside_deputy_hands_on_what_it_is_handed() {
         },
         kind: batch::Kind::App,
     }];
-    r.handle(r.now, from_peer(2, 1, Body::Forward { batch: batch::encode(&entries) })).unwrap();
+    r.handle(r.now, from_peer(2, 1, Body::Forward { seq: 0, batch: batch::encode(&entries) })).unwrap();
     r.poll_actions(&mut out);
     assert!(r.entries.relayed().is_empty(), "not proposed on the stuck disk");
     assert!(!r.entries.batches().values().any(|b| b.entries.iter().any(|e| e.2 == ProposalId(4))));

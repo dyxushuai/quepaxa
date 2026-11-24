@@ -102,13 +102,17 @@ pub(crate) enum Body {
         proposals: Vec<Proposal>,
         content: Vec<(DataId, Bytes)>,
     },
-    /// Entries a follower hands to the leader (an encoded batch).
+    /// Entries a follower hands to the leader (an encoded batch), numbered by the sender so
+    /// the receiver can acknowledge it; a forward sent again keeps its number.
     Forward {
+        seq: u64,
         batch: Bytes,
     },
-    /// The sender took a `Forward`: it is alive, whatever its disk is doing. Sent at once,
-    /// it reports no state.
-    ForwardAck,
+    /// The sender took the `Forward`s numbered `seqs` (those since its last acknowledgement):
+    /// it is alive, whatever its disk is doing. Sent before any write, it reports no state.
+    ForwardAck {
+        seqs: Vec<u64>,
+    },
     /// The sender no longer has slots up to `through`; fetch its snapshot instead.
     Compacted {
         through: Slot,
@@ -176,7 +180,7 @@ impl Body {
                 let values = proposals.iter().map(|p| p.value.len());
                 values.chain(content.iter().map(|(_, b)| b.len())).max().unwrap_or(0)
             }
-            Body::Forward { batch } => batch.len(),
+            Body::Forward { batch, .. } => batch.len(),
             Body::Data { bytes, .. } => bytes.len(),
             Body::Decided { .. }
             | Body::Fetch { .. }
@@ -186,7 +190,7 @@ impl Body {
             | Body::ReadReply { .. }
             | Body::RttProbe { .. }
             | Body::RttReply { .. }
-            | Body::ForwardAck => 0,
+            | Body::ForwardAck { .. } => 0,
         }
     }
 }
@@ -239,7 +243,7 @@ impl Message {
             Body::Compacted { .. } => KIND_COMPACTED,
             Body::ReadQuery { .. } => KIND_READ_QUERY,
             Body::ReadReply { .. } => KIND_READ_REPLY,
-            Body::ForwardAck => KIND_FORWARD_ACK,
+            Body::ForwardAck { .. } => KIND_FORWARD_ACK,
             Body::RttProbe { .. } => KIND_RTT_PROBE,
             Body::RttReply { .. } => KIND_RTT_REPLY,
             Body::Data { .. } => KIND_DATA,
@@ -282,8 +286,16 @@ impl Message {
                     put_value(&mut out, bytes);
                 }
             }
-            Body::Forward { batch } => put_value(&mut out, batch),
-            Body::ForwardAck => {}
+            Body::Forward { seq, batch } => {
+                out.put_u64_le(*seq);
+                put_value(&mut out, batch);
+            }
+            Body::ForwardAck { seqs } => {
+                out.put_u32_le(seqs.len() as u32);
+                for seq in seqs {
+                    out.put_u64_le(*seq);
+                }
+            }
             Body::Compacted { through } => out.put_u64_le(through.0),
             Body::ReadQuery { incarnation, round } => {
                 out.put_u64_le(*incarnation);
@@ -333,10 +345,10 @@ impl Message {
             | Body::Compacted { .. }
             | Body::ReadQuery { .. }
             | Body::ReadReply { .. }
-            | Body::RttReply { .. }
-            | Body::ForwardAck => 0,
+            | Body::RttReply { .. } => 0,
+            Body::ForwardAck { seqs } => 4 + 8 * seqs.len(),
             Body::RttProbe { table, .. } => 28 + 12 * table.len(),
-            Body::Forward { batch } => batch.len(),
+            Body::Forward { batch, .. } => batch.len(),
             Body::Entries { proposals, content, .. } => {
                 let values: usize = proposals.iter().map(|p| p.value.len() + 33).sum();
                 values + content.iter().map(|(_, b)| b.len() + DATA_ID_LEN + 5).sum::<usize>()
@@ -409,8 +421,16 @@ impl Message {
                 }
                 Body::Entries { first, proposals, content }
             }
-            KIND_FORWARD => Body::Forward { batch: r.value()? },
-            KIND_FORWARD_ACK => Body::ForwardAck,
+            KIND_FORWARD => Body::Forward { seq: r.u64()?, batch: r.value()? },
+            KIND_FORWARD_ACK => {
+                let n = r.u32()? as usize;
+                // Each number takes 8 bytes, bounding the allocation by input size.
+                let mut seqs = Vec::with_capacity(n.min(buf.len() / 8));
+                for _ in 0..n {
+                    seqs.push(r.u64()?);
+                }
+                Body::ForwardAck { seqs }
+            }
             KIND_COMPACTED => Body::Compacted { through: Slot(r.u64()?) },
             KIND_READ_QUERY => Body::ReadQuery { incarnation: r.u64()?, round: r.u64()? },
             KIND_READ_REPLY => {

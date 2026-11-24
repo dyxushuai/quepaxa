@@ -149,6 +149,14 @@ impl Written {
 /// flushed early past an eighth of it, so one hand-off cannot overshoot it by much.
 const MAX_UNWRITTEN: u64 = 64 << 20;
 
+/// How many bytes of its own writes a replica holds accepted but not yet committed before it
+/// answers `Busy`: twice what its slots can carry at once. Past the link's capacity a deeper
+/// queue only adds latency, and every entry in it may be sent again or hedged (#231); a
+/// client told `Busy` backs off instead.
+pub fn admission_bytes(cfg: &quepaxa::Config) -> u64 {
+    u64::from(cfg.max_batch_bytes) * u64::from(cfg.max_in_flight_slots) * 2
+}
+
 struct PendingPersist {
     id: PersistId,
     records: Vec<Bytes>,
@@ -192,6 +200,11 @@ pub struct Node {
     persists: Vec<PendingPersist>,
     /// Record bytes in `persists`.
     pending: u64,
+    /// Own writes accepted and not yet committed or dropped, with their sizes.
+    admitted: HashMap<ProposalId, u64>,
+    /// Their total size, and the most `admit` lets in before writes are refused with `Busy`.
+    admitted_bytes: u64,
+    admit: u64,
 }
 
 /// How many queued events are handled before their persists are flushed together.
@@ -334,6 +347,20 @@ impl Node {
             reads: HashMap::new(),
             persists: Vec::new(),
             pending: 0,
+            admitted: HashMap::new(),
+            admitted_bytes: 0,
+            admit: u64::MAX,
+        }
+    }
+
+    /// Refuses writes with `Busy` while `bytes` of accepted ones wait to commit.
+    pub fn admit_up_to(&mut self, bytes: u64) {
+        self.admit = bytes;
+    }
+
+    fn settled(&mut self, id: ProposalId) {
+        if let Some(n) = self.admitted.remove(&id) {
+            self.admitted_bytes -= n;
         }
     }
 
@@ -508,8 +535,17 @@ impl Node {
         match cmd {
             Cmd::Write(req) => {
                 let payload = req.encode();
+                let size = payload.len() as u64;
+                if self.admitted_bytes.saturating_add(size) > self.admit && !self.admitted.is_empty() {
+                    let _ = reply.send(refused(quepaxa::Error::Busy));
+                    return;
+                }
                 match self.replica.propose(now, Bytes::from(payload.clone())) {
-                    Ok(id) => self.to_apply.push(Job::Proposed { id, payload, reply }),
+                    Ok(id) => {
+                        self.admitted.insert(id, size);
+                        self.admitted_bytes += size;
+                        self.to_apply.push(Job::Proposed { id, payload, reply })
+                    }
                     Err(e) => {
                         let _ = reply.send(refused(e));
                     }
@@ -607,7 +643,10 @@ impl Node {
                         self.applied = slot.0 + 1;
                     }
                 }
-                Action::Committed { id, slot } => self.to_apply.push(Job::Committed { id, slot: slot.0 }),
+                Action::Committed { id, slot } => {
+                    self.settled(id);
+                    self.to_apply.push(Job::Committed { id, slot: slot.0 })
+                }
                 // Queued behind every commit emitted before it, so it reads their effects.
                 Action::ReadReady { id, .. } => {
                     if let Some((range, reply)) = self.reads.remove(&id) {
@@ -628,6 +667,7 @@ impl Node {
                     std::process::exit(0);
                 }
                 Action::Dropped { id, reason } => {
+                    self.settled(id);
                     self.to_apply.push(Job::Dropped { id, reason });
                     if let Some((_, r)) = self.reads.remove(&id) {
                         let _ = r.send(Reply::Failed(Failure::Fenced));

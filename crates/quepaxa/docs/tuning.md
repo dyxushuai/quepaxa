@@ -14,7 +14,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `max_message_bytes` | 16 MiB | Largest accepted message; at least `2 * max_batch_bytes + 1024`. |
 | `max_in_flight_slots` | 8 | Slots one replica drives at once (pipelining), at most 64. |
 | `max_outstanding_proposals` | 4096 | Local proposals not yet committed before [`Busy`](crate::Error::Busy). |
-| `retransmit_interval` | 50 ms | When an unanswered request is sent again. |
+| `retransmit_interval` | 50 ms | The shortest wait before an unanswered request is sent again; resends back off from there. |
 | `hedge_min`, `hedge_max` | 1 ms, 1 s | Bounds of the adaptive hedge delay. |
 | `silent_leader_takeover` | on | Stop waiting for a leader that has said nothing for about a commit latency since a forward. |
 | `placement` | off | Move the leader to the member that gives writers the lowest commit latency. Enable it on every member or on none. |
@@ -39,8 +39,12 @@ each `fsync` carries: write on a dedicated thread and acknowledge in groups
 
 The defaults assume round trips of a few milliseconds.
 
-- **`retransmit_interval`** must exceed the round trip to the farthest member of a
-  majority, or every request is sent several times.
+- **`retransmit_interval`** is a floor, not a period: an unanswered record request is
+  first sent again after it or after twice the smoothed first-step round trip, whichever
+  is longer, and each further resend of the same step waits twice as long, up to
+  `hedge_max` (or the floor, if that is longer). Set it above the round trip to the farthest member of a majority, or the
+  first requests are sent twice before a round trip has been measured. Lowering it does
+  not resend sooner once the round trip is known.
 - **`hedge_max`** must exceed the slowest client commit path (forward to the leader, one
   round trip to a majority, decision back). Below it, followers stop waiting for a live
   leader and propose its entries themselves, which costs throughput.
@@ -92,10 +96,13 @@ Any setting is safe; a bad one is slow.
 ## Observability
 
 [`Replica::metrics`](crate::Replica::metrics) returns counters: rejected messages, retransmits,
-catch-up retries, slots decided, fast-path decisions, forwarded and hedged entries, and
+catch-up retries, slots decided, fast-path decisions, forwarded and hedged entries (with
+`hedges_at_bound`, those hedged only by the four-`hedge_max` bound although the leader kept
+deciding, and `forward_resends` and `forward_resent_bytes`, forwards the leader had not
+acknowledged in time), and
 how much decided state is held in memory. Rising `hedged` with a healthy leader means
-`hedge_max` is too low; rising `retransmits` means `retransmit_interval` is below the
-round trip; `retained_slots` that keeps growing means the application is not snapshotting.
+`hedge_max` is too low; rising `retransmits` means messages are lost or the link stays
+saturated past even the backed-off resend waits; `retained_slots` that keeps growing means the application is not snapshotting.
 
 Where the leader is and why: the `epoch` and `leader_position` gauges give the epoch in
 force and this replica's place in the leader order (0: it leads); `suspicions`,

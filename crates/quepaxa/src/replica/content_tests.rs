@@ -110,13 +110,13 @@ fn inbound_data_and_fetch_are_ignored() {
 fn a_forward_carrying_a_reference_is_rejected() {
     let mut r = replica_as(0);
     let before = r.metrics().messages_rejected;
-    r.handle(Timestamp(1), from_peer(1, 0, Body::Forward { batch: referencing().value })).unwrap();
+    r.handle(Timestamp(1), from_peer(1, 0, Body::Forward { seq: 0, batch: referencing().value })).unwrap();
     let mut out = Vec::new();
     r.poll_actions(&mut out);
     assert_eq!(r.metrics().messages_rejected, before + 1);
     assert!(!out.iter().any(|a| matches!(a, Action::Send(_))), "no ack, nothing proposed: {out:?}");
     // The same entries inline are taken.
-    r.handle(Timestamp(2), from_peer(1, 0, Body::Forward { batch: content() })).unwrap();
+    r.handle(Timestamp(2), from_peer(1, 0, Body::Forward { seq: 1, batch: content() })).unwrap();
     r.poll_actions(&mut out);
     assert_eq!(r.metrics().messages_rejected, before + 1);
     assert!(out.iter().any(|a| matches!(a, Action::Send(_) | Action::Persist { .. })), "{out:?}");

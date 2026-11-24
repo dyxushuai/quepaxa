@@ -7,7 +7,9 @@
 # slot within LAG of the slots fed, and a change computed from an older generation installs
 # nothing; the disk's health (disk_health.rs, from crates/quepaxa/src/replica/disk.rs and
 # watch.rs) is stuck only when no write completed for δ while one was in flight, holds
-# hedges only during a shared stall, and steps aside and back in turn; leader placement
+# hedges only during a shared stall, counts a busy target's lateness from its last
+# decision only for an acknowledged forward and never past 4 hedge_max after it, and steps
+# aside and back in turn; leader placement
 # (placement.rs, from crates/quepaxa/src/placement_policy.rs) never places an excluded
 # member first, explores each tied member once until its measurement goes stale, measures
 # leader and candidates by one rule, and resolves its move before anything else; retirement
@@ -86,6 +88,9 @@ bugs=(
   disk_health hold-on-a-forecast                  's/match disk\.health\(now, d\)/match disk.health(late, d)/'
   disk_health resumption-not-recorded             's/^            self\.resumed = now;$//'
   disk_health step-aside-twice                    's/if aside == self\.aside \{/if false \&\& aside == self.aside {/'
+  disk_health busy-counted-from-the-forward       's/let from = if busy_now \&\& acked \{ progressed \} else \{ at \};/let from = at;/'
+  disk_health progress-before-the-ack             's/if busy_now \&\& acked \{/if busy_now {/'
+  disk_health no-hard-bound                       's/let late = if unbounded <= bound \{ unbounded \} else \{ bound \};/let late = unbounded;/'
   placement excluded-member-placed-first  's/&& !self\.excluded_at\(order\[i\], now\),/\&\& true,/'
   placement demoted-member-explored       's/&& !self\.demoted_at\(order\[i\], now, hold\),/\&\& true,/'
   placement leader-measured-by-span-only  's/if !mine\.measured\(now, sustain, stale\) \{/if !mine.spans(sustain) {/'

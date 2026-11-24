@@ -245,7 +245,7 @@ fn placement_under_faults_and_reconfigurations_stays_safe_and_converges() {
 
 #[test]
 fn removed_majority_waits_for_the_new_members() {
-    const SEED: u64 = 1405;
+    const SEED: u64 = 7;
     // The seed replaces two of the three members with spares; when removed members shut
     // down as soon as they had applied the old epoch themselves, the new members could never
     // learn its last slots. The seed only picks the schedule: re-pick one that still removes
@@ -293,7 +293,7 @@ fn no_slow_machine_leaves_the_schedule_unchanged() {
     // The default configuration must not draw from the random stream or reorder events
     // differently because slow machines exist. A change to how replicas behave changes these
     // hashes too: re-record them then, from a run without slow machines.
-    for (n, seed, hash) in [(3, 7, 0xbf0f_ae6b_011c_969a_u64), (5, 3, 0x572e_6448_2f5e_0cf8)] {
+    for (n, seed, hash) in [(3, 7, 0xeb0c_cc87_5b85_3244_u64), (5, 3, 0xa6ad_8f6f_76d6_21bc)] {
         let r = Sim::new(SimConfig::hostile(n, seed)).run().unwrap();
         assert_eq!(r.trace_hash, hash, "{n} replicas, seed {seed}");
     }

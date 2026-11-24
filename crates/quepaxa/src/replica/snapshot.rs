@@ -113,6 +113,7 @@ impl Replica {
         // applied: whatever of them committed is resolved here, the rest is proposed again.
         let done = self.entries.installed_snapshot(state.next, &self.dedup);
         for Left { id, own } in done {
+            self.watch.fwd.forget(id);
             let kind = own.kind;
             if self.retirement.committed(id) {
                 continue;

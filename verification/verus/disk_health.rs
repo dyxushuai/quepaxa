@@ -1,5 +1,5 @@
 // crates/quepaxa/src/replica/disk.rs, with the step-aside latch of watch.rs (`check_aside`)
-// and the hold in `late_at`, ported to Verus (verification/verus/prove.sh checks it).
+// and the hold in `late` (`late_at`), ported to Verus (verification/verus/prove.sh checks it).
 //
 // The port keeps the original's logic statement by statement, except where marked DEV.
 // Timestamps are u64 nanoseconds. Ghost history records every event the replica feeds the
@@ -15,7 +15,10 @@
 // (b) `late_at` holds an entry (no wake-up time) only while the disk is in a shared stall at
 //     that moment, never on a forecast; time alone never ends a shared stall, and the write
 //     completion that ends one records it (`resumed`), after which (δ above zero) every
-//     entry has a wake-up time again, no earlier than the completion;
+//     entry has a wake-up time again, no earlier than the completion; that wake-up time is
+//     δ after the forward or, once the target decided a slot itself since, 4δ after the
+//     last slot it decided if the target acknowledged the forward, after the forward if
+//     not, and never more than 4 · hedge_max after the forward;
 // (c) the step-aside latch alternates: every step aside is followed by a return before the
 //     next, and it steps aside only while the disk is stuck alone (another replica decided
 //     since the oldest write was issued) and that write has waited long enough.
@@ -323,19 +326,49 @@ impl Disk {
     }
 }
 
-/// `Replica::late_at` for an entry forwarded at `at`: `wait` is δ or 4δ, `aside` the latch.
-pub fn late_at(disk: &Disk, at: u64, now: u64, d: u64, wait: u64, aside: bool) -> (r: Option<u64>)
+pub open spec fn min(a: u64, b: u64) -> u64 {
+    if a <= b { a } else { b }
+}
+
+/// When the entry is late by the target's progress alone: δ after the forward or, once the
+/// target decided a slot itself since (`progressed`), `busy` (4δ) after its last decision if
+/// it acknowledged the forward (`acked`), after the forward otherwise.
+pub open spec fn unbounded_late(resumed: u64, at: u64, progressed: u64, acked: bool, d: u64, busy: u64) -> u64 {
+    if progressed > at {
+        after(max(if acked { progressed } else { at }, resumed), busy)
+    } else {
+        after(max(at, resumed), d)
+    }
+}
+
+/// `Replica::late` for an entry forwarded at `at`: `unbounded_late`, but never past
+/// 4 · `hedge_max` after the forward (the flag: that bound set the time); `aside` the latch.
+pub fn late(
+    disk: &Disk, at: u64, progressed: u64, acked: bool, now: u64, d: u64, busy: u64, hedge_max: u64, aside: bool,
+) -> (r: Option<(u64, bool)>)
     requires disk.inv(),
     ensures
         r is None ==> !aside && disk.shared_stall(now, d),
-        r matches Some(t) ==> t == after(max(at, disk.resumed), wait) && t >= disk.resumed,
+        r matches Some((t, bounded)) ==> {
+            let unbounded = unbounded_late(disk.resumed, at, progressed, acked, d, busy);
+            let bound = after(max(at, disk.resumed), times4(hedge_max));
+            &&& t >= disk.resumed
+            &&& t <= bound
+            &&& t == min(unbounded, bound)
+            &&& bounded == (bound < unbounded)
+        },
 {
-    let late = after_exec(max_exec(at, disk.resumed), wait);
+    let busy_now = progressed > at;
+    let from = if busy_now && acked { progressed } else { at };
+    let wait = if busy_now { busy } else { d };
+    let unbounded = after_exec(max_exec(from, disk.resumed), wait);
+    let bound = after_exec(max_exec(at, disk.resumed), times4_exec(hedge_max));
+    let late = if unbounded <= bound { unbounded } else { bound };
     let held = !aside && match disk.health(now, d) {
         Health::SharedStall { since } => since <= late,
         _ => false,
     };
-    if held { None } else { Some(late) }
+    if held { None } else { Some((late, bound < unbounded)) }
 }
 
 /// The step-aside latch: `Watch::aside` and `check_aside`.
