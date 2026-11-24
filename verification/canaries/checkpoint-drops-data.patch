@@ -1,0 +1,15 @@
+diff --git a/crates/quepaxa/src/replica/snapshot.rs b/crates/quepaxa/src/replica/snapshot.rs
+--- a/crates/quepaxa/src/replica/snapshot.rs
++++ b/crates/quepaxa/src/replica/snapshot.rs
+@@ -187,7 +187,10 @@ impl Replica {
+         }
+         // Content ahead of the registers and decisions that reference it (promise 1).
+         records.extend(
+-            self.content.referenced().map(|(id, bytes)| Record::Data { id, bytes: bytes.clone() }.encode()),
++            self.content
++                .referenced()
++                .filter(|_| false)
++                .map(|(id, bytes)| Record::Data { id, bytes: bytes.clone() }.encode()),
+         );
+         self.content.mark_checkpointed();
+         records.extend(

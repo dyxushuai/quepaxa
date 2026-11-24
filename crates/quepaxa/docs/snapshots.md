@@ -17,8 +17,10 @@ the application state.
    so `through = emitted_index() - 1`.
 2. Store both **durably** (write, `fsync`, rename).
 3. Call [`compact(now, Slot(through), core_state)`](crate::Replica::compact). The replica drops the
-   covered slots from memory and emits a **checkpoint**: a [`Persist`](crate::Action::Persist)
-   with `replace: true` whose records replace all earlier ones.
+   covered slots (and any data batches referenced only below the new floor) from memory and
+   emits a **checkpoint**: a [`Persist`](crate::Action::Persist) with `replace: true` whose
+   records replace all earlier ones, rewriting every `Data` record still referenced by a
+   retained register or decided slot ahead of the records that reference it.
 
 ```
 use bytes::Bytes;
@@ -123,7 +125,8 @@ reference runtime does exactly this).
 
 ## Installing a peer's snapshot
 
-When a replica needs slots its peers have already compacted away, it emits
+When a replica needs slots (or data-batch content for a decided slot it has not yet
+emitted) that its peers have already compacted away, it emits
 [`SnapshotNeeded { peer, through }`](crate::Action::SnapshotNeeded). Fetch `peer`'s latest
 snapshot (any transport: it can be large) and call
 [`install_snapshot(now, Slot(snapshot_through), core_state)`](crate::Replica::install_snapshot):

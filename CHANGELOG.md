@@ -19,14 +19,25 @@ All notable changes to this project are documented here. The project follows
     until `epoch_from`). This stops the rotated-out leader from re-proposing across the
     64-slot handover window when draining FIFO peer messages and stops followers from
     forwarding to the outgoing leader and hedging slot by slot.
-- `quepaxa` (wire and storage, breaking; #172): the formats for batch content behind
-  references. Messages gain `Data` (a data batch by its id) and `Fetch` (ids, with the slot
-  that needs them), `Entries` pages gain a content section, and batches an `ENTRY_REF` item
-  (origin, incarnation, seq, length, CRC-32C). The durable format is version 2 with a new
-  `Data` record: a replica refuses records of version 1 with `CorruptRecord`; upgrade it as
-  a new replica. Nothing produces references yet: a value carrying one is not applied
-  (`corrupt_batches`), and a forward carrying one, `Data` and `Fetch` are rejected
-  (`messages_rejected`).
+- `quepaxa` (wire and storage, breaking; #172): agree on batch references instead of
+  carrying large forwarded batches through the leader (paper §6.1, off by default via
+  `Config::inline_batch_bytes = u32::MAX`, validated at least 64, per replica). A follower
+  whose chunk of forwarded application entries exceeds `inline_batch_bytes` broadcasts
+  `Data { id, bytes }` directly to every member and sends only a compact `ENTRY_REF` item
+  `(origin, incarnation, seq, len, crc32c)` in `Forward`; control entries stay inline.
+  Rule R holds back changing record requests until their referenced content is present and
+  writes `Record::Data` lazily ahead of `Record::Recorder` in the same persist; rule P
+  holds back a proposer's record requests until it holds every reference in its working
+  value (fetching adopted content from the reporting recorder first). Missing content is
+  fetched from the requester/sender first, then rotated across the origin and the slot's
+  members every `retransmit_interval`; `Entries` pages carry referenced content and are
+  served up to the *held* prefix (decided, with every reference's content durable), which
+  also drives retirement progress; `on_compacted` is guarded by `emitted` so a replica
+  blocked on missing content asks for a snapshot when holders compact past `emitted`.
+  `Metrics` gains `data_sent`, `fetches`, `fetch_retries`, `fetches_served` and
+  `parked_requests`. C (ABI 0.11): `QPX_CONFIG_INLINE_BATCH_BYTES` and matching
+  `QPX_METRIC_*` constants. kv-tokio: `--inline-batch-bytes <BYTES>` (metrics appear in
+  `STATS`). Durable format version 2 refuses version 1 records with `CorruptRecord`.
 - `examples/kv-tokio`: a replica answers writes with `Busy` while its own accepted writes
   not yet committed exceed twice what its slots carry at once (`max_batch_bytes ×
   max_in_flight_slots × 2`, 16 MiB by default), instead of queueing up to 65,536 of them

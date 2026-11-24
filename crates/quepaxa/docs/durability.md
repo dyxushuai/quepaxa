@@ -82,6 +82,15 @@ the recovered commits, then that persist) and sends nothing until it is durable.
 before a crash are never confused with new ones, and a leader never reuses its reserved
 top priority for a slot it may have used it in before.
 
+When batch references are in use ([tuning](crate::guide::tuning)), a recorder writes each
+referenced `Data` record lazily ahead of the first `Recorder` or `Decided` record that
+needs it (in the same persist, adding no extra `fsync`), and a checkpoint rewrites every
+still-referenced `Data` record ahead of the registers and decisions that reference it. On
+restart, a `Recorder` record whose referenced `Data` record was not restored earlier on
+disk violates promise 1 and is rejected with [`CorruptRecord`](crate::Error::CorruptRecord);
+a `Decided` record may legitimately lack its `Data` record (learned, not yet fetched) and
+fetches it after restart before emitting that slot.
+
 ### What the application sees after a restart
 
 - [`Commit`](crate::Action::Commit) is emitted again for slots the replica recovers from storage,

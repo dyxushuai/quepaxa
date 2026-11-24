@@ -16,7 +16,7 @@ diff --git a/crates/quepaxa/src/proposer.rs b/crates/quepaxa/src/proposer.rs
 diff --git a/crates/quepaxa/src/replica/proposing.rs b/crates/quepaxa/src/replica/proposing.rs
 --- a/crates/quepaxa/src/replica/proposing.rs
 +++ b/crates/quepaxa/src/replica/proposing.rs
-@@ -281,7 +281,8 @@
+@@ -425,7 +425,8 @@
          }
          // The slot's epoch is fixed: it was decided at least `LAG` slots before any slot we drive.
          let recorders = self.schedule.members(slot).to_vec();
@@ -25,4 +25,4 @@ diff --git a/crates/quepaxa/src/replica/proposing.rs b/crates/quepaxa/src/replic
 +            .with_quorum(self.cfg.members.len() / 2 + 1);
          self.proposers.insert(
              slot,
-             Active { prop, batch: seq, resend_at: self.now, sent_at: self.now, started: self.now },
+             Active {

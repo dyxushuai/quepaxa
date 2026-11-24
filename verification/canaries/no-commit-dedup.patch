@@ -1,13 +1,12 @@
 diff --git a/crates/quepaxa/src/replica/log.rs b/crates/quepaxa/src/replica/log.rs
-index ed43468..2edbee3 100644
 --- a/crates/quepaxa/src/replica/log.rs
 +++ b/crates/quepaxa/src/replica/log.rs
-@@ -170,7 +170,7 @@ impl Replica {
-                 self.metrics.corrupt_batches += 1;
-                 Vec::new()
-             });
+@@ -297,7 +297,7 @@ impl Replica {
+                 }
+             }
+             let mut items = self.expand_batch(&value);
 -            items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
 +            items.retain(|i| { self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id); true });
              self.entries.dedup_grew();
+             self.release_committed_own_data();
              self.count_writes(&items);
-             let mine: Vec<ProposalId> = items

@@ -1,7 +1,7 @@
 diff --git a/crates/quepaxa/src/replica/proposing.rs b/crates/quepaxa/src/replica/proposing.rs
 --- a/crates/quepaxa/src/replica/proposing.rs
 +++ b/crates/quepaxa/src/replica/proposing.rs
-@@ -280,7 +280,7 @@
+@@ -424,7 +424,7 @@
              self.after_durable(super::Effect::ReservationDurable(through));
          }
          // The slot's epoch is fixed: it was decided at least `LAG` slots before any slot we drive.

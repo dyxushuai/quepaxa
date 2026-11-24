@@ -1,12 +1,12 @@
 diff --git a/crates/quepaxa/src/replica/entries/back.rs b/crates/quepaxa/src/replica/entries/back.rs
 --- a/crates/quepaxa/src/replica/entries/back.rs
 +++ b/crates/quepaxa/src/replica/entries/back.rs
-@@ -57,7 +57,7 @@
-             }
-             if self.mine(&e) {
-                 self.moved(id, At::Batched { seq }, At::Pending);
--            } else if handed {
-+            } else if handed && false {
-                 continue;
-             }
-             push(self, e);
+@@ -59,7 +59,7 @@
+                     }
+                     if self.mine(&e) {
+                         self.moved(id, At::Batched { seq }, At::Pending);
+-                    } else if handed {
++                    } else if handed && false {
+                         continue;
+                     }
+                     push(self, Piece::Entry(e));

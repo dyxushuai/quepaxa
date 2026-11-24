@@ -2,18 +2,18 @@
 skip-phase3-adoption	-	cargo nextest run --release -p quepaxa-sim --test model_check	G3 value lock
 decide-on-any-aggregate	-	cargo nextest run -p quepaxa slot_sim	G1 violated
 local-reply-before-persist	-	cargo nextest run --release -p quepaxa-sim --test model_check	G5 unique H
-remote-reply-before-persist	QPX_SIM_SEEDS=2000	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	agreement|G[1345] |not in the log
+remote-reply-before-persist	QPX_SIM_SEEDS=2000	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	agreement|G[1345] |G6[ab] |not in the log
 send-before-incarnation-durable	-	cargo nextest run --release -p quepaxa-sim --test model_check	not logged there
 no-commit-dedup	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	committed twice
-checkpoint-drops-registers	QPX_SIM_SEEDS=2000	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	agreement|G[1345] |not in the log
+checkpoint-drops-registers	QPX_SIM_SEEDS=2000	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	agreement|G[1345] |G6[ab] |not in the log
 local-read-barrier	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	linearizability
 read-mark-from-registers-only	QPX_SIM_SEEDS=300	cargo nextest run --release -p quepaxa-sim --test replica_sim hostile	linearizability|stale read
 read-ignores-an-epoch	QPX_SIM_MEMBERSHIP_SEEDS=400	cargo nextest run --release -p quepaxa-sim --test replica_sim membership_changes	linearizability|stale read
 leader-reuses-h-after-restart	-	cargo nextest run --release -p quepaxa-sim --test model_check	G5 unique H|G4 fast-path lock|G1
-reconfiguration-takes-effect-early	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	G[1345] |agreement|InvalidCoreState|linearizability|did not converge
+reconfiguration-takes-effect-early	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	G[1345] |G6[ab] |agreement|InvalidCoreState|linearizability|did not converge
 reconfiguration-applied-twice	-	cargo nextest run --no-fail-fast -p quepaxa schedule	late duplicate
 stale-change-applied	-	cargo nextest run --no-fail-fast -p quepaxa schedule	stale change
-proposer-uses-configured-members	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	did not converge|G[1345] |agreement
+proposer-uses-configured-members	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership	did not converge|G[1345] |G6[ab] |agreement
 retire-without-the-new-majority	-	cargo nextest run -p quepaxa --lib caught_up_majority	retired with only one of three
 trace-phase0-adopts-the-first-reply	-	verification/tla/traces.sh	REJECTED
 retire-without-the-barrier	-	cargo nextest run -p quepaxa --test membership_api added_back_after	retired although it was added back
@@ -39,7 +39,7 @@ leader-proposes-past-handover	-	cargo nextest run --no-fail-fast -p quepaxa next
 stale-member-ranked-first	-	cargo nextest run --no-fail-fast -p quepaxa ranking_tests	a stale member is never placed first
 placement-ignores-the-hold	-	cargo nextest run --no-fail-fast -p quepaxa ranking_tests	within the hold
 hedge-on-a-shared-disk-stall	-	cargo nextest run --no-fail-fast -p quepaxa watch_tests	not hedged past
-quorum-of-the-configured-size	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership_changes	G[1345] |agreement|did not converge|no progress
+quorum-of-the-configured-size	QPX_SIM_MEMBERSHIP_SEEDS=100	cargo nextest run --release -p quepaxa-sim --test replica_sim membership_changes	G[1345] |G6[ab] |agreement|did not converge|no progress
 change-keeps-the-cluster-size	-	cargo nextest run --release -p quepaxa-sim --test model_check a_cluster_grown	which no change asked for
 placement-excluded-member-tracked	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	an excluded member is never tracked
 placement-explores-a-demoted-member	-	cargo nextest run --no-fail-fast -p quepaxa placement_policy	1 was demoted too recently
@@ -56,3 +56,8 @@ evict-referenced	-	cargo nextest run --no-fail-fast -p quepaxa content::tests	ev
 replay-register-without-data	-	cargo nextest run --no-fail-fast -p quepaxa content_tests	CorruptRecord \{ index: 1 \}
 resend-at-a-fixed-period	-	cargo nextest run --no-fail-fast -p quepaxa resends_of_a_step_back_off_up_to_hedge_max	doubling to hedge_max
 hedge-without-a-hard-bound	-	cargo nextest run --no-fail-fast -p quepaxa an_acknowledged_entry_is_hedged_by_4_hedge_max	not hedged by the hard bound
+record-without-content	-	cargo nextest run --release -p quepaxa-sim --test model_check	G6a content custody
+data-after-register	QPX_SIM_SEEDS=40	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	G6a content custody
+checkpoint-drops-data	QPX_SIM_SEEDS=40	cargo nextest run --release -p quepaxa-sim --test replica_sim crash_heavy	G6[ab] content custody|CorruptRecord|did not converge
+fetch-once	-	cargo nextest run --release -p quepaxa-sim --test model_check	liveness:|did not emit|not served|emitted
+retire-on-committed	-	cargo nextest run --no-fail-fast -p quepaxa content_tests	envelope must report held
