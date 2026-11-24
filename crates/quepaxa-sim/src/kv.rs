@@ -24,8 +24,12 @@ pub(crate) fn key_of(payload: &[u8]) -> u8 {
     payload.get(1).copied().unwrap_or(b'0')
 }
 
-pub(crate) fn write_payload(key: u64, tag: &str) -> Bytes {
-    Bytes::from(format!("k{key}:{tag}"))
+pub(crate) fn write_payload(key: u64, tag: &str, min_bytes: usize) -> Bytes {
+    let mut out = format!("k{key}:{tag}").into_bytes();
+    if min_bytes > out.len() {
+        out.resize(min_bytes, b'x');
+    }
+    Bytes::from(out)
 }
 
 struct WriteOp {

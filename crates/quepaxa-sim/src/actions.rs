@@ -242,4 +242,138 @@ impl Sim {
             }
         }
     }
+
+    /// The application snapshots its state (durably, instantly in the sim) and compacts.
+    pub(crate) fn maybe_compact(&mut self, i: usize) {
+        let Some(every) = self.cfg.compact_every else { return };
+        let last = self.nodes[i].snapshot.as_ref().map_or(0, |s| s.through + 1);
+        let next = self.nodes[i].next_commit;
+        if next < last + every {
+            return;
+        }
+        let Some(core) = self.nodes[i].replica.as_ref().map(Replica::core_state) else { return };
+        let through = next - 1;
+        let state = self.kv.state(i);
+        self.nodes[i].snapshot = Some(Snapshot { through, state, core: core.clone() });
+        let r = self.nodes[i].replica.as_mut().expect("checked above");
+        r.compact(Timestamp(self.now), Slot(through), core).expect("valid compaction");
+        self.drain(i);
+    }
+
+    /// Ships snapshots requested by `SnapshotNeeded` (out of band, instantly).
+    pub(crate) fn install_snapshots(&mut self) {
+        while let Some((i, peer, through)) = self.pending_installs.pop() {
+            let Some(snap) = self.nodes[peer].snapshot.clone() else { continue };
+            if snap.through < through {
+                continue;
+            }
+            let Some(r) = self.nodes[i].replica.as_mut() else { continue };
+            // The application adopts the snapshot only if the replica does (never rewinds).
+            if !r
+                .install_snapshot(Timestamp(self.now), Slot(snap.through), snap.core.clone())
+                .expect("valid snapshot")
+            {
+                continue;
+            }
+            self.kv.set_state(i, snap.state.clone());
+            self.nodes[i].next_commit = snap.through + 1;
+            self.nodes[i].snapshot = Some(snap.clone());
+            self.nodes[i].installed = Some(snap.through);
+            self.report.snapshots_installed += 1;
+            let _ = writeln!(self.trace, "{} n{i} install snapshot through {}", self.now, snap.through);
+            self.drain(i);
+        }
+    }
+
+    /// A timer that fires and leaves its deadline in the past with nothing changed fires
+    /// again at once, forever: fail on the second such firing rather than spin.
+    pub(crate) fn check_timer_storm(&mut self, node: usize) -> Result<(), String> {
+        let now = self.now;
+        let Some(r) = self.nodes[node].replica.as_ref() else { return Ok(()) };
+        let past = r.next_deadline().filter(|d| d.0 <= now).map(|d| (d.0, r.fingerprint()));
+        let n = &mut self.nodes[node];
+        let Some((deadline, fp)) = past else {
+            n.past_deadline = None;
+            return Ok(());
+        };
+        if n.past_deadline.replace((now, fp)) == Some((now, fp)) {
+            return Err(self.fail(&format!(
+                "timer storm: n{node} keeps firing its deadline {deadline} at {now} without progress"
+            )));
+        }
+        Ok(())
+    }
+
+    /// R4: while a majority of members is alive, mutually connected and on working disks,
+    /// each write proposed at one of them commits within [`SimConfig::progress_bound_ms`] of
+    /// when it was proposed, or of when its replica joined that majority if later. Members
+    /// cut off by the partition, down, or with a stalled or slowed disk are outside it.
+    pub(crate) fn check_progress(&mut self) -> Result<(), String> {
+        let Some(bound) = self.cfg.progress_bound_ms().map(|ms| ms * MS) else { return Ok(()) };
+        let healthy: BTreeSet<usize> = self
+            .members
+            .iter()
+            .copied()
+            .filter(|&i| {
+                self.nodes[i].replica.is_some()
+                    && !self.cut.contains(&i)
+                    && self.during(&self.cfg.disk_stall, i).is_none()
+                    && self.during(&self.cfg.disk_slow, i).is_none()
+            })
+            .collect();
+        self.progress.observe(self.now, &healthy, self.members.len());
+        for &i in &healthy {
+            let n = &mut self.nodes[i];
+            let Some(r) = n.replica.as_ref() else { continue };
+            let (emitted, committed) = (r.emitted_index(), r.commit_index());
+            if emitted == committed {
+                n.emit_stuck = None;
+            } else if n.emit_stuck.is_none_or(|(e, _)| e != emitted) {
+                n.emit_stuck = Some((emitted, self.now));
+            }
+        }
+        let stuck = self.progress.held().find_map(|(i, since)| {
+            let n = &self.nodes[i];
+            let oldest = n.outstanding.keys().filter_map(|id| Some((*n.proposed_at.get(id)?, *id))).min();
+            oldest.filter(|(at, _)| self.now > (*at).max(since) + bound).map(|(at, id)| (i, at, id))
+        });
+        if let Some((i, at, id)) = stuck {
+            return Err(self.fail(&format!(
+                "no progress: n{i}'s write {id:?} proposed at {} ms is not committed {} ms later in connected majority {healthy:?}",
+                at / MS,
+                bound / MS
+            )));
+        }
+        let emit_stuck = self.progress.held().find_map(|(i, since)| {
+            let (emitted, lag_at) = self.nodes[i].emit_stuck?;
+            (self.now > lag_at.max(since) + bound).then(|| {
+                let committed = self.nodes[i].replica.as_ref().map_or(0, Replica::commit_index);
+                (i, emitted, committed)
+            })
+        });
+        if let Some((i, emitted, committed)) = emit_stuck {
+            return Err(self.fail(&format!(
+                "no progress: n{i}'s emitted_index ({emitted}) stayed behind commit_index ({committed}) for {} ms in connected majority {healthy:?}",
+                bound / MS
+            )));
+        }
+        Ok(())
+    }
+
+    /// G1, G3–G6 across every replica's state and durable disks, and where each keeps its
+    /// entries (`Replica::check_entries`).
+    pub(crate) fn check_internal(&mut self) -> Result<(), String> {
+        let entries =
+            self.nodes.iter().filter_map(|n| n.replica.as_ref()).try_for_each(Replica::check_entries);
+        let live: Vec<_> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| n.replica.as_ref().map(|r| (i, r.inspect())))
+            .collect();
+        let result = entries
+            .and_then(|()| self.history.observe(&self.epochs, &live))
+            .and_then(|()| self.custody.check_decided(&self.epochs, self.history.decided()));
+        result.map_err(|e| self.fail(&e))
+    }
 }

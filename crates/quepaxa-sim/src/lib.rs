@@ -8,6 +8,7 @@
 
 mod actions;
 mod config;
+pub mod custody;
 pub mod invariants;
 mod kv;
 pub mod model;
@@ -88,6 +89,8 @@ struct Node {
     past_deadline: Option<(u64, u64)>,
     /// Next slot this node's commit stream must deliver.
     next_commit: u64,
+    /// When `emitted_index` was first observed stuck at this value behind `commit_index`.
+    emit_stuck: Option<(u64, u64)>,
     /// Durable application snapshot (survives crashes).
     snapshot: Option<Snapshot>,
     /// Latest peer snapshot installed (its `through`).
@@ -123,6 +126,7 @@ pub struct Sim {
     kv: kv::Kv,
     pending_installs: Vec<(usize, usize, u64)>,
     history: invariants::History,
+    custody: custody::Custody,
     /// The membership in force (clients, faults and convergence use it) and its epoch.
     members: Vec<usize>,
     epoch: u64,
@@ -153,6 +157,7 @@ impl Sim {
                 timer_at: None,
                 past_deadline: None,
                 next_commit: 0,
+                emit_stuck: None,
                 snapshot: None,
                 installed: None,
                 outstanding: HashMap::new(),
@@ -183,6 +188,7 @@ impl Sim {
             kv: kv::Kv::new(nodes_len),
             pending_installs: Vec::new(),
             history: invariants::History::default(),
+            custody: custody::Custody::new(nodes_len),
             members: initial.clone(),
             epoch: 0,
             epochs: invariants::Epochs { initial, applied: BTreeMap::new() },
@@ -274,8 +280,9 @@ impl Sim {
             .enumerate()
             .map(|(i, n)| {
                 let ci = n.replica.as_ref().map(|r| r.commit_index());
+                let ei = n.replica.as_ref().map(|r| r.emitted_index());
                 format!(
-                    "n{i}: commit_index={ci:?} next_commit={} outstanding={} pending_persists={}",
+                    "n{i}: commit_index={ci:?} emitted_index={ei:?} next_commit={} outstanding={} pending_persists={}",
                     n.next_commit,
                     n.outstanding.len(),
                     n.pending.len()
@@ -316,10 +323,14 @@ impl Sim {
         let target = self.ledger.slots() as u64;
         self.queue.iter().all(|std::cmp::Reverse((_, _, e))| !matches!(e, Event::Restart { .. }))
             && self.members.iter().map(|&i| &self.nodes[i]).all(|n| {
-                n.replica.as_ref().is_some_and(|r| r.commit_index() == target)
+                n.replica.as_ref().is_some_and(|r| r.commit_index() == target && r.emitted_index() == target)
                     && n.next_commit == target
                     && n.outstanding.is_empty()
             })
+            && self
+                .nodes
+                .iter()
+                .all(|n| n.replica.as_ref().is_none_or(|r| r.emitted_index() == r.commit_index()))
             && self.kv.no_pending_reads()
             && (self.cfg.reorder.is_none() || self.report.reorder_in_force_us.is_some())
     }
@@ -336,6 +347,7 @@ impl Sim {
         cfg.silent_leader_takeover = self.cfg.silent_leader_takeover;
         cfg.max_in_flight_slots = self.cfg.in_flight_slots;
         cfg.max_batch_bytes = 4096;
+        cfg.inline_batch_bytes = config::inline_batch_bytes(self.cfg.seed, i);
         cfg.max_message_bytes = self.cfg.max_message_bytes;
         if let Some((sustain, hold)) = self.cfg.placement {
             cfg.placement = true;
@@ -366,6 +378,7 @@ impl Sim {
         node.changes.clear();
         node.timer_at = None;
         node.past_deadline = None;
+        node.emit_stuck = None;
         let _ = writeln!(self.trace, "{} start n{i} g{}", self.now, node.generation);
         self.drain(i);
         // The application's snapshot may be newer than the replica's last durable compaction.
@@ -378,9 +391,9 @@ impl Sim {
         }
     }
 
-    fn crash(&mut self, i: usize) {
+    fn crash(&mut self, i: usize) -> Result<(), String> {
         let node = &mut self.nodes[i];
-        let Some(r) = node.replica.take() else { return };
+        let Some(r) = node.replica.take() else { return Ok(()) };
         self.report.entry_probes += r.inspect().entries;
         self.history.forget(&self.epochs, i);
         // The write in progress may be torn: a prefix of its records reaches the disk.
@@ -390,27 +403,32 @@ impl Sim {
                 // Replacement is atomic (write-new-then-rename): all or nothing.
                 if self.rng.below(2) == 0 {
                     self.nodes[i].durable = first.records;
+                    self.custody.on_replace(i, &self.nodes[i].durable).map_err(|e| self.fail(&e))?;
                 }
             } else {
                 let keep = self.rng.below(first.records.len() as u64 + 1) as usize;
+                let prev = self.nodes[i].durable.len();
                 self.nodes[i].durable.extend(first.records.into_iter().take(keep));
+                self.custody.on_append(i, &self.nodes[i].durable[prev..]).map_err(|e| self.fail(&e))?;
             }
         }
         let node = &mut self.nodes[i];
         node.generation += 1;
         node.disk_busy_until = self.now;
         node.disk_next_group = None;
+        node.emit_stuck = None;
         self.report.crashes += 1;
         let _ = writeln!(self.trace, "{} crash n{i}", self.now);
         let down = 50 * MS + self.rng.below(500 * MS);
         self.push(self.now + down, Event::Restart { node: i });
+        Ok(())
     }
 
     fn dispatch(&mut self, ev: Event) -> Result<(), String> {
         match ev {
             Event::Tick => {
                 if self.faults_on {
-                    self.inject_faults();
+                    self.inject_faults()?;
                     self.check_progress()?;
                 }
                 if self.faults_on && self.chance(self.cfg.propose) {
@@ -439,7 +457,7 @@ impl Sim {
                     self.start(node);
                 }
             }
-            Event::Kill { node } => self.crash(node),
+            Event::Kill { node } => self.crash(node)?,
             Event::Reorder => self.reorder()?,
             Event::Deliver { to, bytes } if self.cpu_cost(to).is_some() => {
                 // Queued behind the messages before it, each handled once in arrival order;
@@ -465,10 +483,16 @@ impl Sim {
                 let n = &mut self.nodes[node];
                 let pos = n.pending.iter().position(|p| p.id == id).expect("persist completes once");
                 let p = n.pending.remove(pos);
-                if p.replace {
+                let custody_check = if p.replace {
                     n.durable = p.records;
+                    self.custody.on_replace(node, &n.durable)
                 } else {
+                    let prev = n.durable.len();
                     n.durable.extend(p.records);
+                    self.custody.on_append(node, &n.durable[prev..])
+                };
+                if let Err(e) = custody_check {
+                    return Err(self.fail(&e));
                 }
                 for out in p.then {
                     self.net_send(node, out);
@@ -490,73 +514,6 @@ impl Sim {
             }
         }
         self.check_internal()
-    }
-
-    /// A timer that fires and leaves its deadline in the past with nothing changed fires
-    /// again at once, forever: fail on the second such firing rather than spin.
-    fn check_timer_storm(&mut self, node: usize) -> Result<(), String> {
-        let now = self.now;
-        let Some(r) = self.nodes[node].replica.as_ref() else { return Ok(()) };
-        let past = r.next_deadline().filter(|d| d.0 <= now).map(|d| (d.0, r.fingerprint()));
-        let n = &mut self.nodes[node];
-        let Some((deadline, fp)) = past else {
-            n.past_deadline = None;
-            return Ok(());
-        };
-        if n.past_deadline.replace((now, fp)) == Some((now, fp)) {
-            return Err(self.fail(&format!(
-                "timer storm: n{node} keeps firing its deadline {deadline} at {now} without progress"
-            )));
-        }
-        Ok(())
-    }
-
-    /// R4: while a majority of members is alive, mutually connected and on working disks,
-    /// each write proposed at one of them commits within [`SimConfig::progress_bound_ms`] of
-    /// when it was proposed, or of when its replica joined that majority if later. Members
-    /// cut off by the partition, down, or with a stalled or slowed disk are outside it.
-    fn check_progress(&mut self) -> Result<(), String> {
-        let Some(bound) = self.cfg.progress_bound_ms().map(|ms| ms * MS) else { return Ok(()) };
-        let healthy: BTreeSet<usize> = self
-            .members
-            .iter()
-            .copied()
-            .filter(|&i| {
-                self.nodes[i].replica.is_some()
-                    && !self.cut.contains(&i)
-                    && self.during(&self.cfg.disk_stall, i).is_none()
-                    && self.during(&self.cfg.disk_slow, i).is_none()
-            })
-            .collect();
-        self.progress.observe(self.now, &healthy, self.members.len());
-        let stuck = self.progress.held().find_map(|(i, since)| {
-            let n = &self.nodes[i];
-            let oldest = n.outstanding.keys().filter_map(|id| Some((*n.proposed_at.get(id)?, *id))).min();
-            oldest.filter(|(at, _)| self.now > (*at).max(since) + bound).map(|(at, id)| (i, at, id))
-        });
-        if let Some((i, at, id)) = stuck {
-            return Err(self.fail(&format!(
-                "no progress: n{i}'s write {id:?} proposed at {} ms is not committed {} ms later in connected majority {healthy:?}",
-                at / MS,
-                bound / MS
-            )));
-        }
-        Ok(())
-    }
-
-    /// G1, G3–G5 across every live replica's protocol state, and where each keeps its
-    /// entries (`Replica::check_entries`).
-    fn check_internal(&mut self) -> Result<(), String> {
-        let entries =
-            self.nodes.iter().filter_map(|n| n.replica.as_ref()).try_for_each(Replica::check_entries);
-        let live: Vec<_> = self
-            .nodes
-            .iter()
-            .enumerate()
-            .filter_map(|(i, n)| n.replica.as_ref().map(|r| (i, r.inspect())))
-            .collect();
-        let result = entries.and_then(|()| self.history.observe(&self.epochs, &live));
-        result.map_err(|e| self.fail(&e))
     }
 
     /// A random member of the latest membership.
@@ -685,7 +642,7 @@ impl Sim {
         Ok(())
     }
 
-    fn inject_faults(&mut self) {
+    fn inject_faults(&mut self) -> Result<(), String> {
         // The members in force: a change may have grown or shrunk the cluster.
         let n = self.members.len();
         let cut_members = self.members.iter().filter(|m| self.cut.contains(m)).count();
@@ -713,13 +670,19 @@ impl Sim {
         let down = self.members.iter().filter(|&&m| self.nodes[m].replica.is_none()).count();
         if down < (n - 1) / 2 && self.chance(self.cfg.crash) {
             let i = self.member();
-            self.crash(i);
+            self.crash(i)?;
         }
+        Ok(())
     }
 
     fn propose(&mut self, i: usize) -> Result<(), String> {
         let n = self.ledger.proposals();
-        let payload = kv::write_payload(n as u64 % kv::KEYS, &format!("n{i}-p{n}"));
+        let min_bytes = match self.cfg.payload_bytes {
+            Some((lo, hi)) if hi > lo => lo + self.rng.below((hi - lo + 1) as u64) as usize,
+            Some((lo, _)) => lo,
+            None => 0,
+        };
+        let payload = kv::write_payload(n as u64 % kv::KEYS, &format!("n{i}-p{n}"), min_bytes);
         let Some(r) = self.nodes[i].replica.as_mut() else {
             return Ok(());
         };
@@ -748,48 +711,6 @@ impl Sim {
         }
         self.drain(i);
         Ok(())
-    }
-
-    /// The application snapshots its state (durably, instantly in the sim) and compacts.
-    fn maybe_compact(&mut self, i: usize) {
-        let Some(every) = self.cfg.compact_every else { return };
-        let last = self.nodes[i].snapshot.as_ref().map_or(0, |s| s.through + 1);
-        let next = self.nodes[i].next_commit;
-        if next < last + every {
-            return;
-        }
-        let Some(core) = self.nodes[i].replica.as_ref().map(Replica::core_state) else { return };
-        let through = next - 1;
-        let state = self.kv.state(i);
-        self.nodes[i].snapshot = Some(Snapshot { through, state, core: core.clone() });
-        let r = self.nodes[i].replica.as_mut().expect("checked above");
-        r.compact(Timestamp(self.now), Slot(through), core).expect("valid compaction");
-        self.drain(i);
-    }
-
-    /// Ships snapshots requested by `SnapshotNeeded` (out of band, instantly).
-    fn install_snapshots(&mut self) {
-        while let Some((i, peer, through)) = self.pending_installs.pop() {
-            let Some(snap) = self.nodes[peer].snapshot.clone() else { continue };
-            if snap.through < through {
-                continue;
-            }
-            let Some(r) = self.nodes[i].replica.as_mut() else { continue };
-            // The application adopts the snapshot only if the replica does (never rewinds).
-            if !r
-                .install_snapshot(Timestamp(self.now), Slot(snap.through), snap.core.clone())
-                .expect("valid snapshot")
-            {
-                continue;
-            }
-            self.kv.set_state(i, snap.state.clone());
-            self.nodes[i].next_commit = snap.through + 1;
-            self.nodes[i].snapshot = Some(snap.clone());
-            self.nodes[i].installed = Some(snap.through);
-            self.report.snapshots_installed += 1;
-            let _ = writeln!(self.trace, "{} n{i} install snapshot through {}", self.now, snap.through);
-            self.drain(i);
-        }
     }
 }
 
