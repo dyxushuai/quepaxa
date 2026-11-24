@@ -9,7 +9,7 @@
 //!          [--rate-at 30:0,60:5000]
 //! ```
 //!
-//! `--size BYTES` (line protocol only) sets the command size in the same terms, 1 + 8 + the
+//! `--size BYTES` sets the command size in the same terms, 1 + 8 + the
 //! value, so a PUT's value is `BYTES - 9` long: 8 random letters padded with `x`.
 //!
 //! A replica's `Busy` (too many outstanding proposals) is counted as `busy`, not as an
@@ -292,8 +292,7 @@ async fn main() {
             assert!(start_at.is_none() && rate_at.is_empty(), "--start-at and --rate-at need --protocol etcd")
         }
         "etcd" => {
-            assert_eq!(size, 17, "--size needs --protocol lines");
-            let load = etcd::Load { targets, rate, rate_at, secs, conns, gets, start_at, seed };
+            let load = etcd::Load { targets, rate, rate_at, secs, conns, gets, size, start_at, seed };
             let (samples, end_us) = etcd::run(&load).await;
             report(&samples, end_us, rate, secs, timeline_ms, fault_at, samples_path.as_deref());
             return;

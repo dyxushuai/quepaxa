@@ -107,8 +107,8 @@ What the paper leaves open, the crate fixes as follows (the repository's
   decided prefix it asks for only on the timer, as bulk catch-up usually brings it first.
   The leader so sends each
   value once per peer per slot.
-- **Batch references.** With `Config::inline_batch_bytes` lowered below `max_batch_bytes`
-  (off by default at `u32::MAX`), an origin whose forwarded chunk of application entries
+- **Batch references.** With `Config::inline_batch_bytes` below `max_batch_bytes`
+  (default `1024`; set to `u32::MAX` to keep every chunk inline), an origin whose forwarded chunk of application entries
   exceeds `inline_batch_bytes` sends the chunk directly to every member as `Data { id, bytes }`
   and puts only a 33-byte `Ref { id, len, crc32c }` in `Forward`; control entries (barriers
   and membership changes) stay inline so the decided prefix, leader schedule and membership

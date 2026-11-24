@@ -183,19 +183,12 @@ impl Replica {
             self.metrics.messages_rejected += 1;
             return;
         };
-        pieces.retain(|p| match p {
-            Piece::Entry(i) => {
-                let (o, inc, id) = i.key();
-                !self.dedup.contains(o, inc, id)
-            }
-            Piece::Ref(_) => true,
-        });
         let mut refs = Vec::new();
         let mut missing = Vec::new();
         for p in &pieces {
             if let Piece::Ref(r) = *p {
                 match self.content.check(r) {
-                    Ok(()) => refs.push(r.id),
+                    Ok(()) => {}
                     Err(PinError::Missing) => missing.push(r),
                     Err(PinError::Mismatch) => {
                         self.metrics.messages_rejected += 1;
@@ -204,6 +197,22 @@ impl Replica {
                 }
             }
         }
+        pieces.retain(|p| match *p {
+            Piece::Entry(ref i) => {
+                let (o, inc, id) = i.key();
+                !self.dedup.contains(o, inc, id)
+            }
+            Piece::Ref(r) => {
+                if Self::ref_all_committed(&self.content, &self.dedup, r) {
+                    false
+                } else {
+                    if self.content.check(r).is_ok() {
+                        refs.push(r.id);
+                    }
+                    true
+                }
+            }
+        });
         // Stepped aside, this replica hands them on (`watch.rs`); so it does for a follower
         // that has not yet seen this replica stop leading, whose entries belong to the new
         // leader, not to a deputy.
@@ -242,7 +251,13 @@ impl Replica {
         let direct = self.proposes_directly();
         self.forward_pending(direct);
         // Batches whose entries all committed elsewhere are dead weight.
-        self.entries.prune(&self.dedup);
+        let pruned_refs = {
+            let (content, dedup) = (&self.content, &self.dedup);
+            self.entries.prune(dedup, |r| Self::ref_all_committed(content, dedup, r))
+        };
+        for id in pruned_refs {
+            self.maybe_release_content(id);
+        }
         // Hedging around a target that still talks: one slot at a time, or the hedges contend
         // with its slots and stretch a slowdown they were meant to cover. Entries other
         // followers handed here (as their deputy) are not hedges.
@@ -259,10 +274,19 @@ impl Replica {
             let max = self.cfg.max_batch_bytes as usize;
             let seq = match self.entries.waiting() {
                 Some(seq) => seq,
-                None => match self.entries.cut(direct, max, &self.dedup) {
-                    Some(seq) => seq,
-                    None => break,
-                },
+                None => {
+                    let (cut_seq, skipped_refs) = {
+                        let (content, dedup) = (&self.content, &self.dedup);
+                        self.entries.cut(direct, max, dedup, |r| Self::ref_all_committed(content, dedup, r))
+                    };
+                    for id in skipped_refs {
+                        self.maybe_release_content(id);
+                    }
+                    match cut_seq {
+                        Some(seq) => seq,
+                        None => break,
+                    }
+                }
             };
             self.next_alloc = slot.0 + 1;
             self.start(slot, seq);

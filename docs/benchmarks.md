@@ -301,6 +301,122 @@ connection backoff on `Busy` in `kv-bench`.
 
 Raw data and scripts are kept outside the repo.
 
+### Batch IDs: LAN and WAN A/B (#172 Phase 3)
+
+Interleaved A/B comparison of `Config::inline_batch_bytes = u32::MAX` (`off`, Phase 1 inline
+forwarding with key-only `Decided`) against `1024` bytes (`on`, Phase 2 submitter-driven
+`Data` dissemination and 33-byte `Ref` items) on `a790ff2`, measured 2026-11-24 under
+`flock target/ops/bench.lock`. `replica::egress_tests::leader_egress_bytes_per_slot_with_references`
+asserts the exact Phase 2 wire formula: for a follower-originated chunk above `1024` bytes,
+leader egress per slot drops to `(n - 1)(169 + 37) = (n - 1) · 206` bytes (`412` B at `n = 3`,
+`824` B at `n = 5`) regardless of payload size, with zero fetches in order.
+
+#### LAN (10 s per step, all PUTs, 3 interleaved runs per point)
+
+Same layout and ramp rule as the Phase 0 baseline above (sustained: zero errors, unanswered,
+missed, busy or shed requests, throughput ≥ 97% of offered, p99 ≤ 100 ms; `n = 3` pinned to
+CPUs `0-1 2-3 4-5` with `kv-bench` on `8-15` and 24 connections; `n = 5` pinned to
+`0-1 2-3 4-5 6-7 8-9` with `kv-bench` on `10-15` and 25 connections). Fixed rates are 10k/s
+(17 B), 2k/s (4 KiB) and 200/s (64 KiB). Medians shown, run-to-run range in parentheses.
+
+| Suite | Command | Mode | Capacity (runs) | On / off | Leader egress/slot | Follower egress/slot | Fixed p50 (ms) | Fixed p99 (ms) | `data_sent` (cap) | `fetches` (cap / fixed) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `n=3`, tmpfs, 1 Gbit/s | 17 B | off | 183,711/s (122k–225k) | – | 1,171 B | 580 B | 0.29 (0.26–0.40) | 1.55 (1.04–2.98) | 0 | 0 / 0 |
+| | 17 B | on | 225,000/s (184k–225k) | 1.22× | 1,937 B | 674 B | 0.28 (0.27–0.69) | 1.27 (1.16–6.64) | 30 | 0 / 0 |
+| | 4 KiB | off | 15,000/s (all three) | – | 266,142 B | 45,070 B | 0.36 (0.35–0.38) | 1.41 (1.33–1.49) | 0 | 0 / 0 |
+| | 4 KiB | on | 24,494/s (14.1k–36.7k) | 1.63× | 8,018 B | 7,869 B | 0.30 (0.30–0.32) | 1.35 (1.26–1.49) | 325,498 | 7,316 / 862 |
+| | 64 KiB | off | 734/s (424–734) | – | 133,149 B | 22,233 B | 3.87 (3.77–3.95) | 7.51 (7.34–7.87) | 0 | 0 / 0 |
+| | 64 KiB | on | 1,500/s (750–1,837) | 2.04× | 57,235 B | 46,300 B | 3.20 (3.09–3.21) | 5.65 (5.61–5.67) | 19,990 | 1,507 / 438 |
+| `n=3`, tmpfs, uncapped | 17 B | off | 225,000/s (all three) | – | 1,978 B | 702 B | 0.25 (0.25–0.28) | 1.07 (1.06–1.35) | 0 | 0 / 0 |
+| | 17 B | on | 225,000/s (all three) | 1.00× | 1,996 B | 707 B | 0.26 (0.25–0.27) | 1.20 (1.08–1.29) | 32 | 0 / 0 |
+| | 4 KiB | off | 36,742/s (14.1k–55.1k) | – | 31,960 B | 5,442 B | 0.30 (0.30–0.35) | 1.64 (1.59–1.81) | 0 | 0 / 0 |
+| | 4 KiB | on | 36,742/s (all three) | 1.00× | 11,332 B | 11,392 B | 0.29 (0.29–0.32) | 1.49 (1.44–1.63) | 489,212 | 3,390 / 184 |
+| `n=5`, tmpfs, 1 Gbit/s | 17 B | off | 168,750/s (all three) | – | 3,260 B | 389 B | 0.35 (0.34–0.35) | 1.38 (1.10–1.53) | 0 | 0 / 0 |
+| | 17 B | on | 168,750/s (all three) | 1.00× | 3,265 B | 379 B | 0.34 (0.34–0.35) | 1.10 (1.05–1.45) | 28 | 2 / 0 |
+| | 4 KiB | off | 7,500/s (3.5k–7.5k) | – | 159,794 B | 8,202 B | 0.61 (0.61–0.64) | 1.69 (1.66–1.97) | 0 | 0 / 0 |
+| | 4 KiB | on | 10,606/s (10.6k–18.4k) | 1.41× | 6,821 B | 4,583 B | 0.43 (0.43–0.44) | 1.43 (1.21–1.67) | 338,976 | 34,574 / 12,357 |
+| | 64 KiB | off | 367/s (all three) | – | 267,052 B | 13,378 B | 6.20 (6.14–6.25) | 16.53 (15.81–17.11) | 0 | 0 / 0 |
+| | 64 KiB | on | 848/s (all three) | 2.31× | 104,341 B | 54,452 B | 4.42 (4.38–4.43) | 8.76 (8.54–8.82) | 27,060 | 5,932 / 2,797 |
+| `n=3`, disk, 1 Gbit/s | 4 KiB | off | 4,000/s (2.8k–14.7k) | – | 50,684 B | 8,617 B | 5.13 (5.11–18.09) | 36.24 (24.12–49.80) | 0 | 0 / 0 |
+| | 4 KiB | on | 7,500/s (5.3k–27.6k) | 1.88× | 46,341 B | 48,746 B | 5.08 (5.06–20.17) | 10.74 (10.49–36.89) | 100,380 | 56 / 454 |
+| | 64 KiB | off | 750/s (176–750) | – | 147,592 B | 24,676 B | 5.92 (5.74–15.14) | 30.12 (11.20–106.29) | 0 | 0 / 0 |
+| | 64 KiB | on | 1,200/s (848–2,204) | 1.60× | 132,298 B | 131,107 B | 5.62 (5.46–13.97) | 29.64 (9.63–311.21) | 15,988 | 914 / 359 |
+
+- **Acceptance bar met.** Against the Phase 0 baseline at `n = 3`, 1 Gbit/s (`7,348/s` at
+  4 KiB and `375/s` at 64 KiB), combined Phase 1 + Phase 2 delivers **3.33×** at 4 KiB
+  (`24,494/s`, up to `36,742/s` = 5.0× without snapshot interference) and **4.00×** at
+  64 KiB (`1,500/s`, up to `1,837/s` = 4.9×). Against Phase 1 alone, references add 2.04×
+  at `n = 3` 64 KiB, 2.31× at `n = 5` 64 KiB, and 1.60–1.88× on disk (run 1 in the fast
+  disk regime reached `27,556/s` vs `14,696/s` at 4 KiB and `2,204/s` vs `750/s` at 64 KiB;
+  runs 2–3 ran in the shared disk's slow regime). Fixed-rate p50 improves across all large
+  cases (−1% to −30%), and 17 B stays within 4% on every suite.
+- **Why capped large-command runs sit below the theoretical 3× / 5× ceiling.** Two
+  mechanisms account for the gap:
+  1. `disseminate_chunk` iterates `schedule.everyone()` in `NodeId` order, so followers
+     queue `Data` and `Forward(Ref)` to leader `0` *before* queuing `Data` to higher-ID
+     peers. Leader `0`'s compact `RecordRequest(Ref)` therefore beats the origin's direct
+     `Data` on ~10–30% of chunks (`7,316` fetches at `n = 3` 4 KiB; `34,574` at `n = 5`
+     4 KiB; `5,932` at `n = 5` 64 KiB), sending the payload back through the leader's egress
+     via `fetches_served` (notice `n = 5` 64 KiB leader egress `104 KB/slot` vs follower
+     `54 KB/slot`). Reordering dissemination to send to non-target peers before the target
+     is a small follow-up.
+  2. At 4 KiB with random keys, smaller batches advance `slots_decided` past the default
+     `--snapshot-every 10000` within 10 s and trigger background encoding of hundreds of MB
+     of KV state (`n = 3` 4 KiB run 2 stayed at `9,999` slots and sustained `36,742/s`,
+     2.45× over Phase 1, whereas run 3 crossed 70,735 slots at 20k/s and tripped `Busy`
+     during snapshot encoding).
+
+#### WAN (`examples/kv-tokio/bench/etcd/wan.sh`, QuePaxa only, 5 regions)
+
+Five emulated regions (`us-east`, `us-west`, `eu-west`, `ap-ne`, `sa-east`), 200 puts/s per
+region (1,000/s total), 40 s per run (fault 10–25 s), on host ext4 disk, three interleaved
+runs per point (`SIZE=17` and `SIZE=4096`, `INLINE_BATCH_BYTES=4294967295` vs `1024`).
+
+| Size | Case | Mode | p50 (ms) | p99 (ms) | max (ms) | Longest gap (ms) | Errors+Unans | `data_sent` | `fetches` | `parked` | Disk `fsync` p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 17 B | calm | off | 394.3 (394–397) | 607.7 (593–616) | 794.2 | 113 (107–157) | 0 | 0 | 0 | 0 | 6.3 ms |
+| | calm | on | 424.5 (404–431) | 658.0 (643–1,160) | 772.7 | 271 (161–728) | 0 | 0 | 0 | 0 | 6.5 ms |
+| | calm-best | off | 181.3 (180–182) | 304.3 (300–320) | 432.7 | 95 (83–179) | 0 | 0 | 0 | 0 | 6.7 ms |
+| | calm-best | on | 182.2 (182–194) | 312.2 (304–475) | 424.9 | 181 (87–277) | 0 | 0 | 0 | 0 | 6.8 ms |
+| | jitter | off | 452.9 (446–475) | 984.1 (882–1,138) | 1,345.2 | 663 (578–738) | 0 | 0 | 0 | 0 | 5.7 ms |
+| | jitter | on | 456.7 (457–469) | 897.6 (806–1,432) | 1,241.5 | 605 (443–1,181) | 0 | 0 (0–4) | 0 | 0 | 5.4 ms |
+| | crash | off | 213.6 (192–226) | 1,035.8 (943–1,087) | 12,386.4 | 769 (767–773) | 0 | 0 | 0 | 0 | 6.8 ms |
+| | crash | on | 207.3 (195–209) | 999.2 (854–1,241) | 12,380.5 | 781 (781–783) | 0 | 20 (20–28) | 0 | 0 | 6.6 ms |
+| 4 KiB | calm | off | 226.9 (213–233) | 9,553.3 (7,872–10,909) | 12,586.4 | 1,192 (668–2,686) | 0 | 0 | 0 | 0 | 6.0 ms |
+| | calm | on | 475.5 (474–508) | 1,946.1 (1,901–6,132) | 6,778.1 | 212 (205–371) | 0 | 126,152 | 743 (217–1,675) | 41 | 2.7 ms |
+| | calm-best | off | 219.0 (212–222) | 854.5 (841–2,417) | 3,314.8 | 230 (198–238) | 0 | 0 | 0 | 0 | 2.9 ms |
+| | calm-best | on | 217.8 (213–227) | 870.9 (802–1,906) | 1,383.6 | 352 (207–1,282) | 0 | 126,032 | 3,095 (2,103–4,402) | 257 | 3.4 ms |
+| | slow | off | 217.8 (216–230) | 12,504.3 (9,472–12,974) | 13,540.4 | 1,325 (360–3,797) | 0 | 0 | 0 | 0 | 2.8 ms |
+| | slow | on | 232.0 (210–234) | 5,034.5 (4,432–6,367) | 6,206.4 | 266 (153–311) | 0 | 126,384 | 5,601 (431–5,938) | 660 | 6.5 ms |
+| | jitter | off | 214.5 (211–222) | 30,521.7 (22,965–33,892) | 31,913.7 | 4,922 (2,578–19,856) | 4,254 (1,463–4,911) | 0 | 0 | 0 | 6.6 ms |
+| | jitter | on | 302.9 (275–691) | 6,497.9 (2,160–7,465) | 8,162.5 | 557 (481–882) | 0 | 126,376 | 12,875 (1,685–13,023) | 1,259 | 3.0 ms |
+| | crash | off | 205.7 (187–258) | 11,539.3 (5,703–13,184) | 12,905.5 | 337 (272–1,810) | 0 | 0 | 0 | 0 | 3.0 ms |
+| | crash | on | 215.2 (215–225) | 5,621.0 (2,946–7,576) | 8,457.3 | 928 (828–981) | 0 | 103,088 | 947 (137–1,100) | 115 | 2.9 ms |
+| | partition | off | 218.1 (213–229) | 12,895.0 (7,128–12,968) | 13,634.7 | 2,285 (283–2,706) | 0 | 0 | 0 | 0 | 3.2 ms |
+| | partition | on | 213.3 (205–214) | 2,672.3 (2,308–6,220) | 7,671.6 | 715 (439–864) | 0 | 112,708 | 5,396 (5,195–9,271) | 1,128 | 6.5 ms |
+
+- **17 B on WAN stays inline.** At 200 puts/s per region, forwarded chunks stay below
+  `1024` bytes (`data_sent = 0` in `calm` and `calm-best`, `0–28` during fault backlogs,
+  `fetches = 0` everywhere), and p99 matches the existing baseline (`calm` 658 ms vs 655 ms,
+  `calm-best` 312 ms vs 339 ms, `jitter` 898 ms vs 1,435 ms, `crash` 999 ms vs 974 ms).
+- **4 KiB on WAN improves dramatically with references on.** At 1,000 × 4 KiB/s (4 MB/s
+  raw writes), inline `off` pushed 16 MB/s through the far leader `ap-ne` over 180–300 ms
+  RTT TCP links and wrote each payload twice to disk; in every `calm`, `slow`, `jitter`,
+  `crash`, and `partition` run `off` overloaded `ap-ne`, stalled for 9.5–30.5 s at p99, and
+  rotated leadership out to `us-east` (which is why `off`'s `calm` p50 settled at 227 ms and
+  its `crash` gap was 337 ms—`ap-ne` was no longer leading when killed at 10 s). With
+  references `on`, `ap-ne` held leadership cleanly throughout `calm` (p99 1,946 vs 9,553 ms,
+  longest gap 212 vs 1,192 ms), `jitter` dropped from 4,254 errors/unanswered and 30.5 s p99
+  to **0 errors** and 6.5 s p99, `slow` and `partition` p99 dropped 2.5–4.8×, and `crash`
+  failed over cleanly from `ap-ne` in 928 ms with 2.1× lower p99. On `calm-best`, p50 and
+  p99 were equal (218 vs 219 ms; 871 vs 855 ms) with 2.4× lower max (1,384 vs 3,315 ms),
+  while the `ap-ne ↔ sa-east` triangle-inequality tie (300 ms direct = 180 + 120 ms via
+  `us-east`) produced `3,095` fetches.
+- **Default decision.** Because `1024` bytes wins decisively on both bandwidth-limited LAN
+  and large-command WAN while leaving small-command WAN inline with zero fetches,
+  `Config::inline_batch_bytes` now defaults to `1024` (`u32::MAX` disables it per replica;
+  see `crates/quepaxa/docs/tuning.md`). Raw data and scripts are kept outside the repo.
+
 ### Simulated WAN
 
 `run-local.sh 5000 8 50` adds a 50 ms one-way `netem` delay to all loopback traffic,

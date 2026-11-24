@@ -578,10 +578,10 @@ mod tests {
         assert_eq!(plain.max_in_flight_slots, default.max_in_flight_slots);
         let pinned_delay = config(&args(&format!("{base} --hedge-min-ms 3000 --hedge-max-ms 3000")).unwrap());
         assert_eq!((pinned_delay.hedge_min, plain.hedge_min), (3_000 * MILLI, default.hedge_min));
-        assert_eq!(wan.inline_batch_bytes, u32::MAX);
+        assert_eq!(wan.inline_batch_bytes, 1024);
         assert_eq!(
-            config(&args(&format!("{base} --inline-batch-bytes 1024")).unwrap()).inline_batch_bytes,
-            1024
+            config(&args(&format!("{base} --inline-batch-bytes 4096")).unwrap()).inline_batch_bytes,
+            4096
         );
         assert!(args(&format!("{base} --inline-batch-bytes nope")).is_err());
         assert!(Replica::new(zero, [], Timestamp(0)).is_err(), "the replica's own validation refuses it");

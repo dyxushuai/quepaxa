@@ -26,6 +26,8 @@
 #   (the disk probe's cpuset, default the generators'); DATA_TMPFS=1 (each replica's data
 #   on its own tmpfs: no disk in the comparison, and no durability either); QUEPAXA_FLAGS
 #   (extra kv-tokio flags for every QuePaxa replica, e.g. "--max-in-flight-slots 10");
+#   INLINE_BATCH_BYTES (if set, passes --inline-batch-bytes BYTES to every QuePaxa replica);
+#   SIZE (command size in bytes passed to kv-bench --size, default 17);
 #   LOAD_RATES (total writes/s per load run, default "1000 10000 50000 100000") and
 #   LOAD_SECS (default 60); LADDER_CPUS (one CPU quota per region in order, default
 #   "2 1 1.5 0.5 0.75"; a quota of 2 is none on the two-CPU cpusets) and CPU_PERIOD_US (the
@@ -76,6 +78,10 @@ else
   load_secs=${LOAD_SECS:-60}
 fi
 read -r -a quepaxa_flags <<< "${QUEPAXA_FLAGS:-}"
+if [ -n "${INLINE_BATCH_BYTES:-}" ]; then
+  quepaxa_flags+=(--inline-batch-bytes "$INLINE_BATCH_BYTES")
+fi
+size=${SIZE:-17}
 read -r -a load_rates <<< "${LOAD_RATES:-1000 10000 50000 100000}"
 read -r -a ladder_cpus <<< "${LADDER_CPUS:-2 1 1.5 0.5 0.75}"
 cpu_period_us=${CPU_PERIOD_US:-10000}
@@ -139,7 +145,7 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
   describe_host
   echo "regions: ${regions[*]}; far: ${regions[$far]}, best: ${regions[$best]}"
   for i in $(seq 0 $((n - 1))); do echo "rtt ${regions[$i]}: ${rtt[$i]}"; done
-  echo "rate: $rate/s in total, run ${secs}s, fault at ${fault}s, heal at ${heal}s, repeats $repeats, smoke=$smoke"
+  echo "rate: $rate/s in total, size ${size}B, run ${secs}s, fault at ${fault}s, heal at ${heal}s, repeats $repeats, smoke=$smoke"
   echo "slow: +${slow_ms}ms; jitter: ${jitter_ms}ms, ${loss}% loss"
   echo "policy: $policy (everywhere: ${POLICY_EVERYWHERE:-0}); policy runs ${policy_secs}s, change at ${change_at}s for ${change_for}s, settled from ${settled_from}s; heterogeneous and speedup quota $slow_cpus CPUs on ${slow_region:-the first leader} (speedup: until the change)"
   echo "cpus: replicas ${replica_cpus[*]}, generators $gen_cpus, disk probe $probe_cpus"
@@ -467,7 +473,7 @@ run_case() {
     read -r -a load <<< "$(region_load "$scenario" "$i")"
     docker run --rm --name "qpx-g$i" --network "$net" --ip "$(gen_ip "$i")" --cpuset-cpus "$gen_cpus" \
       -v "$results:/out" "$image" \
-      kv-bench --protocol etcd --targets "$(replica_ip "$i"):2379" "${load[@]}" --gets 0 --secs "$run_secs" \
+      kv-bench --protocol etcd --targets "$(replica_ip "$i"):2379" "${load[@]}" --gets 0 --size "$size" --secs "$run_secs" \
       --conns "$conns" --start-at "$t0" --fault-at "$fault_at" --timeline 250 --seed $((run * 10 + i + 1)) \
       --samples "/out/$name-r$i.csv" > "$results/$name-r$i.txt" &
     pids+=($!)
@@ -494,10 +500,10 @@ run_case() {
     touch "$results/$name.stop"
     wait "$sampler"
   fi
-  if [ -n "$sampler" ] || [ "$scenario" = load ]; then
-    # Each replica's counters (placement moves, steps aside, epoch, hedges) say who moved the
-    # lead and how slots were decided.
+  if [ "$system" = quepaxa ]; then
+    # Each live replica's counters (placement moves, steps aside, epoch, hedges, fetches, data_sent).
     for i in $(seq 0 $((n - 1))); do
+      running "$i" || continue
       echo "${regions[$i]} $(docker run --rm --network "$net" "$image" bash -c \
         "exec 3<>/dev/tcp/$(replica_ip "$i")/7100 && echo STATS >&3 && head -1 <&3" 2>/dev/null)"
     done > "$results/$name-stats.txt"

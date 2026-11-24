@@ -107,7 +107,8 @@ pub struct Config {
     /// goes to every member directly as a data batch and the forward names it, so the leader
     /// stops carrying it to every recorder (#172). At least 64; values at or above
     /// `max_batch_bytes` keep every chunk inline. Per replica: members may differ. Default
-    /// `u32::MAX` (off); see [`guide::tuning`](crate::guide::tuning) for when to lower it.
+    /// `1024`; see [`guide::tuning`](crate::guide::tuning) for raising or disabling (`u32::MAX`)
+    /// it.
     pub inline_batch_bytes: u32,
 }
 
@@ -134,7 +135,7 @@ impl Config {
             placement: false,
             placement_sustain: 180_000 * MILLI,
             placement_hold: 600_000 * MILLI,
-            inline_batch_bytes: u32::MAX,
+            inline_batch_bytes: 1024,
         }
     }
 

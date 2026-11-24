@@ -1,8 +1,9 @@
 # Batch IDs: agree on references, not contents
 
-Status: **in progress**. Phase 1 (`Decided` without value) is implemented; Phase 2 has its
-formats and data store (PR 3: `ENTRY_REF`, `Data`, `Fetch`, `Entries` content, `KIND_DATA`,
-`content.rs`), with references refused until rules R and P land. Tracking: #172. Related: #155
+Status: **implemented**. Phase 1 (`Decided` without value), Phase 2 (batch references,
+rules R and P, fetch, `KIND_DATA`, held prefix, `Content.tla` / TLAPS proof, canaries), and
+Phase 3 (LAN and WAN A/B benchmarks, default `Config::inline_batch_bytes = 1024`,
+paper-conformance update) are complete. Tracking: #172. Related: #155
 (saturation profile, a prerequisite), #152 (bulk transfers off the consensus link).
 Paper: *QuePaxa*, SOSP 2023, §6.1. Line numbers below refer to the extracted paper text.
 
@@ -29,8 +30,9 @@ Paper: *QuePaxa*, SOSP 2023, §6.1. Line numbers below refer to the extracted pa
    fetch outstanding per ID. No timer affects safety.
 7. **Per origin, by size.** `Config::inline_batch_bytes` (per replica, not cluster-wide): a
    forwarded chunk up to this size travels inline, as it does today, and a larger one goes by
-   reference. `u32::MAX` is today's behaviour. It stays the default until the measurements in
-   Phase 3 justify another value.
+   reference. `u32::MAX` keeps every chunk inline. Phase 3 set the default to `1024` bytes
+   after LAN and WAN A/B measurements showed 1.6–2.3× gains over Phase 1 (3.3–4.0× over
+   Phase 0) on 1 Gbit/s LAN, 2.1–4.9× lower p99 on 4 KiB WAN, and no regression at 17 bytes.
 8. **`Decided` carries no value** (Phase 1, which is useful on its own): a receiver takes the
    value from its own register when the keys match, and otherwise catches up.
 9. **Applied prefix waits for content; decided prefix does not.** `committed` (leader
@@ -330,8 +332,8 @@ saturates. The benchmark has to make bandwidth matter.
 
 ## API, wire, storage, hosts
 
-- **API.** `Config::inline_batch_bytes: u32` (default `u32::MAX`, validated at least 64 and
-  ignored above `max_batch_bytes`). New `Metrics`: `data_sent`, `fetches`, `fetch_retries`,
+- **API.** `Config::inline_batch_bytes: u32` (default `1024`, validated at least 64 and
+  ignored above `max_batch_bytes`; `u32::MAX` disables references). New `Metrics`: `data_sent`, `fetches`, `fetch_retries`,
   `fetches_served`, `parked_requests`. `propose`, `Action::Commit`, `Outbound` and the
   snapshot and `core_state` formats are unchanged.
 - **Wire, `WIRE_VERSION` 2.**
@@ -402,15 +404,18 @@ Each phase is one PR that passes the full per-PR suite and the canaries.
   `inline_batch_bytes` (a LAN-friendly value if the WAN shows no regression with it, else keep
   `u32::MAX` and document the per-deployment choice). Update the paper-conformance row.
 
-## Open questions for the maintainer
+## Resolved questions
 
-1. **Default.** Keep the default `u32::MAX` (off) permanently and document it as a LAN
-   option, or make it on once the benchmarks pass?
-2. **Fetch grace on the WAN.** Fetch at once (the paper's rule, and the simplest), or wait a
-   fraction of the requester's round trip for an in-flight `Data`? Decide on Phase 3 data.
-3. **Slot size bound.** Keep the referenced bytes inside `max_batch_bytes`, or add a separate,
-   larger bound for content? The latter needs paged commits and `Entries`.
-4. **Phase 1 alone.** If #155 shows CPU, not egress, as the limit, is Phase 1 enough for
-   0.8.0, with Phase 2 deferred?
-5. **The CRC in `Ref`.** Keep it (about 4 bytes and one pass over the data, catching a reused
-   identity), or drop it as redundant with record checksums?
+1. **Default.** Set to `1024` bytes in Phase 3 (`docs/benchmarks.md`, "#172 Phase 3"). 17-byte
+   WAN runs stay inline (`data_sent = 0`, `fetches = 0`); 4 KiB WAN runs drop p99 2.1–4.9×
+   and eliminate jitter collapse; 1 Gbit/s LAN runs gain 1.6–2.3× over Phase 1 (3.3–4.0×
+   over Phase 0). Operators can still set `u32::MAX` per replica.
+2. **Fetch grace on the WAN.** Kept immediate fetch (the paper's rule). Phase 3 data showed a
+   simpler, higher-leverage LAN/WAN opportunity first: `disseminate_chunk` sends `Data` to
+   `schedule.everyone()` in `NodeId` order (leader `0` first), so the leader's `RecordRequest`
+   frequently beats the origin's direct `Data` to higher-ID peers and drives `fetches_served`
+   on the leader (left as a clean follow-up).
+3. **Slot size bound.** Kept referenced bytes inside `max_batch_bytes`.
+4. **Phase 1 alone.** Phase 0 confirmed leader egress saturates on 1 Gbit/s LAN with large
+   commands, so Phase 2 landed for 0.8.0.
+5. **The CRC in `Ref`.** Kept (4 bytes, detects identity reuse on an empty disk).
