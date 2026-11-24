@@ -111,6 +111,22 @@ impl Schedule {
         self.order(slot)
     }
 
+    /// The leader order used to route proposals at `slot`: the order in force, or the
+    /// rotated order already decided by miss-based rotation while it waits out `LAG` (not a
+    /// planned membership or leader-order change, where the current leader keeps leading
+    /// until `epoch_from`). A rotation with `quiet_until = s + LAG` was counted at slot `s`,
+    /// so it is only visible once `slot > s` (`slot + LAG > quiet_until`).
+    pub fn routing_order(&self, slot: Slot) -> &[NodeId] {
+        if slot.0 < self.quiet_until
+            && slot.0.saturating_add(LAG) > self.quiet_until
+            && self.quiet_until > self.epoch_from
+        {
+            self.order(Slot(self.quiet_until))
+        } else {
+            self.order(slot)
+        }
+    }
+
     /// Whether `node` is a member of any epoch still in the schedule (current or pending).
     pub fn knows(&self, node: NodeId) -> bool {
         self.history.iter().any(|(_, order)| order.contains(&node))

@@ -52,8 +52,11 @@ What the paper leaves open, the crate fixes as follows (the repository's
 - **Log.** Each slot is an independent instance; a replica drives up to
   `max_in_flight_slots` at once and applies decided slots in order.
 - **Leader.** Derived from the decided log, so it needs no election; it rotates after eight
-  consecutive slots it did not lead. A restarted leader reserves its top priority durably
-  before using it, so it can never use it twice in one slot.
+  consecutive slots it did not lead. Once a miss-based rotation is counted, replicas route
+  proposals to the incoming leader immediately rather than waiting out the 64-slot lag (the
+  top priority still changes only at `slot + 64`; planned reconfigurations keep routing to
+  the current leader until they take effect). A restarted leader reserves its top priority
+  durably before using it, so it can never use it twice in one slot.
 - **Hedging.** Followers forward entries to the leader and propose them themselves only if
   they are not committed within an adaptive delay; duplicates are filtered when committed.
   A follower whose batch loses its slot forwards the entries to the leader again rather

@@ -5,6 +5,7 @@ use super::*;
 
 impl Sim {
     pub(crate) fn net_send(&mut self, from: usize, out: Outbound) {
+        self.report.bytes_sent[from] += out.bytes.len() as u64;
         let to = out.to.0 as usize;
         if self.faults_on
             && (self.cut.contains(&from) != self.cut.contains(&to) || self.chance(self.cfg.drop))

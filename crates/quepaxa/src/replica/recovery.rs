@@ -109,6 +109,11 @@ impl CatchUp {
         }
     }
 
+    /// The largest commit index a replica of a known epoch advertised.
+    pub(super) fn ahead(&self) -> u64 {
+        self.ahead
+    }
+
     /// A peer decided slots past `committed`.
     pub(super) fn ahead_of(&self, committed: u64) -> bool {
         self.ahead > committed

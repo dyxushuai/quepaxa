@@ -78,7 +78,7 @@ impl Replica {
     /// The first member of the leader order this replica does not suspect (itself when it
     /// comes first).
     fn first_unsuspected(&self) -> NodeId {
-        let order = self.schedule.members(Slot(self.committed));
+        let order = self.schedule.routing_order(Slot(self.committed));
         order
             .iter()
             .copied()
@@ -88,7 +88,7 @@ impl Replica {
 
     /// The first unsuspected member after this one in the leader order (itself if none).
     fn next_after_me(&self) -> NodeId {
-        let order = self.schedule.members(Slot(self.committed));
+        let order = self.schedule.routing_order(Slot(self.committed));
         order
             .iter()
             .copied()

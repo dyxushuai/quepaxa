@@ -173,7 +173,11 @@ impl Sim {
             cut: BTreeSet::new(),
             faults_on: true,
             ledger: invariants::Ledger::default(),
-            report: Report { epochs: vec![initial.clone()], ..Report::default() },
+            report: Report {
+                epochs: vec![initial.clone()],
+                bytes_sent: vec![0; nodes_len],
+                ..Report::default()
+            },
             trace: String::new(),
             last_new_slot_at: 0,
             kv: kv::Kv::new(nodes_len),

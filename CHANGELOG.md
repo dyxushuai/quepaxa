@@ -5,6 +5,20 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `quepaxa` (#240): prevent healthy-leader rotations on brief loopback/LAN scheduling
+  hiccups and eliminate the lagging-leader egress blast and handover hedge burst:
+  - Raise default `Config::hedge_min` from 1 ms to 20 ms so sub-millisecond loopback/tmpfs
+    clusters do not shrink δ to ~1 ms (4δ to ~4 ms), where routine 5–15 ms scheduling
+    jitter caused constant hedging, false `stepped_aside`, and 8-slot rotations.
+  - Skip slots below the highest peer-advertised `commit_index` (`catch_up.ahead()`) in
+    `free_slot()` so a lagging replica catching up does not propose batches into already
+    decided slots, lose them, and blast `RecordRequest`s across peers.
+  - Once miss-based rotation counts 8 consecutive missed slots, route proposals to the
+    incoming leader immediately while waiting out `LAG = 64` (top-priority fast path still
+    switches at `slot + 64`; planned reconfigurations keep routing to the current leader
+    until `epoch_from`). This stops the rotated-out leader from re-proposing across the
+    64-slot handover window when draining FIFO peer messages and stops followers from
+    forwarding to the outgoing leader and hedging slot by slot.
 - `quepaxa` (wire and storage, breaking; #172): the formats for batch content behind
   references. Messages gain `Data` (a data batch by its id) and `Fetch` (ids, with the slot
   that needs them), `Entries` pages gain a content section, and batches an `ENTRY_REF` item

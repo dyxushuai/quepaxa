@@ -157,9 +157,12 @@ impl Replica {
         // Stepped aside, this replica hands them on (`watch.rs`); so it does for a follower
         // that has not yet seen this replica stop leading, whose entries belong to the new
         // leader, not to a deputy.
-        let lagging =
-            self.watch.committed.get(&from).is_some_and(|&c| self.schedule.leader(Slot(c)) == self.me);
-        let to_pending = self.leads_now() || self.watch.aside || lagging;
+        let lagging = self
+            .watch
+            .committed
+            .get(&from)
+            .is_some_and(|&c| self.schedule.routing_order(Slot(c))[0] == self.me);
+        let to_pending = self.proposes_directly() || self.watch.aside || lagging;
         if self.entries.received(entries, to_pending, cap) {
             self.watch.fwd.took(from, seq);
             self.ack_forward(from);
@@ -252,9 +255,11 @@ impl Replica {
     /// miss-based rotation would count them against it. Past that slot it is no longer the
     /// leader and hands the entries on.
     fn free_slot(&self) -> Option<Slot> {
-        let as_leader = self.leads_now() && !self.watch.aside;
+        let as_leader = self.leads_now() && self.proposes_directly();
         let end = self.committed + self.window();
-        let mut s = self.next_alloc.max(self.committed);
+        // Skip slots already decided by a peer: proposing there loses the slot, re-queues the
+        // batch, and blasts RecordRequests across the whole handover window during catch-up.
+        let mut s = self.next_alloc.max(self.committed).max(self.catch_up.ahead());
         while s < end {
             let slot = Slot(s);
             if as_leader && self.schedule.leader(slot) != self.me {

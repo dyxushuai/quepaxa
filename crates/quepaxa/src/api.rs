@@ -107,7 +107,7 @@ pub struct Config {
 impl Config {
     /// A configuration with default limits and timers (see the table in
     /// [`guide::tuning`](crate::guide::tuning)): 1 MiB batches, 16 MiB messages, 8 slots in
-    /// flight, 4096 outstanding proposals, 50 ms retransmission, hedging between 1 ms and
+    /// flight, 4096 outstanding proposals, 50 ms retransmission, hedging between 20 ms and
     /// 1 s, leaders by id.
     pub fn new(cluster_id: [u8; 16], id: NodeId, members: Vec<NodeId>, seed: [u8; 32]) -> Self {
         Self {
@@ -120,7 +120,7 @@ impl Config {
             max_in_flight_slots: 8,
             max_outstanding_proposals: 4096,
             retransmit_interval: 50 * MILLI,
-            hedge_min: MILLI,
+            hedge_min: 20 * MILLI,
             hedge_max: 1000 * MILLI,
             silent_leader_takeover: true,
             leader_order: Vec::new(),
