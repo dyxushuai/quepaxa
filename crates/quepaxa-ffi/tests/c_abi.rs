@@ -271,6 +271,7 @@ fn options_take_effect_and_a_rejected_value_changes_nothing() {
         QPX_CONFIG_HEDGE_MAX_NS,
         QPX_CONFIG_PLACEMENT_SUSTAIN_NS,
         QPX_CONFIG_PLACEMENT_HOLD_NS,
+        QPX_CONFIG_INLINE_BATCH_BYTES,
     ] {
         assert_eq!(unsafe { qpx_config_set(cfg, option, u64::from(u32::MAX)) }, QPX_OK, "option {option}");
     }
@@ -306,7 +307,7 @@ fn metrics_are_readable_over_the_abi() {
     assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_MESSAGES_REJECTED, &mut v) }, QPX_OK);
     assert_eq!(v, 1);
     assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_LIVE_REGISTERS, &mut v) }, QPX_OK);
-    for metric in 1..=QPX_METRIC_LEADER_POSITION {
+    for metric in 1..=QPX_METRIC_PARKED_REQUESTS {
         assert_eq!(unsafe { qpx_metric(h, metric, &mut v) }, QPX_OK, "metric {metric}");
     }
     // Replica 0 leads the configured members (epoch 0).

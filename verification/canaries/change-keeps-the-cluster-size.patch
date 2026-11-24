@@ -1,7 +1,7 @@
-diff --git a/crates/quepaxa/src/replica/mod.rs b/crates/quepaxa/src/replica/mod.rs
---- a/crates/quepaxa/src/replica/mod.rs
-+++ b/crates/quepaxa/src/replica/mod.rs
-@@ -468,6 +468,8 @@
+diff --git a/crates/quepaxa/src/replica/api.rs b/crates/quepaxa/src/replica/api.rs
+--- a/crates/quepaxa/src/replica/api.rs
++++ b/crates/quepaxa/src/replica/api.rs
+@@ -152,6 +152,8 @@
              return Err(Error::InvalidConfig("leader_order must list every member exactly once"));
          }
          self.check_no_change_pending()?;

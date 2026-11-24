@@ -218,8 +218,6 @@ pub(crate) enum DecodeError {
     BadTag,
     Trailing,
     BadChecksum,
-    /// A batch holding a reference to a data batch, which this version does not resolve.
-    Refused,
 }
 
 /// Builds a reply proposal, eliding its value when it is the request's own proposal.

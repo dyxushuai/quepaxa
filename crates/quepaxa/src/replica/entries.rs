@@ -28,7 +28,7 @@ use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec::Vec;
 use bytes::Bytes;
 
-use crate::batch::{self, Item, Kind};
+use crate::batch::{self, DataId, Item, Kind, Piece, Ref};
 use crate::dedup::Dedup;
 use crate::proposal::ValueKey;
 use crate::types::{NodeId, ProposalId, Slot, Timestamp};
@@ -39,6 +39,7 @@ pub(super) struct LocalBatch {
     pub(super) key: ValueKey,
     pub(super) value: Bytes,
     pub(super) entries: Vec<(NodeId, u64, ProposalId)>,
+    pub(super) refs: Vec<Ref>,
     pub(super) slot: Option<Slot>,
     /// Membership changes among the entries.
     changes: usize,
@@ -107,15 +108,15 @@ pub(super) struct Left {
 pub(super) struct Entries {
     me: NodeId,
     incarnation: u64,
-    pending: VecDeque<Item>,
-    relayed: VecDeque<Item>,
+    pending: VecDeque<Piece>,
+    relayed: VecDeque<Piece>,
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
     batches: BTreeMap<u64, LocalBatch>,
     own: BTreeMap<ProposalId, Own>,
     next_batch: u64,
     /// Batches with entries and no slot, which `drive` proposes before cutting a new one.
     unslotted: BTreeSet<u64>,
-    /// Entries of other members in `relayed` and in batches.
+    /// Entries and references of other members in `relayed` and in batches.
     foreign: usize,
     /// Membership changes in `own`, the queues and the batches.
     changes: usize,
@@ -143,6 +144,17 @@ fn is_change(i: &Item) -> bool {
     i.kind == Kind::Reconfigure
 }
 
+fn piece_is_change(p: &Piece) -> bool {
+    matches!(p, Piece::Entry(i) if is_change(i))
+}
+
+fn piece_origin(p: &Piece) -> NodeId {
+    match p {
+        Piece::Entry(i) => i.entry.origin,
+        Piece::Ref(r) => r.id.origin,
+    }
+}
+
 impl Entries {
     pub(super) fn new(me: NodeId, incarnation: u64) -> Self {
         Self {
@@ -165,8 +177,9 @@ impl Entries {
         }
     }
 
-    fn foreign_in(&self, ids: &[(NodeId, u64, ProposalId)]) -> usize {
-        ids.iter().filter(|&&(o, _, _)| o != self.me).count()
+    fn foreign_in(&self, b: &LocalBatch) -> usize {
+        b.entries.iter().filter(|&&(o, _, _)| o != self.me).count()
+            + b.refs.iter().filter(|r| r.id.origin != self.me).count()
     }
 
     /// An entry of this replica's current incarnation.
@@ -195,28 +208,28 @@ impl Entries {
 
     // ---- queues and batches, with their counters ----
 
-    fn push_pending(&mut self, i: Item) {
-        self.changes += usize::from(is_change(&i));
-        self.pending.push_back(i);
+    fn push_pending(&mut self, p: Piece) {
+        self.changes += usize::from(piece_is_change(&p));
+        self.pending.push_back(p);
     }
 
-    fn push_relayed(&mut self, i: Item) {
-        self.changes += usize::from(is_change(&i));
-        self.foreign += usize::from(i.entry.origin != self.me);
-        self.relayed.push_back(i);
+    fn push_relayed(&mut self, p: Piece) {
+        self.changes += usize::from(piece_is_change(&p));
+        self.foreign += usize::from(piece_origin(&p) != self.me);
+        self.relayed.push_back(p);
     }
 
-    fn pop(&mut self, relayed: bool) -> Option<Item> {
-        let i = if relayed { self.relayed.pop_front() } else { self.pending.pop_front() }?;
-        self.changes -= usize::from(is_change(&i));
-        self.foreign -= usize::from(relayed && i.entry.origin != self.me);
-        Some(i)
+    fn pop(&mut self, relayed: bool) -> Option<Piece> {
+        let p = if relayed { self.relayed.pop_front() } else { self.pending.pop_front() }?;
+        self.changes -= usize::from(piece_is_change(&p));
+        self.foreign -= usize::from(relayed && piece_origin(&p) != self.me);
+        Some(p)
     }
 
     fn insert_batch(&mut self, seq: u64, b: LocalBatch) {
-        self.foreign += self.foreign_in(&b.entries);
+        self.foreign += self.foreign_in(&b);
         self.changes += b.changes;
-        if b.slot.is_none() && !b.entries.is_empty() {
+        if b.slot.is_none() && (!b.entries.is_empty() || !b.refs.is_empty()) {
             self.unslotted.insert(seq);
         }
         self.batches.insert(seq, b);
@@ -224,10 +237,18 @@ impl Entries {
 
     fn remove_batch(&mut self, seq: u64) -> Option<LocalBatch> {
         let b = self.batches.remove(&seq)?;
-        self.foreign -= self.foreign_in(&b.entries);
+        self.foreign -= self.foreign_in(&b);
         self.changes -= b.changes;
         self.unslotted.remove(&seq);
         Some(b)
+    }
+
+    /// Whether any queued item or local batch still references data batch `id`.
+    pub(super) fn contains_ref(&self, id: DataId) -> bool {
+        let has = |p: &Piece| matches!(p, Piece::Ref(r) if r.id == id);
+        self.pending.iter().any(has)
+            || self.relayed.iter().any(has)
+            || self.batches.values().any(|b| b.refs.iter().any(|r| r.id == id))
     }
 
     // ---- what the replica asks ----
@@ -301,50 +322,55 @@ impl Entries {
         if is_change(&item) {
             self.changes += 1;
         }
-        self.push_pending(item);
+        self.push_pending(Piece::Entry(item));
     }
 
-    /// A follower handed entries to this replica: into `pending` (to hand on, or as the
-    /// leader) or `relayed` (as a deputy), unless that queue would exceed `cap`. An own entry
-    /// among them is a copy.
-    pub(super) fn received(&mut self, entries: Vec<Item>, to_pending: bool, cap: usize) -> bool {
+    /// A follower handed pieces (inline entries and references) to this replica: into
+    /// `pending` (to hand on, or as the leader) or `relayed` (as a deputy), unless that
+    /// queue would exceed `cap`. An own entry among them is a copy.
+    pub(super) fn received(&mut self, pieces: Vec<Piece>, to_pending: bool, cap: usize) -> bool {
         #[cfg(feature = "model")]
         {
-            let own = entries.iter().filter(|i| self.mine(i));
+            let own = pieces.iter().filter(|p| matches!(p, Piece::Entry(i) if self.mine(i)));
             self.probes.d3 += own.count() as u64;
         }
         let queued = if to_pending { self.pending.len() } else { self.relayed.len() };
-        if queued + entries.len() > cap {
+        if queued + pieces.len() > cap {
             return false; // the origin hedges
         }
-        for i in &entries {
-            if self.mine(i)
+        for p in &pieces {
+            if let Piece::Entry(i) = p
+                && self.mine(i)
                 && let Some(o) = self.own.get_mut(&i.entry.id)
             {
                 o.copied = true;
             }
         }
-        self.changes += entries.iter().filter(|i| is_change(i)).count();
+        self.changes += pieces.iter().filter(|p| piece_is_change(p)).count();
         if to_pending {
-            self.pending.extend(entries);
+            self.pending.extend(pieces);
         } else {
-            self.foreign += entries.iter().filter(|i| i.entry.origin != self.me).count();
-            self.relayed.extend(entries);
+            self.foreign += pieces.iter().filter(|p| piece_origin(p) != self.me).count();
+            self.relayed.extend(pieces);
         }
         true
     }
 
     /// Hands everything pending to the target unless this replica proposes it `direct`ly:
-    /// own entries are tracked from `now`. Returns the entries to send. Afterwards nothing is
+    /// own entries are tracked from `now`. Returns the pieces to send. Afterwards nothing is
     /// pending unless `direct` (E5).
-    pub(super) fn route(&mut self, direct: bool, now: Timestamp) -> Vec<Item> {
+    pub(super) fn route(&mut self, direct: bool, now: Timestamp) -> Vec<Piece> {
         if direct || self.pending.is_empty() {
             return Vec::new();
         }
-        let entries: Vec<Item> = self.pending.drain(..).collect();
-        self.changes -= entries.iter().filter(|i| is_change(i)).count();
+        let pieces: Vec<Piece> = self.pending.drain(..).collect();
+        self.changes -= pieces.iter().filter(|p| piece_is_change(p)).count();
         let (me, inc) = (self.me, self.incarnation);
-        for i in entries.iter().filter(|i| i.entry.origin == me && i.entry.incarnation == inc) {
+        for p in &pieces {
+            let Piece::Entry(i) = p else { continue };
+            if i.entry.origin != me || i.entry.incarnation != inc {
+                continue;
+            }
             let id = i.entry.id;
             let _earlier = self.forwarded.insert(id, (i.clone(), now));
             #[cfg(feature = "model")]
@@ -360,7 +386,7 @@ impl Entries {
                 }
             }
         }
-        entries
+        pieces
     }
 
     /// Batches whose entries all committed elsewhere are dead weight.
@@ -373,7 +399,9 @@ impl Entries {
             .batches
             .iter()
             .filter(|(_, b)| {
-                b.slot.is_none() && !b.entries.iter().any(|&(o, i, id)| !dedup.contains(o, i, id))
+                b.slot.is_none()
+                    && b.refs.is_empty()
+                    && !b.entries.iter().any(|&(o, i, id)| !dedup.contains(o, i, id))
             })
             .map(|(seq, _)| *seq)
             .collect();
@@ -382,12 +410,12 @@ impl Entries {
         }
     }
 
-    /// Cuts the next batch: relayed entries always, own pending ones only when proposing them
+    /// Cuts the next batch: relayed pieces always, pending ones only when proposing them
     /// directly (`lead`).
     pub(super) fn cut(&mut self, lead: bool, max_bytes: usize, dedup: &Dedup) -> Option<u64> {
         let seq = self.next_batch;
-        let mut entries = batch::Builder::new(max_bytes);
-        // `relayed` drains before `pending`: the first `from_relayed` entries taken came from it.
+        let mut pieces = batch::PieceBuilder::new(max_bytes);
+        // `relayed` drains before `pending`: the first `from_relayed` pieces taken came from it.
         let mut from_relayed = 0;
         loop {
             let relayed = if !self.relayed.is_empty() {
@@ -398,37 +426,40 @@ impl Entries {
                 break;
             };
             let queue = if relayed { &self.relayed } else { &self.pending };
-            let Some(e) = queue.front() else { break };
-            if !entries.fits(e) {
+            let Some(p) = queue.front() else { break };
+            if !pieces.fits(p) {
                 break;
             }
-            let Some(e) = self.pop(relayed) else { break };
-            let (o, inc, id) = e.key();
-            if dedup.contains(o, inc, id) {
-                continue;
+            let Some(p) = self.pop(relayed) else { break };
+            if let Piece::Entry(e) = &p {
+                let (o, inc, id) = e.key();
+                if dedup.contains(o, inc, id) {
+                    continue;
+                }
             }
             from_relayed += usize::from(relayed);
-            entries.push(e);
+            pieces.push(p);
         }
-        if entries.is_empty() {
+        if pieces.is_empty() {
             return None;
         }
-        let items = entries.take();
+        let items = pieces.take();
         self.batched(&items, from_relayed, seq);
         Some(self.new_batch(items))
     }
 
-    /// The own entries among `items` (the first `from_relayed` taken from `relayed`, the rest
+    /// The own entries among `pieces` (the first `from_relayed` taken from `relayed`, the rest
     /// from `pending`) moved to batch `seq`. Nothing reads `own` while `cut` takes them, so the
     /// moves wait until it is done: own ids ascend in a cut but for copies, and one ordered
     /// walk replaces a lookup per entry on the leader's commit path.
-    fn batched(&mut self, items: &[Item], from_relayed: usize, seq: u64) {
+    fn batched(&mut self, pieces: &[Piece], from_relayed: usize, seq: u64) {
         let (me, inc) = (self.me, self.incarnation);
-        let mut mine = items
-            .iter()
-            .enumerate()
-            .filter(|(_, i)| i.entry.origin == me && i.entry.incarnation == inc)
-            .map(|(n, i)| (i.entry.id, if n < from_relayed { At::Relayed } else { At::Pending }));
+        let mut mine = pieces.iter().enumerate().filter_map(|(n, p)| match p {
+            Piece::Entry(i) if i.entry.origin == me && i.entry.incarnation == inc => {
+                Some((i.entry.id, if n < from_relayed { At::Relayed } else { At::Pending }))
+            }
+            _ => None,
+        });
         let Some(first) = mine.clone().next() else { return };
         let to = At::Batched { seq };
         let ascending = mine.clone().zip(mine.clone().skip(1)).all(|((a, _), (b, _))| a < b);
@@ -457,15 +488,25 @@ impl Entries {
         }
     }
 
-    /// A new local batch of `entries`, not yet in a slot.
-    pub(super) fn new_batch(&mut self, entries: Vec<Item>) -> u64 {
+    /// A new local batch of `pieces`, not yet in a slot.
+    pub(super) fn new_batch(&mut self, pieces: Vec<Piece>) -> u64 {
         let seq = self.next_batch;
         self.next_batch += 1;
         let key = ValueKey { origin: self.me, incarnation: self.incarnation, seq };
-        let ids = entries.iter().map(Item::key).collect();
-        let changes = entries.iter().filter(|i| is_change(i)).count();
-        let value = batch::encode(&entries);
-        let b = LocalBatch { key, value, entries: ids, slot: None, changes, handed: false };
+        let mut ids = Vec::new();
+        let mut refs = Vec::new();
+        let mut changes = 0;
+        for p in &pieces {
+            match p {
+                Piece::Entry(i) => {
+                    ids.push(i.key());
+                    changes += usize::from(is_change(i));
+                }
+                Piece::Ref(r) => refs.push(*r),
+            }
+        }
+        let value = batch::encode_pieces(&pieces);
+        let b = LocalBatch { key, value, entries: ids, refs, slot: None, changes, handed: false };
         self.insert_batch(seq, b);
         seq
     }
@@ -485,9 +526,9 @@ impl Entries {
         self.leave(id)
     }
 
-    /// Own batch `seq` was decided and applied.
-    pub(super) fn applied(&mut self, seq: u64) {
-        self.remove_batch(seq);
+    /// Own batch `seq` was decided and applied; returns the references it held.
+    pub(super) fn applied(&mut self, seq: u64) -> Vec<Ref> {
+        self.remove_batch(seq).map_or_else(Vec::new, |b| b.refs)
     }
 
     /// Entries committed: a batch waiting for a slot may hold nothing else.

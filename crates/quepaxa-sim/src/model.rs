@@ -14,105 +14,9 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use bytes::Bytes;
-use quepaxa::{Action, Config, DropReason, Input, NodeId, PersistId, ProposalId, Replica, Timestamp};
+use quepaxa::{Action, Config, DropReason, Input, NodeId, PersistId, ProposalId, Replica, Slot, Timestamp};
 
-/// Bounds of one exploration.
-#[derive(Clone, Debug)]
-pub struct ModelConfig {
-    /// Cluster size.
-    pub nodes: usize,
-    /// One client write per entry, proposed at that replica at the start.
-    pub proposals: Vec<usize>,
-    /// One linearizable read per entry, requested at that replica once the first write is
-    /// acknowledged: it must cover that write.
-    pub reads: Vec<usize>,
-    /// Deviations from the default schedule along one path.
-    pub deviations: u32,
-    /// Crash-restarts allowed along one path (a separate budget; they cost no deviation).
-    pub crashes: u32,
-    /// Longest path explored.
-    pub max_depth: usize,
-    /// Distinct states explored before stopping.
-    pub max_states: usize,
-    /// One client write per entry, proposed at that replica once every write in
-    /// `proposals` is acknowledged.
-    pub later: Vec<usize>,
-    /// A replica cut off once every write in `proposals` is acknowledged, as if it crashed
-    /// then (one partition, costing no deviation; healed like any other). A follower judges
-    /// silence only against a member it has handed entries to before.
-    pub silenced: Option<usize>,
-    /// Network delay of every message, in nanoseconds: a delivery moves the receiver's
-    /// clock to at least the send time plus this. Zero keeps time still between timers;
-    /// silence and hedge delays are measured from these delays.
-    pub link_delay: u64,
-    /// A replica whose persists the default schedule completes only once nothing else is
-    /// pending, no timer included: a disk slower than every timeout.
-    pub slow_disk: Option<usize>,
-    /// A replica whose messages the default schedule delivers only once nothing else is
-    /// pending, no timer included: a leader slower than every timeout.
-    pub slow_net: Option<usize>,
-    /// Replicas beyond `nodes`, started outside the membership (to be added by a change).
-    pub spares: usize,
-    /// A membership change proposed at the start: at that replica, the new members (of
-    /// replicas `0..nodes + spares`), preferred leaders in that order (the same members in
-    /// another order change only the leader).
-    pub reconfigure: Option<(usize, Vec<usize>)>,
-    /// A competing change proposed at the start at another replica, computed from the same
-    /// configuration: whichever is decided second is ignored. Not proposed again after a
-    /// crash.
-    pub rival: Option<(usize, Vec<usize>)>,
-}
-
-impl ModelConfig {
-    /// A three-replica cluster with the given writes, no faults beyond the budgets.
-    pub fn new(proposals: Vec<usize>, deviations: u32, crashes: u32) -> Self {
-        Self {
-            nodes: 3,
-            proposals,
-            reads: Vec::new(),
-            deviations,
-            crashes,
-            max_depth: 200,
-            max_states: 1_000_000,
-            later: Vec::new(),
-            silenced: None,
-            link_delay: 0,
-            slow_disk: None,
-            slow_net: None,
-            spares: 0,
-            reconfigure: None,
-            rival: None,
-        }
-    }
-}
-
-/// What an exploration covered.
-#[derive(Clone, Debug, Default)]
-pub struct ModelReport {
-    /// Distinct states visited.
-    pub states: usize,
-    /// States in which every replica committed every proposal.
-    pub complete: usize,
-    /// Whether every schedule within the bounds was explored.
-    pub exhausted: bool,
-    /// States at the depth bound; each was shown to settle under the default schedule.
-    pub depth_limited: usize,
-    /// States in which every client write had committed and every read finished; a
-    /// replica cut off may still be behind.
-    pub served: usize,
-    /// States in which some replica had hedged an entry (proposed it itself after its
-    /// target was late or suspected).
-    pub hedged: usize,
-    /// States in which some replica had stepped aside.
-    pub stepped_aside: usize,
-    /// States in which an entry had committed in a batch proposed by a deputy: neither the
-    /// leader (n0) nor the entry's origin.
-    pub deputy: usize,
-    /// States in which some replica had applied a membership change.
-    pub reconfigured: usize,
-    /// Suspected entry combinations (#187) run into over every explored step.
-    pub entry_probes: quepaxa::inspect::EntryProbes,
-}
+pub use crate::config::{ModelConfig, ModelReport};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Event {
@@ -133,6 +37,10 @@ struct MNode {
     acked: BTreeSet<ProposalId>,
     /// Reads in progress: the slot each must cover.
     reads: BTreeMap<ProposalId, u64>,
+    /// Latest compacted snapshot `(through, core_state)` on this replica.
+    snapshot: Option<(u64, Bytes)>,
+    /// Installed at least one peer snapshot.
+    installed_snapshot: bool,
 }
 
 #[derive(Clone)]
@@ -142,7 +50,14 @@ struct State {
     deviations: u32,
     crashes: u32,
     isolated: Option<usize>,
+    down: Option<usize>,
+    inline_batch_bytes: u32,
+    drop_data_to: Option<usize>,
+    crash_after_warmup: Option<usize>,
+    crash_on_parked: Option<usize>,
+    compact_on_commit: bool,
     history: crate::invariants::History,
+    custody: crate::custody::Custody,
     ledger: crate::invariants::Ledger,
     /// Payloads that must eventually commit: client writes, minus those whose replica
     /// crashed before committing them (the client retries those as new payloads).
@@ -191,7 +106,7 @@ fn ids(members: &[NodeId]) -> Vec<usize> {
     members.iter().map(|m| m.0 as usize).collect()
 }
 
-fn config(n: usize, i: usize, starts: u64) -> Config {
+fn config(n: usize, i: usize, starts: u64, inline_batch_bytes: u32) -> Config {
     // A spare (`i >= n`) runs with the original membership and waits to be added.
     let mut seed = [0u8; 32];
     seed[0] = i as u8;
@@ -199,8 +114,11 @@ fn config(n: usize, i: usize, starts: u64) -> Config {
     let members = (0..n as u32).map(NodeId).collect();
     let mut cfg = Config::new(*b"quepaxa-modelchk", NodeId(i as u32), members, seed);
     cfg.max_in_flight_slots = 2;
+    cfg.inline_batch_bytes = inline_batch_bytes;
     cfg
 }
+
+const KIND_DATA: u8 = 13;
 
 impl State {
     fn fingerprint(&self) -> u64 {
@@ -215,7 +133,7 @@ impl State {
             self.slow_net,
             &self.later,
             self.silenced,
-            (&self.warmup, &self.epochs, self.change, self.rival_change),
+            (self.down, self.crash_on_parked, &self.warmup, &self.epochs, self.change, self.rival_change),
             self.deviations,
             self.crashes,
             self.isolated,
@@ -233,6 +151,9 @@ impl State {
             return;
         }
         for i in 0..self.nodes.len() {
+            if self.down == Some(i) {
+                continue;
+            }
             let first = self.events.iter().find_map(|e| match e {
                 Event::Persisted { node, records, replace, .. } if *node == i => {
                     Some((records.len(), *replace))
@@ -255,8 +176,31 @@ impl State {
         self.events.retain(|e| !matches!(e, Event::Deliver { from, to, .. } if *from == node || *to == node));
     }
 
+    fn kill_node(&mut self, node: usize) {
+        self.isolated = None;
+        self.down = Some(node);
+        self.history.forget(&self.epochs, node);
+        self.events.retain(|e| {
+            !matches!(e, Event::Deliver { from, to, .. } if *from == node || *to == node)
+                && !matches!(e, Event::Persisted { node: n, .. } if *n == node)
+        });
+    }
+
+    fn pad_payload(&self, mut payload: Bytes) -> Bytes {
+        if self.inline_batch_bytes < u32::MAX {
+            let min = self.inline_batch_bytes as usize + 64;
+            if payload.len() < min {
+                let mut v = payload.to_vec();
+                v.resize(min, b'x');
+                payload = Bytes::from(v);
+            }
+        }
+        payload
+    }
+
     /// Proposes a client write at `i`.
     fn propose(&mut self, i: usize, payload: Bytes) -> Result<(), String> {
+        let payload = self.pad_payload(payload);
         let n = &mut self.nodes[i];
         let id = n.replica.propose(Timestamp(n.now), payload.clone()).map_err(|e| e.to_string())?;
         n.proposed.insert(id, payload.clone());
@@ -265,9 +209,19 @@ impl State {
         self.drain(i)
     }
 
-    /// Queues a message unless either end is cut off.
+    /// Queues a message unless either end is cut off or down.
     fn post(&mut self, from: usize, to: usize, bytes: Bytes) {
-        if self.isolated != Some(from) && self.isolated != Some(to) {
+        if self.drop_data_to == Some(to)
+            && bytes.get(3) == Some(&KIND_DATA)
+            && self.nodes[to].replica.metrics().fetches == 0
+        {
+            return;
+        }
+        if self.isolated != Some(from)
+            && self.isolated != Some(to)
+            && self.down != Some(from)
+            && self.down != Some(to)
+        {
             let at = if self.link_delay > 0 { self.nodes[from].now + self.link_delay } else { 0 };
             self.events.push_back(Event::Deliver { from, to, bytes, at });
         }
@@ -277,6 +231,7 @@ impl State {
     fn steps(&self) -> Vec<(Step, bool)> {
         let earliest_timer = || {
             (0..self.nodes.len())
+                .filter(|&i| self.down != Some(i))
                 .filter_map(|i| self.nodes[i].replica.next_deadline().map(|t| (t, i)))
                 .min()
                 .map(|(_, i)| i)
@@ -327,10 +282,17 @@ impl State {
             }
         }
         for i in 0..self.nodes.len() {
+            if self.down == Some(i) {
+                continue;
+            }
             if Some(i) != default_timer && self.nodes[i].replica.next_deadline().is_some() {
                 steps.push((Step::Timeout(i), true));
             }
-            if self.isolated.is_none() {
+            if self.isolated.is_none()
+                && self.down.is_none()
+                && self.crash_after_warmup.is_none()
+                && self.crash_on_parked.is_none()
+            {
                 steps.push((Step::Isolate(i), true));
             }
         }
@@ -351,8 +313,11 @@ impl State {
                     let n = &mut self.nodes[node];
                     if replace {
                         n.durable = records;
+                        self.custody.on_replace(node, &n.durable)?;
                     } else {
+                        let prev = n.durable.len();
                         n.durable.extend(records);
+                        self.custody.on_append(node, &n.durable[prev..])?;
                     }
                     for (to, bytes) in then {
                         self.post(node, to, bytes);
@@ -424,8 +389,12 @@ impl State {
         let n = &mut self.nodes[node];
         if let Some(records) = replaced {
             n.durable = records;
+            self.custody.on_replace(node, &n.durable)?;
+        } else {
+            let prev = n.durable.len();
+            n.durable.extend(kept);
+            self.custody.on_append(node, &n.durable[prev..])?;
         }
-        n.durable.extend(kept);
         n.starts += 1;
         n.next_commit = 0;
         let rechange = self.change.take_if(|(at, _)| *at == node).is_some();
@@ -439,8 +408,12 @@ impl State {
             .filter(|(id, _)| !acked.contains(id))
             .map(|(_, p)| p)
             .collect();
-        n.replica = Replica::new(config(total, node, n.starts), n.durable.clone(), Timestamp(n.now))
-            .map_err(|e| e.to_string())?;
+        n.replica = Replica::new(
+            config(total, node, n.starts, self.inline_batch_bytes),
+            n.durable.clone(),
+            Timestamp(n.now),
+        )
+        .map_err(|e| e.to_string())?;
         self.drain(node)?;
         // The operator proposes the change again unless the replica still has it pending.
         if rechange {
@@ -470,6 +443,8 @@ impl State {
         let mut actions = Vec::new();
         self.nodes[i].replica.poll_actions(&mut actions);
         let mut acked_slot = None;
+        let mut compacted_slot = None;
+        let mut installs = Vec::new();
         for a in actions {
             match a {
                 Action::Send(o) => self.post(i, o.to.0 as usize, o.bytes),
@@ -491,6 +466,12 @@ impl State {
                             by.is_some_and(|by| by != 0 && entries.iter().any(|e| e.origin.0 != by));
                     }
                     self.ledger.commit(slot.0, &entries)?;
+                    if self.compact_on_commit {
+                        compacted_slot = Some(slot.0);
+                    }
+                }
+                Action::SnapshotNeeded { peer, through } => {
+                    installs.push((peer.0 as usize, through.0));
                 }
                 Action::Committed { id, .. } if self.change == Some((i, id)) => self.change = None,
                 Action::Committed { id, .. } if self.rival_change == Some((i, id)) => {
@@ -525,7 +506,11 @@ impl State {
                     self.nodes[i].acked.insert(id);
                     let payload = self.nodes[i].proposed.get(&id).cloned().unwrap_or_default();
                     self.warmup.remove(&payload);
-                    self.ledger.acknowledged(NodeId(i as u32), id, &payload, slot.0, None)?;
+                    let installed = self.nodes[i]
+                        .installed_snapshot
+                        .then(|| self.nodes[i].snapshot.as_ref().map(|(t, _)| *t))
+                        .flatten();
+                    self.ledger.acknowledged(NodeId(i as u32), id, &payload, slot.0, installed)?;
                     acked_slot = Some(slot.0);
                 }
                 Action::Reconfigured { epoch, from, members } => {
@@ -581,9 +566,40 @@ impl State {
                 _ => {}
             }
         }
+        if let Some(through) = compacted_slot {
+            let n = &mut self.nodes[i];
+            let core = n.replica.core_state();
+            n.snapshot = Some((through, core.clone()));
+            n.replica.compact(Timestamp(n.now), Slot(through), core).map_err(|e| e.to_string())?;
+            self.drain(i)?;
+        }
+        for (peer, through) in installs {
+            if let Some((snap_through, core)) = self.nodes[peer].snapshot.clone()
+                && snap_through >= through
+            {
+                let n = &mut self.nodes[i];
+                if n.replica
+                    .install_snapshot(Timestamp(n.now), Slot(snap_through), core.clone())
+                    .map_err(|e| e.to_string())?
+                {
+                    n.next_commit = snap_through + 1;
+                    n.snapshot = Some((snap_through, core));
+                    n.installed_snapshot = true;
+                    self.drain(i)?;
+                }
+            }
+        }
+        if self.nodes[i].replica.metrics().parked_requests > 0
+            && let Some(node) = self.crash_on_parked.take()
+        {
+            self.kill_node(node);
+        }
         if acked_slot.is_some() && self.warmup.is_empty() {
             if let Some(node) = self.silenced.take() {
                 self.isolate(node);
+            }
+            if let Some(node) = self.crash_after_warmup.take() {
+                self.kill_node(node);
             }
             for (k, j) in std::mem::take(&mut self.later).into_iter().enumerate() {
                 self.propose(j, Bytes::from(format!("later{k}@n{j}")))?;
@@ -603,21 +619,34 @@ impl State {
     /// Checks the protocol invariants on every replica, accumulating their evidence, and
     /// where each keeps its entries.
     fn observe(&mut self) -> Result<(), String> {
-        self.nodes.iter().try_for_each(|n| n.replica.check_entries())?;
-        let live: Vec<_> = self.nodes.iter().enumerate().map(|(i, n)| (i, n.replica.inspect())).collect();
-        self.history.observe(&self.epochs, &live)
+        for (i, n) in self.nodes.iter().enumerate() {
+            if self.down != Some(i) {
+                n.replica.check_entries()?;
+            }
+        }
+        let live: Vec<_> = self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.down != Some(*i))
+            .map(|(i, n)| (i, n.replica.inspect()))
+            .collect();
+        self.history.observe(&self.epochs, &live)?;
+        self.custody.check_decided(&self.epochs, self.history.decided())
     }
 
     /// Every client write committed somewhere and acknowledged to its client, every read
-    /// issued and finished, and the membership change in effect and acknowledged.
+    /// issued and finished, and the membership change in effect and acknowledged, with
+    /// every live replica's emitted prefix caught up to its decided prefix.
     fn served(&self) -> bool {
         self.required.iter().all(|p| self.ledger.is_committed(p))
             && self.later.is_empty()
             && self.read_at.is_empty()
-            && self
-                .nodes
-                .iter()
-                .all(|n| n.reads.is_empty() && n.proposed.keys().all(|id| n.acked.contains(id)))
+            && self.nodes.iter().enumerate().filter(|(i, _)| self.down != Some(*i)).all(|(_, n)| {
+                n.reads.is_empty()
+                    && n.proposed.keys().all(|id| n.acked.contains(id))
+                    && n.replica.emitted_index() == n.replica.commit_index()
+            })
             && self.change.is_none()
             && self.rival_change.is_none()
             && (self.reconfigure.is_none() || !self.epochs.applied.is_empty())
@@ -629,14 +658,21 @@ impl State {
     }
 
     fn complete(&self) -> bool {
-        self.served() && self.nodes.iter().all(|n| n.next_commit as usize == self.ledger.slots())
+        self.served()
+            && self
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| self.down != Some(*i))
+                .all(|(_, n)| n.next_commit as usize == self.ledger.slots())
     }
 }
 
 fn initial(cfg: &ModelConfig) -> Result<State, String> {
     let mut nodes = Vec::new();
     for i in 0..cfg.nodes + cfg.spares {
-        let replica = Replica::new(config(cfg.nodes, i, 0), [], Timestamp(0)).map_err(|e| e.to_string())?;
+        let replica = Replica::new(config(cfg.nodes, i, 0, cfg.inline_batch_bytes), [], Timestamp(0))
+            .map_err(|e| e.to_string())?;
         nodes.push(MNode {
             replica,
             durable: Vec::new(),
@@ -646,6 +682,8 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
             proposed: BTreeMap::new(),
             acked: BTreeSet::new(),
             reads: BTreeMap::new(),
+            snapshot: None,
+            installed_snapshot: false,
         });
     }
     let mut init = State {
@@ -654,7 +692,14 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         deviations: cfg.deviations,
         crashes: cfg.crashes,
         isolated: None,
+        down: None,
+        inline_batch_bytes: cfg.inline_batch_bytes,
+        drop_data_to: cfg.drop_data_to,
+        crash_after_warmup: cfg.crash_after_warmup,
+        crash_on_parked: cfg.crash_on_parked,
+        compact_on_commit: cfg.compact_on_commit,
         history: crate::invariants::History::default(),
+        custody: crate::custody::Custody::new(cfg.nodes + cfg.spares),
         ledger: crate::invariants::Ledger::default(),
         required: Vec::new(),
         read_at: cfg.reads.clone(),
@@ -698,7 +743,7 @@ fn initial(cfg: &ModelConfig) -> Result<State, String> {
         init.drain(*at)?;
     }
     for (k, &i) in cfg.proposals.iter().enumerate() {
-        let payload = Bytes::from(format!("w{k}@n{i}"));
+        let payload = init.pad_payload(Bytes::from(format!("w{k}@n{i}")));
         init.warmup.insert(payload.clone());
         init.propose(i, payload)?;
     }
@@ -721,6 +766,10 @@ pub fn check(cfg: &ModelConfig) -> Result<ModelReport, String> {
         report.stepped_aside += usize::from(metrics().any(|m| m.stepped_aside > 0));
         report.deputy += usize::from(state.deputy);
         report.reconfigured += usize::from(!state.epochs.applied.is_empty());
+        report.parked += usize::from(metrics().any(|m| m.parked_requests > 0));
+        report.fetches += usize::from(metrics().any(|m| m.fetches > 0));
+        report.fetch_retries += usize::from(metrics().any(|m| m.fetch_retries > 0));
+        report.snapshots_installed += usize::from(state.nodes.iter().any(|n| n.installed_snapshot));
         if report.states >= cfg.max_states {
             report.exhausted = false;
             break;
@@ -805,7 +854,14 @@ fn settle(mut st: State, max: usize) -> Result<(), String> {
     st.slow_disk = None;
     st.slow_net = None;
     for _ in 0..max {
-        if st.events.is_empty() && st.nodes.iter().all(|n| n.replica.next_deadline().is_none()) {
+        if st.events.is_empty()
+            && st
+                .nodes
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| st.down != Some(*i))
+                .all(|(_, n)| n.replica.next_deadline().is_none())
+        {
             return if st.served() {
                 Ok(())
             } else {

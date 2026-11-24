@@ -37,7 +37,10 @@
 // 0.9: `QPX_DROP_SUPERSEDED`, `QPX_DROP_UNRESOLVED`.
 // 0.10: leader placement: `QPX_CONFIG_PLACEMENT*`, `QPX_METRIC_SUSPICIONS`,
 // `QPX_METRIC_PLACEMENT_MOVES`, `QPX_METRIC_EPOCH`, `QPX_METRIC_LEADER_POSITION`.
-#define QPX_ABI_VERSION_MINOR 10
+// 0.11: batch references: `QPX_CONFIG_INLINE_BATCH_BYTES`, `QPX_METRIC_DATA_SENT`,
+// `QPX_METRIC_FETCHES`, `QPX_METRIC_FETCH_RETRIES`, `QPX_METRIC_FETCHES_SERVED`,
+// `QPX_METRIC_PARKED_REQUESTS`.
+#define QPX_ABI_VERSION_MINOR 11
 
 // Success.
 #define QPX_OK 0
@@ -182,6 +185,21 @@
 // Gauge: this replica's position in the leader order in force, 0 when it leads (ABI 0.10).
 #define QPX_METRIC_LEADER_POSITION 15
 
+// Data batches sent to members as their origin, one per member (ABI 0.11).
+#define QPX_METRIC_DATA_SENT 16
+
+// Data batches asked of a holder (ABI 0.11).
+#define QPX_METRIC_FETCHES 17
+
+// Data-batch fetches retried on the next holder (ABI 0.11).
+#define QPX_METRIC_FETCH_RETRIES 18
+
+// Data batches served to a fetching member (ABI 0.11).
+#define QPX_METRIC_FETCHES_SERVED 19
+
+// Record requests held back until referenced content arrived (ABI 0.11).
+#define QPX_METRIC_PARKED_REQUESTS 20
+
 // Largest batch of entries per slot, bytes (`u32`).
 #define QPX_CONFIG_MAX_BATCH_BYTES 1
 
@@ -213,6 +231,10 @@
 
 // How long placement leaves any change of the leader order alone, nanoseconds (ABI 0.10).
 #define QPX_CONFIG_PLACEMENT_HOLD_NS 10
+
+// Largest forwarded chunk that travels inline, bytes (`u32`, at least 64; default `u32::MAX`
+// off). Larger chunks travel by reference as data batches (ABI 0.11).
+#define QPX_CONFIG_INLINE_BATCH_BYTES 11
 
 // Replica configuration: create it with `qpx_config_new`, adjust it with `qpx_config_set`
 // and `qpx_config_set_leader_order`, pass it to `qpx_replica_new` (which copies it), and

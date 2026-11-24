@@ -1,13 +1,12 @@
 diff --git a/crates/quepaxa/src/replica/entries/back.rs b/crates/quepaxa/src/replica/entries/back.rs
-index a92d442..b325c44 100644
 --- a/crates/quepaxa/src/replica/entries/back.rs
 +++ b/crates/quepaxa/src/replica/entries/back.rs
-@@ -143,8 +143,7 @@ impl Entries {
+@@ -176,8 +176,7 @@ impl Entries {
                  }
              }
              hedged += 1;
 -            self.changes += usize::from(super::is_change(&e));
--            self.pending.push_front(e);
+-            self.pending.push_front(Piece::Entry(e));
 +            let _ = e;
          }
          hedged

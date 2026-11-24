@@ -1,15 +1,16 @@
 //! Recorder side and the decided log: answering record requests, learning decisions,
 //! serving catch-up, and emitting commits in order.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use bytes::Bytes;
 
 use super::entries::Own;
 use super::{Decision, Effect, Replica};
 use crate::api::{Action, DropReason};
-use crate::batch::{self, Kind};
+use crate::batch::{self, Kind, Piece};
 use crate::codec::{Body, reply_proposal};
+use crate::content::PinError;
 use crate::durable::Record;
 use crate::proposal::{Proposal, ValueKey};
 use crate::types::{MAX_SLOT, MAX_STEP, NodeId, ProposalId, Slot, Timestamp};
@@ -33,6 +34,20 @@ impl Replica {
             return;
         }
         let key = proposal.key;
+        let would_change = self.registers.get(&slot).is_none_or(|reg| reg.would_change(step, &proposal));
+        if would_change {
+            // Rule R (#172): apply a changing record only while holding every referenced
+            // data batch, writing its `Data` record ahead of `Recorder`.
+            let Ok(missing) = self.check_refs(&proposal.value) else {
+                self.metrics.messages_rejected += 1;
+                return;
+            };
+            if !missing.is_empty() {
+                self.park_request(slot, from, step, proposal, &missing);
+                return;
+            }
+            let _ = self.pin_and_write_refs(&proposal.value, slot);
+        }
         let reg = self.registers.entry(slot).or_default();
         let before = reg.step;
         if reg.record(step, proposal) {
@@ -58,9 +73,10 @@ impl Replica {
         }
     }
 
-    /// Serves contiguous decided slots from `start`, within half a message budget. The reply
-    /// leaves once everything written so far is durable, and is sent even when empty, so its
-    /// envelope's `commit_index` is durable progress (a removed replica retires on it).
+    /// Serves contiguous decided slots from `start` up to the held prefix, with the content
+    /// of their references, within half a message budget. The reply leaves once everything
+    /// written so far is durable, and is sent even when empty, so its envelope's
+    /// `commit_index` (the held prefix) is durable progress (a removed replica retires on it).
     pub(super) fn on_catch_up(&mut self, to: NodeId, start: Slot) {
         if start.0 < self.floor {
             self.send(to, Body::Compacted { through: Slot(self.floor - 1) });
@@ -69,19 +85,38 @@ impl Replica {
         let budget = self.cfg.max_message_bytes as usize / 2;
         let mut size = 0;
         let mut proposals = Vec::new();
-        // Entries must be contiguous from `start`.
-        for (expected, (slot, d)) in (start.0..=u64::MAX).zip(self.log.range(start..)) {
-            if slot.0 != expected {
+        let mut content = Vec::new();
+        let mut included = BTreeSet::new();
+        for expected in start.0..self.held {
+            let Some(d) = self.log.get(&Slot(expected)) else { break };
+            let mut slot_size = d.proposal.value.len() + 64;
+            let mut extra = Vec::new();
+            let mut ok = true;
+            for r in batch::refs(&d.proposal.value) {
+                if included.contains(&r.id) || extra.iter().any(|(id, _)| *id == r.id) {
+                    continue;
+                }
+                let Some(bytes) = self.content.get_checked(r) else {
+                    ok = false;
+                    break;
+                };
+                slot_size += bytes.len() + 25;
+                extra.push((r.id, bytes.clone()));
+            }
+            if !ok {
                 break;
             }
-            size += d.proposal.value.len() + 64;
-            if !proposals.is_empty() && size > budget {
+            if !proposals.is_empty() && size + slot_size > budget {
                 break;
             }
+            size += slot_size;
             proposals.push(d.proposal.clone());
+            for (id, bytes) in extra {
+                included.insert(id);
+                content.push((id, bytes));
+            }
         }
-        // Values hold no references yet (#172): every page is self-contained without content.
-        self.send_gated(to, Body::Entries { first: start, proposals, content: Vec::new() });
+        self.send_gated(to, Body::Entries { first: start, proposals, content });
     }
 
     /// A peer announced `slot` decided with the value under `key`.
@@ -98,7 +133,7 @@ impl Replica {
             self.watch.progressed = self.now;
         }
         if let Some(value) = self.resolve_decided(slot, key) {
-            self.learn(slot, Proposal { priority, key, value }, false);
+            self.learn(slot, Proposal { priority, key, value }, false, Some(from));
             return;
         }
         if slot.0 > MAX_SLOT || self.unresolved.contains_key(&slot) {
@@ -120,6 +155,7 @@ impl Replica {
         let held = reg.flatten().find(|p| p.key == key).map(|p| &p.value);
         held.or_else(|| self.proposers.get(&slot).and_then(|a| a.prop.value_of(key)))
             .or_else(|| self.entries.batch_value(key))
+            .or_else(|| self.parked_value(slot, key))
             .cloned()
     }
 
@@ -155,17 +191,22 @@ impl Replica {
         self.unresolved.values().map(|(_, t)| t.after(self.cfg.retransmit_interval)).min()
     }
 
-    pub(super) fn learn(&mut self, slot: Slot, proposal: Proposal, broadcast: bool) {
+    pub(super) fn learn(&mut self, slot: Slot, proposal: Proposal, broadcast: bool, hint: Option<NodeId>) {
         self.unresolved.remove(&slot);
+        self.clear_parked_slot(slot);
         if slot.0 < self.emitted || slot.0 > MAX_SLOT || self.log.contains_key(&slot) {
             return;
         }
         self.metrics.slots_decided += 1;
+        let missing = self.pin_and_write_refs(&proposal.value, slot).unwrap_or_default();
         self.gate.write(Record::Decided { slot, proposal: proposal.clone() }.encode());
-        if let Some(a) = self.proposers.remove(&slot)
-            && self.entries.batch_key(a.batch).is_some_and(|k| k != proposal.key)
-        {
-            self.lost_slot(a.batch, proposal.key.origin, a.started);
+        if let Some(a) = self.proposers.remove(&slot) {
+            if a.waiting_content {
+                self.release_value_refs(&a.prop.working().value);
+            }
+            if self.entries.batch_key(a.batch).is_some_and(|k| k != proposal.key) {
+                self.lost_slot(a.batch, proposal.key.origin, a.started);
+            }
         }
         if broadcast {
             // Everyone in the current or a pending epoch: joining replicas catch up early.
@@ -174,8 +215,14 @@ impl Replica {
                 self.send(peer, Body::Decided { slot, priority: proposal.priority, key: proposal.key });
             }
         }
+        let origin = proposal.key.origin;
         self.log.insert(slot, Decision { proposal });
+        if !missing.is_empty() {
+            self.note_missing_slot(slot, hint);
+            self.fetch_refs(slot, hint.unwrap_or(origin), &missing);
+        }
         self.advance_committed();
+        self.advance_held();
         // A decision is already durable at a majority of recorders, so it is applied before
         // its local record is: a replica that crashes first learns it again from peers.
         self.emit_commits();
@@ -219,14 +266,26 @@ impl Replica {
     pub(super) fn emit_commits(&mut self) {
         while let Some(d) = self.log.get(&Slot(self.emitted)) {
             let slot = Slot(self.emitted);
+            let refs = batch::refs(&d.proposal.value);
+            if !refs.is_empty() {
+                let missing: Vec<_> =
+                    refs.into_iter().filter(|r| self.content.check(*r) == Err(PinError::Missing)).collect();
+                if !missing.is_empty() {
+                    let target = self.decided_hint(slot).unwrap_or(d.proposal.key.origin);
+                    self.note_missing_slot(slot, Some(target));
+                    self.fetch_refs(slot, target, &missing);
+                    break;
+                }
+            }
             let key = d.proposal.key;
+            let value = d.proposal.value.clone();
             self.applied_schedule.observe(slot, key.origin);
             // Local changes every replica ignores, reported as such rather than committed.
             let mut superseded = Vec::new();
             // A batch may carry one change twice (a forward delivered twice); the first copy
             // decides, as dedup keeps only it below.
             let mut seen = Vec::new();
-            for (key, payload) in batch::changes(&d.proposal.value) {
+            for (key, payload) in batch::changes(&value) {
                 if seen.contains(&key) {
                     continue;
                 }
@@ -241,12 +300,10 @@ impl Replica {
                     None => {}
                 }
             }
-            let mut items = batch::decode(&d.proposal.value).unwrap_or_else(|_| {
-                self.metrics.corrupt_batches += 1;
-                Vec::new()
-            });
+            let mut items = self.expand_batch(&value);
             items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
             self.entries.dedup_grew();
+            self.release_committed_own_data();
             self.count_writes(&items);
             let mine: Vec<ProposalId> = items
                 .iter()
@@ -284,13 +341,41 @@ impl Replica {
                 }
             }
             if key.origin == self.me && key.incarnation == self.incarnation {
-                self.entries.applied(key.seq);
+                let refs = self.entries.applied(key.seq);
+                for r in refs {
+                    self.maybe_release_content(r.id);
+                }
             }
             self.emitted += 1;
             if self.cfg.placement {
                 self.note_applied(slot);
             }
         }
+    }
+
+    fn expand_batch(&mut self, value: &Bytes) -> Vec<batch::Item> {
+        let Ok(pieces) = batch::decode_pieces(value) else {
+            self.metrics.corrupt_batches += 1;
+            return Vec::new();
+        };
+        let mut items = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            match piece {
+                Piece::Entry(item) => items.push(item),
+                Piece::Ref(r) => {
+                    let Some(bytes) = self.content.get_checked(r) else {
+                        self.metrics.corrupt_batches += 1;
+                        return Vec::new();
+                    };
+                    let Ok(mut inner) = batch::decode_content(bytes) else {
+                        self.metrics.corrupt_batches += 1;
+                        return Vec::new();
+                    };
+                    items.append(&mut inner);
+                }
+            }
+        }
+        items
     }
 
     fn observe_latency(&mut self, sample: u64) {

@@ -1,0 +1,12 @@
+diff --git a/crates/quepaxa/src/replica/messages.rs b/crates/quepaxa/src/replica/messages.rs
+--- a/crates/quepaxa/src/replica/messages.rs
++++ b/crates/quepaxa/src/replica/messages.rs
+@@ -10,7 +10,7 @@ impl Replica {
+             config_epoch: 0,
+             from: self.me,
+             to,
+-            commit_index: self.held,
++            commit_index: self.committed,
+         };
+         Outbound { to, bytes: Message { env, body }.encode() }
+     }

@@ -10,7 +10,7 @@ impl Replica {
             config_epoch: 0,
             from: self.me,
             to,
-            commit_index: self.committed,
+            commit_index: self.held,
         };
         Outbound { to, bytes: Message { env, body }.encode() }
     }
@@ -41,10 +41,16 @@ impl Replica {
         // have lost every replica it knows to later changes: only members of an epoch it has
         // not learned yet can tell it the log, so it listens to anyone in the cluster.
         let known = self.outside() || self.cfg.members.contains(&from) || self.schedule.knows(from);
-        // Anyone may read: a joining or removed replica asks members it may not know yet.
+        // Anyone may read, disseminate or fetch: a joining or removed replica exchanges
+        // these with members it may not know yet.
         let request = matches!(
             msg.body,
-            Body::RecordRequest { .. } | Body::CatchUp { .. } | Body::Forward { .. } | Body::ReadQuery { .. }
+            Body::RecordRequest { .. }
+                | Body::CatchUp { .. }
+                | Body::Forward { .. }
+                | Body::ReadQuery { .. }
+                | Body::Data { .. }
+                | Body::Fetch { .. }
         );
         if msg.env.to != self.me || from == self.me || !(known || request) {
             self.metrics.messages_rejected += 1;
@@ -83,20 +89,8 @@ impl Replica {
                     }
                     Body::Decided { slot, priority, key } => self.on_decided(from, slot, priority, key),
                     Body::CatchUp { from: start } => self.on_catch_up(from, start),
-                    // Content resolves references, which are refused until rules R and P
-                    // (#172): a value holding one never commits its entries.
-                    Body::Entries { first, proposals, content: _ } => {
-                        let empty = proposals.is_empty();
-                        for (i, p) in proposals.into_iter().enumerate() {
-                            let Some(slot) = first.0.checked_add(i as u64) else { break };
-                            self.learn(Slot(slot), p, false);
-                        }
-                        self.check_probe_answers();
-                        // A late or duplicate page from another peer is still useful, but only
-                        // the active request's answer moves the catch-up along.
-                        if let Some(peer) = self.catch_up.page(from, empty, self.committed, self.now) {
-                            self.request_catch_up(peer);
-                        }
+                    Body::Entries { first, proposals, content } => {
+                        self.on_entries(from, first, proposals, content)
                     }
                     Body::Forward { seq, batch } => self.on_forward(from, seq, &batch),
                     // Arriving at all shows the sender alive (`heard_from`, `watch.rs`); the
@@ -111,8 +105,8 @@ impl Replica {
                         self.on_rtt_probe(from, incarnation, sent, commit, table)
                     }
                     Body::RttReply { incarnation, sent } => self.on_rtt_reply(from, incarnation, sent),
-                    // Nothing references a data batch yet (#172), so none is stored or served.
-                    Body::Data { .. } | Body::Fetch { .. } => self.metrics.messages_rejected += 1,
+                    Body::Data { id, bytes } => self.on_data(from, id, bytes),
+                    Body::Fetch { slot, ids } => self.on_fetch(from, slot, ids),
                 }
             }
             // Before driving: a retirement barrier it submits is proposed in this round.

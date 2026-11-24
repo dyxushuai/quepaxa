@@ -1,6 +1,6 @@
 --- a/crates/quepaxa/src/replica/log.rs
 +++ b/crates/quepaxa/src/replica/log.rs
-@@ -112,7 +112,7 @@
+@@ -152,7 +152,7 @@
      /// replica holds under it is the decided one.
      fn resolve_decided(&self, slot: Slot, key: ValueKey) -> Option<Bytes> {
          let reg = self.registers.get(&slot).into_iter().flat_map(|r| [&r.first, &r.agg, &r.prev_agg]);
@@ -8,4 +8,4 @@
 +        let held = reg.flatten().next().map(|p| &p.value);
          held.or_else(|| self.proposers.get(&slot).and_then(|a| a.prop.value_of(key)))
              .or_else(|| self.entries.batch_value(key))
-             .cloned()
+             .or_else(|| self.parked_value(slot, key))

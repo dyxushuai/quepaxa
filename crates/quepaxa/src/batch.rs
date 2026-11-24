@@ -78,10 +78,28 @@ pub(crate) struct Ref {
     pub crc: u32,
 }
 
+/// One element of a slot value or forward: an inline entry, or a reference to a data batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "model", derive(Hash))]
+pub(crate) enum Piece {
+    Entry(Item),
+    Ref(Ref),
+}
+
 const HEADER: usize = 4;
+const REF_ENCODED_LEN: usize = 4 + 8 + 8 + 1 + 4 + REF_PAYLOAD;
 
 fn encoded_len(i: &Item) -> usize {
     4 + 8 + 8 + 1 + 4 + i.entry.payload.len()
+}
+
+fn piece_weight(p: &Piece) -> usize {
+    match p {
+        Piece::Entry(i) => encoded_len(i),
+        // Count both the 33-byte wire ref and the referenced batch's encoded length so the
+        // expanded slot stays within `max_batch_bytes`.
+        Piece::Ref(r) => REF_ENCODED_LEN.saturating_add(r.len as usize),
+    }
 }
 
 /// Whether `item` fits in a batch of at most `max` encoded bytes on its own.
@@ -89,8 +107,8 @@ pub(crate) fn fits_alone(item: &Item, max: usize) -> bool {
     HEADER + encoded_len(item) <= max
 }
 
-/// Collects items into a batch of at most `max` encoded bytes; the first item is always
-/// taken (items too large on their own are rejected when proposed).
+/// Collects inline items into a batch of at most `max` encoded bytes; the first item is
+/// always taken (items too large on their own are rejected when proposed).
 pub(crate) struct Builder {
     items: Vec<Item>,
     size: usize,
@@ -122,27 +140,92 @@ impl Builder {
     }
 }
 
+/// Collects slot/forward pieces (inline entries and references) within `max` bytes of
+/// expanded batch budget; the first piece is always taken.
+pub(crate) struct PieceBuilder {
+    pieces: Vec<Piece>,
+    size: usize,
+    max: usize,
+}
+
+impl PieceBuilder {
+    pub fn new(max: usize) -> Self {
+        Self { pieces: Vec::new(), size: HEADER, max }
+    }
+
+    pub fn fits(&self, piece: &Piece) -> bool {
+        self.pieces.is_empty() || self.size.saturating_add(piece_weight(piece)) <= self.max
+    }
+
+    pub fn push(&mut self, piece: Piece) {
+        self.size = self.size.saturating_add(piece_weight(&piece));
+        self.pieces.push(piece);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pieces.is_empty()
+    }
+
+    pub fn take(&mut self) -> Vec<Piece> {
+        self.size = HEADER;
+        core::mem::take(&mut self.pieces)
+    }
+}
+
+fn put_item(out: &mut Vec<u8>, Item { entry: e, kind }: &Item) {
+    out.put_u32_le(e.origin.0);
+    out.put_u64_le(e.incarnation);
+    out.put_u64_le(e.id.0);
+    out.put_u8(match kind {
+        Kind::App => ENTRY_APP,
+        Kind::Barrier => ENTRY_BARRIER,
+        Kind::Reconfigure => ENTRY_RECONFIGURE,
+    });
+    out.put_u32_le(e.payload.len() as u32);
+    out.put_slice(&e.payload);
+}
+
+fn put_ref(out: &mut Vec<u8>, r: Ref) {
+    out.put_u32_le(r.id.origin.0);
+    out.put_u64_le(r.id.incarnation);
+    out.put_u64_le(r.id.seq);
+    out.put_u8(ENTRY_REF);
+    out.put_u32_le(REF_PAYLOAD as u32);
+    out.put_u32_le(r.len);
+    out.put_u32_le(r.crc);
+}
+
 pub(crate) fn encode(items: &[Item]) -> Bytes {
     let mut out = Vec::with_capacity(HEADER + items.iter().map(encoded_len).sum::<usize>());
     out.put_u32_le(items.len() as u32);
-    for Item { entry: e, kind } in items {
-        out.put_u32_le(e.origin.0);
-        out.put_u64_le(e.incarnation);
-        out.put_u64_le(e.id.0);
-        out.put_u8(match kind {
-            Kind::App => ENTRY_APP,
-            Kind::Barrier => ENTRY_BARRIER,
-            Kind::Reconfigure => ENTRY_RECONFIGURE,
-        });
-        out.put_u32_le(e.payload.len() as u32);
-        out.put_slice(&e.payload);
+    for item in items {
+        put_item(&mut out, item);
+    }
+    Bytes::from(out)
+}
+
+pub(crate) fn encode_pieces(pieces: &[Piece]) -> Bytes {
+    let wire_len: usize = pieces
+        .iter()
+        .map(|p| match p {
+            Piece::Entry(i) => encoded_len(i),
+            Piece::Ref(_) => REF_ENCODED_LEN,
+        })
+        .sum();
+    let mut out = Vec::with_capacity(HEADER + wire_len);
+    out.put_u32_le(pieces.len() as u32);
+    for piece in pieces {
+        match piece {
+            Piece::Entry(i) => put_item(&mut out, i),
+            Piece::Ref(r) => put_ref(&mut out, *r),
+        }
     }
     Bytes::from(out)
 }
 
 /// The membership changes in an encoded batch, in order: `(key, payload)`. Allocates only
-/// when there is one, so it is cheap on every decided slot. A batch [`decode`] rejects has
-/// none: the same checks apply here.
+/// when there is one, so it is cheap on every decided slot. Control entries are always
+/// inline, so well-formed references are skipped; a batch [`decode_pieces`] rejects has none.
 pub(crate) fn changes(buf: &Bytes) -> Vec<((NodeId, u64, ProposalId), Bytes)> {
     let mut found = Vec::new();
     let mut r = Reader::new(buf);
@@ -154,18 +237,26 @@ pub(crate) fn changes(buf: &Bytes) -> Vec<((NodeId, u64, ProposalId), Bytes)> {
             return Vec::new();
         };
         let start = r.pos();
-        if r.take(len as usize).is_err() {
+        let Ok(payload) = r.take(len as usize) else {
+            return Vec::new();
+        };
+        if id == u64::MAX {
             return Vec::new();
         }
-        // A reference is refused as `decode` refuses it, until rules R and P resolve it.
-        if !matches!(kind, ENTRY_APP | ENTRY_BARRIER | ENTRY_RECONFIGURE) || id == u64::MAX {
-            return Vec::new();
-        }
-        if kind == ENTRY_RECONFIGURE {
-            found.push((
-                (NodeId(origin), incarnation, ProposalId(id)),
-                buf.slice(start..start + len as usize),
-            ));
+        match kind {
+            ENTRY_APP | ENTRY_BARRIER => {}
+            ENTRY_RECONFIGURE => {
+                found.push((
+                    (NodeId(origin), incarnation, ProposalId(id)),
+                    buf.slice(start..start + len as usize),
+                ));
+            }
+            ENTRY_REF => {
+                if parse_ref(DataId { origin: NodeId(origin), incarnation, seq: id }, payload).is_none() {
+                    return Vec::new();
+                }
+            }
+            _ => return Vec::new(),
         }
     }
     if r.finish().is_err() { Vec::new() } else { found }
@@ -221,13 +312,12 @@ pub(crate) fn push_ref(batch: &Bytes, r: Ref) -> Bytes {
     Bytes::from(out)
 }
 
-/// The inline items of an encoded batch. A batch holding a well-formed reference is
-/// [`DecodeError::Refused`]: nothing resolves references to their entries yet (#172).
-pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
+/// The pieces (inline items and data-batch references) of an encoded slot value or forward.
+pub(crate) fn decode_pieces(buf: &Bytes) -> Result<Vec<Piece>, DecodeError> {
     let mut r = Reader::new(buf);
     let n = r.u32()? as usize;
     // Each entry takes at least 25 bytes, which bounds the allocation by the input size.
-    let mut entries = Vec::with_capacity(n.min(buf.len() / 25));
+    let mut pieces = Vec::with_capacity(n.min(buf.len() / 25));
     for _ in 0..n {
         let origin = NodeId(r.u32()?);
         let incarnation = r.u64()?;
@@ -236,26 +326,58 @@ pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
             u64::MAX => return Err(DecodeError::BadTag),
             id => ProposalId(id),
         };
-        let kind = match r.u8()? {
-            ENTRY_APP => Kind::App,
-            ENTRY_BARRIER => Kind::Barrier,
-            ENTRY_RECONFIGURE => Kind::Reconfigure,
-            ENTRY_REF => {
-                let len = r.u32()? as usize;
-                let payload = r.take(len)?;
-                let id = DataId { origin, incarnation, seq: id.0 };
-                return Err(parse_ref(id, payload).map_or(DecodeError::BadTag, |_| DecodeError::Refused));
-            }
-            _ => return Err(DecodeError::BadTag),
-        };
+        let tag = r.u8()?;
         let len = r.u32()? as usize;
         let start = r.pos();
-        r.take(len)?;
-        let entry = Entry { origin, incarnation, id, payload: buf.slice(start..start + len) };
-        entries.push(Item { entry, kind });
+        let payload = r.take(len)?;
+        match tag {
+            ENTRY_APP | ENTRY_BARRIER | ENTRY_RECONFIGURE => {
+                let kind = match tag {
+                    ENTRY_APP => Kind::App,
+                    ENTRY_BARRIER => Kind::Barrier,
+                    _ => Kind::Reconfigure,
+                };
+                let entry = Entry { origin, incarnation, id, payload: buf.slice(start..start + len) };
+                pieces.push(Piece::Entry(Item { entry, kind }));
+            }
+            ENTRY_REF => {
+                let id = DataId { origin, incarnation, seq: id.0 };
+                let reference = parse_ref(id, payload).ok_or(DecodeError::BadTag)?;
+                pieces.push(Piece::Ref(reference));
+            }
+            _ => return Err(DecodeError::BadTag),
+        }
     }
     r.finish()?;
-    Ok(entries)
+    Ok(pieces)
+}
+
+/// Decodes a data batch's content: application entries only (no control entries and no
+/// nested references).
+pub(crate) fn decode_content(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
+    let pieces = decode_pieces(buf)?;
+    let mut items = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        match piece {
+            Piece::Entry(item) if item.kind == Kind::App => items.push(item),
+            _ => return Err(DecodeError::BadTag),
+        }
+    }
+    Ok(items)
+}
+
+/// The inline items of an encoded batch (no references).
+#[cfg(test)]
+pub(crate) fn decode(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
+    let pieces = decode_pieces(buf)?;
+    let mut items = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        match piece {
+            Piece::Entry(item) => items.push(item),
+            Piece::Ref(_) => return Err(DecodeError::BadTag),
+        }
+    }
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -350,15 +472,22 @@ mod tests {
     }
 
     #[test]
-    fn references_are_found_and_refused() {
+    fn references_and_inline_items_round_trip_together() {
         let es = vec![entry(1, 2, b"\x01\0\0\0\x05\0\0\0"), entry(1, 3, b"")];
         let inline = encode(&es);
         assert!(refs(&inline).is_empty());
         let mixed = push_ref(&inline, reference());
         assert_eq!(refs(&mixed), vec![reference()]);
-        assert_eq!(decode(&mixed), Err(DecodeError::Refused));
-        // The change in the same batch is refused with it, as `decode` refuses its entries.
-        assert!(changes(&mixed).is_empty());
+        let pieces = vec![Piece::Entry(es[0].clone()), Piece::Entry(es[1].clone()), Piece::Ref(reference())];
+        assert_eq!(encode_pieces(&pieces), mixed);
+        assert_eq!(decode_pieces(&mixed), Ok(pieces));
+        // Control entries in the same batch remain visible without resolving references.
+        assert_eq!(changes(&mixed).len(), 1);
+        // Data batch content allows only application entries.
+        let app = vec![Item { kind: Kind::App, ..es[0].clone() }];
+        assert_eq!(decode_content(&encode(&app)), Ok(app));
+        assert_eq!(decode_content(&mixed), Err(DecodeError::BadTag));
+        assert_eq!(decode_content(&inline), Err(DecodeError::BadTag));
     }
 
     #[test]
@@ -368,7 +497,7 @@ mod tests {
         bad[25..29].copy_from_slice(&7u32.to_le_bytes());
         bad.pop();
         let bad = Bytes::from(bad);
-        assert_eq!(decode(&bad), Err(DecodeError::BadTag));
+        assert_eq!(decode_pieces(&bad), Err(DecodeError::BadTag));
         assert!(refs(&bad).is_empty());
         // Trailing bytes after a good reference make the whole batch corrupt.
         let mut long = push_ref(&encode(&[]), reference()).to_vec();
@@ -380,13 +509,21 @@ mod tests {
     fn decode_never_panics() {
         bolero::check!().for_each(|input: &[u8]| {
             let buf = Bytes::copy_from_slice(input);
-            let decoded = decode(&buf);
+            let decoded = decode_pieces(&buf);
             let found = refs(&buf);
-            // Only a well-formed batch yields references, and `decode` refuses it.
-            assert!(found.is_empty() || decoded == Err(DecodeError::Refused));
-            if decoded.is_ok() {
+            if let Ok(pieces) = &decoded {
+                let expected: Vec<Ref> = pieces
+                    .iter()
+                    .filter_map(|p| match p {
+                        Piece::Ref(r) => Some(*r),
+                        Piece::Entry(_) => None,
+                    })
+                    .collect();
+                assert_eq!(found, expected);
+            } else {
                 assert!(found.is_empty());
             }
+            let _ = decode_content(&buf);
             let _ = changes(&buf);
         });
     }

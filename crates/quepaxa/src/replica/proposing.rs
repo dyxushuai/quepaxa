@@ -9,11 +9,13 @@
 //! never leaves a gap. δ adapts to four times the smoothed commit latency of entries that
 //! were not hedged, within `[hedge_min, hedge_max]`. None of these timers affects safety.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use super::{Active, Replica};
-use crate::batch;
+use crate::batch::{self, Kind, Piece};
 use crate::codec::{Body, WireProposal};
+use crate::content::PinError;
 use crate::durable::Record;
 use crate::proposal::{LEADER_PRIORITY, Proposal};
 use crate::proposer::{Progress, Reply, SlotProposer};
@@ -45,9 +47,17 @@ impl Replica {
             self.metrics.messages_rejected += 1;
             return;
         };
+        for p in first.iter().chain(prev_agg.iter()) {
+            active.holders.insert(p.key, from);
+        }
         match active.prop.on_reply(from, Reply { req_step, step, first, prev_agg }, &mut self.rng) {
             Progress::Waiting => {}
-            Progress::Advanced => self.send_requests(slot, false),
+            Progress::Advanced => {
+                let adopted = active.prop.working().key;
+                active.holder = active.holders.get(&adopted).copied();
+                active.holders.clear();
+                self.send_requests(slot, false);
+            }
             Progress::Decided(p) => {
                 if req_step == 4 && p.priority == LEADER_PRIORITY {
                     self.metrics.fast_path_decisions += 1;
@@ -60,7 +70,7 @@ impl Replica {
                 }
                 #[cfg(feature = "model")]
                 self.decided_steps.insert(slot, (p.clone(), req_step));
-                self.learn(slot, p, true);
+                self.learn(slot, p, true, Some(from));
             }
         }
     }
@@ -101,14 +111,38 @@ impl Replica {
 
     /// Sends the current step's unanswered requests; `resend` skips the local recorder,
     /// whose delivery is reliable. Resends back off (`resend_wait`); a new step starts from
-    /// the floor again.
+    /// the floor again. Rule P (#172): holds back record requests until this replica holds
+    /// every data batch referenced by the proposer's working value.
     pub(super) fn send_requests(&mut self, slot: Slot, resend: bool) {
+        let Some((value, holder)) = self.proposers.get(&slot).map(|a| {
+            let w = a.prop.working();
+            (w.value.clone(), a.holder.unwrap_or(w.key.origin))
+        }) else {
+            return;
+        };
+        match self.pin_refs_for_proposer(&value, slot) {
+            Err(()) => {
+                if let Some(a) = self.proposers.remove(&slot) {
+                    self.release_value_refs(&a.prop.working().value);
+                }
+                return;
+            }
+            Ok(missing) if !missing.is_empty() => {
+                if let Some(a) = self.proposers.get_mut(&slot) {
+                    a.waiting_content = true;
+                }
+                self.fetch_refs(slot, holder, &missing);
+                return;
+            }
+            Ok(_) => {}
+        }
         let (me, now) = (self.me, self.now);
         let h_ready = self.reservation.covers(slot);
         let Some(a) = self.proposers.get_mut(&slot) else { return };
         let resent = resend.then(|| a.prop.resent());
         let wait = self.resend_wait(resent);
         let Some(a) = self.proposers.get_mut(&slot) else { return };
+        a.waiting_content = false;
         a.sent_at = now;
         a.resend_at = now.after(wait);
         let step = a.prop.step();
@@ -138,22 +172,38 @@ impl Replica {
         self.commit_latency.map_or(hi / 4, |l| l.saturating_mul(4)).clamp(lo, hi)
     }
 
-    /// A batch of entries a follower handed to this replica: as the leader, or as the deputy
-    /// of a leader that follower suspects (`watch.rs`), which proposes them itself.
+    /// A batch of entries (or references) a follower handed to this replica: as the leader,
+    /// or as the deputy of a leader that follower suspects (`watch.rs`), which proposes them
+    /// itself.
     ///
-    /// Every forward taken is acknowledged by its number (`forwards.rs`). Entries already
-    /// committed are dropped: a forward sent again may carry some.
+    /// Every forward taken is acknowledged by its number (`forwards.rs`). Inline entries
+    /// already committed are dropped: a forward sent again may carry some.
     pub(super) fn on_forward(&mut self, from: NodeId, seq: u64, bytes: &bytes::Bytes) {
-        let Ok(mut entries) = batch::decode(bytes) else {
+        let Ok(mut pieces) = batch::decode_pieces(bytes) else {
             self.metrics.messages_rejected += 1;
             return;
         };
-        entries.retain(|i| {
-            let (o, inc, id) = i.key();
-            !self.dedup.contains(o, inc, id)
+        pieces.retain(|p| match p {
+            Piece::Entry(i) => {
+                let (o, inc, id) = i.key();
+                !self.dedup.contains(o, inc, id)
+            }
+            Piece::Ref(_) => true,
         });
-        let cap =
-            self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
+        let mut refs = Vec::new();
+        let mut missing = Vec::new();
+        for p in &pieces {
+            if let Piece::Ref(r) = *p {
+                match self.content.check(r) {
+                    Ok(()) => refs.push(r.id),
+                    Err(PinError::Missing) => missing.push(r),
+                    Err(PinError::Mismatch) => {
+                        self.metrics.messages_rejected += 1;
+                        return;
+                    }
+                }
+            }
+        }
         // Stepped aside, this replica hands them on (`watch.rs`); so it does for a follower
         // that has not yet seen this replica stop leading, whose entries belong to the new
         // leader, not to a deputy.
@@ -163,7 +213,19 @@ impl Replica {
             .get(&from)
             .is_some_and(|&c| self.schedule.routing_order(Slot(c))[0] == self.me);
         let to_pending = self.proposes_directly() || self.watch.aside || lagging;
-        if self.entries.received(entries, to_pending, cap) {
+        if !missing.is_empty() {
+            // Do not let a forward referencing missing data enter `entries` (if its origin
+            // crashed before anyone received `Data`, it could otherwise poison a local batch
+            // and wedge a slot). Stage it briefly while fetching from `from`.
+            self.stage_forward(from, seq, to_pending, pieces, &missing);
+            return;
+        }
+        let cap =
+            self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
+        if self.entries.received(pieces, to_pending, cap) {
+            for id in refs {
+                self.content.keep(id);
+            }
             self.watch.fwd.took(from, seq);
             self.ack_forward(from);
         }
@@ -208,21 +270,95 @@ impl Replica {
     }
 
     /// Hands what is pending to the target, unless this replica proposes it `direct`ly.
+    /// Application chunks larger than `inline_batch_bytes` go to every member as `Data`, and
+    /// travel in `Forward` as compact `Ref` items; control entries stay inline.
     fn forward_pending(&mut self, direct: bool) {
-        let entries = self.entries.route(direct, self.now);
-        if entries.is_empty() {
+        let pieces = self.entries.route(direct, self.now);
+        if pieces.is_empty() {
             return;
         }
+        let routed_refs: Vec<_> = pieces
+            .iter()
+            .filter_map(|p| match *p {
+                Piece::Ref(r) => Some(r.id),
+                Piece::Entry(_) => None,
+            })
+            .collect();
         let leader = self.target();
         self.forwarded_now();
-        let mut chunk = batch::Builder::new(self.cfg.max_batch_bytes as usize);
-        for e in entries {
-            if !chunk.fits(&e) {
-                self.send_forward(leader, chunk.take());
+        let (me, inc, max) = (self.me, self.incarnation, self.cfg.max_batch_bytes as usize);
+        let own_ids = |ps: &[Piece]| -> Vec<_> {
+            ps.iter()
+                .filter_map(|p| match p {
+                    Piece::Entry(i) if i.entry.origin == me && i.entry.incarnation == inc => Some(i.entry.id),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut chunk = batch::PieceBuilder::new(max);
+        let flush_inline = |this: &mut Self, chunk: &mut batch::PieceBuilder| {
+            if !chunk.is_empty() {
+                let ps = chunk.take();
+                let ids = own_ids(&ps);
+                this.send_forward(leader, ps, ids, Vec::new());
             }
-            chunk.push(e);
+        };
+        if self.cfg.inline_batch_bytes >= self.cfg.max_batch_bytes {
+            for p in pieces {
+                if !chunk.fits(&p) {
+                    flush_inline(self, &mut chunk);
+                }
+                chunk.push(p);
+            }
+        } else {
+            let mut apps = batch::Builder::new(max);
+            let flush_apps = |this: &mut Self, apps: &mut batch::Builder, chunk: &mut batch::PieceBuilder| {
+                if apps.is_empty() {
+                    return;
+                }
+                let items = apps.take();
+                let ids: Vec<_> = items
+                    .iter()
+                    .filter(|i| i.entry.origin == me && i.entry.incarnation == inc)
+                    .map(|i| i.entry.id)
+                    .collect();
+                let disseminated = this.disseminate_chunk(items);
+                if let [Piece::Ref(r)] = disseminated.as_slice() {
+                    flush_inline(this, chunk);
+                    let r = *r;
+                    this.send_forward(leader, disseminated, ids, alloc::vec![r]);
+                } else {
+                    for p in disseminated {
+                        if !chunk.fits(&p) {
+                            flush_inline(this, chunk);
+                        }
+                        chunk.push(p);
+                    }
+                }
+            };
+            for p in pieces {
+                match p {
+                    Piece::Entry(e) if e.kind == Kind::App => {
+                        if !apps.fits(&e) {
+                            flush_apps(self, &mut apps, &mut chunk);
+                        }
+                        apps.push(e);
+                    }
+                    other => {
+                        flush_apps(self, &mut apps, &mut chunk);
+                        if !chunk.fits(&other) {
+                            flush_inline(self, &mut chunk);
+                        }
+                        chunk.push(other);
+                    }
+                }
+            }
+            flush_apps(self, &mut apps, &mut chunk);
         }
-        self.send_forward(leader, chunk.take());
+        flush_inline(self, &mut chunk);
+        for id in routed_refs {
+            self.maybe_release_content(id);
+        }
     }
 
     /// No longer the leader (an order change took effect): the entries of batches not yet in
@@ -246,7 +382,10 @@ impl Replica {
             return;
         }
         let deciding = winner == self.target() && self.watch.progressed > started;
-        self.entries.lost_slot(seq, deciding, &self.dedup);
+        let refs = self.entries.lost_slot(seq, deciding, &self.dedup);
+        for r in refs {
+            self.maybe_release_content(r.id);
+        }
     }
 
     /// The next slot in the window this replica may start. The leader proposing its own and
@@ -289,7 +428,16 @@ impl Replica {
         let prop = SlotProposer::new(recorders, leader, proposal, &mut self.rng);
         self.proposers.insert(
             slot,
-            Active { prop, batch: seq, resend_at: self.now, sent_at: self.now, started: self.now },
+            Active {
+                prop,
+                batch: seq,
+                resend_at: self.now,
+                sent_at: self.now,
+                started: self.now,
+                waiting_content: false,
+                holder: None,
+                holders: BTreeMap::new(),
+            },
         );
         self.send_requests(slot, false);
     }
@@ -304,7 +452,7 @@ impl Replica {
     }
 
     pub(super) fn earliest_timer(&self) -> Option<Timestamp> {
-        let resend = self.proposers.values().map(|a| a.resend_at);
+        let resend = self.proposers.values().filter(|a| !a.waiting_content).map(|a| a.resend_at);
         let stall = self.stalled().map(|(_, at)| at);
         let hedge = self.entries.forwarded_since().filter_map(|(id, at)| self.hedge_at(id, at)).min();
         // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
@@ -321,6 +469,7 @@ impl Replica {
             .chain(self.aside_at().filter(|_| !self.watch.aside))
             .chain(self.placement.next_probe)
             .chain(self.earliest_unresolved())
+            .chain(self.earliest_fetch())
             .min()
     }
 
@@ -338,8 +487,13 @@ impl Replica {
         }
         self.fire_probe();
         self.retry_unresolved();
-        let due: Vec<Slot> =
-            self.proposers.iter().filter(|(_, a)| a.resend_at <= now).map(|(s, _)| *s).collect();
+        self.retry_fetches();
+        let due: Vec<Slot> = self
+            .proposers
+            .iter()
+            .filter(|(_, a)| !a.waiting_content && a.resend_at <= now)
+            .map(|(s, _)| *s)
+            .collect();
         for slot in due {
             self.metrics.retransmits += 1;
             self.send_requests(slot, true);

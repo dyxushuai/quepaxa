@@ -19,6 +19,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `silent_leader_takeover` | on | Stop waiting for a leader that has said nothing for about a commit latency since a forward. |
 | `placement` | off | Move the leader to the member that gives writers the lowest commit latency. Enable it on every member or on none. |
 | `placement_sustain`, `placement_hold` | 3 min, 10 min | How long a gain must last before a move, and how long any order change is left alone. |
+| `inline_batch_bytes` | `u32::MAX` (off) | Largest forwarded chunk (bytes, at least 64) sent inline; larger chunks travel directly to every member as data batches and by reference in consensus. Per replica. |
 
 ## Throughput
 
@@ -34,6 +35,18 @@ instead of failing them.
 On disk, latency is a few `fsync`s per commit and throughput depends on how many writes
 each `fsync` carries: write on a dedicated thread and acknowledge in groups
 ([driving](crate::guide::driving)).
+
+### Batch references (`inline_batch_bytes`)
+
+By default (`u32::MAX`), every forwarded chunk travels inline through the leader, which then
+sends it to each recorder. Lowering `inline_batch_bytes` (for example to a few hundred bytes
+or a few KiB on a bandwidth-limited LAN with large commands written to followers) lets each
+origin broadcast large chunks directly to every member and send only a 33-byte reference to
+the leader, evening egress across replicas and avoiding writing the payload twice on disk.
+Keep it at `u32::MAX` when commands are small (a reference is 33 bytes on its own), when
+clients write only to the leader (nothing is forwarded), or across a WAN where the direct
+`Data` broadcast can lose the race to the leader's `RecordRequest` and trigger a round-trip
+fetch. Because the setting is per replica, mixed values across a cluster are safe.
 
 ## Wide-area deployments
 
@@ -99,10 +112,14 @@ Any setting is safe; a bad one is slow.
 catch-up retries, slots decided, fast-path decisions, forwarded and hedged entries (with
 `hedges_at_bound`, those hedged only by the four-`hedge_max` bound although the leader kept
 deciding, and `forward_resends` and `forward_resent_bytes`, forwards the leader had not
-acknowledged in time), and
+acknowledged in time), batch dissemination and fetch activity (`data_sent`, `fetches`,
+`fetch_retries`, `fetches_served`, `parked_requests`), and
 how much decided state is held in memory. Rising `hedged` with a healthy leader means
 `hedge_max` is too low; rising `retransmits` means messages are lost or the link stays
-saturated past even the backed-off resend waits; `retained_slots` that keeps growing means the application is not snapshotting.
+saturated past even the backed-off resend waits; rising `fetches` or `parked_requests` on a
+quiet network means direct `Data` broadcasts are losing the race to `RecordRequest`s (raise
+`inline_batch_bytes` on a WAN); `retained_slots` that keeps growing means the application is
+not snapshotting.
 
 Where the leader is and why: the `epoch` and `leader_position` gauges give the epoch in
 force and this replica's place in the leader order (0: it leads); `suspicions`,

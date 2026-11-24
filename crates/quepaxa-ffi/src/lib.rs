@@ -122,7 +122,10 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// 0.9: `QPX_DROP_SUPERSEDED`, `QPX_DROP_UNRESOLVED`.
 /// 0.10: leader placement: `QPX_CONFIG_PLACEMENT*`, `QPX_METRIC_SUSPICIONS`,
 /// `QPX_METRIC_PLACEMENT_MOVES`, `QPX_METRIC_EPOCH`, `QPX_METRIC_LEADER_POSITION`.
-pub const QPX_ABI_VERSION_MINOR: u32 = 10;
+/// 0.11: batch references: `QPX_CONFIG_INLINE_BATCH_BYTES`, `QPX_METRIC_DATA_SENT`,
+/// `QPX_METRIC_FETCHES`, `QPX_METRIC_FETCH_RETRIES`, `QPX_METRIC_FETCHES_SERVED`,
+/// `QPX_METRIC_PARKED_REQUESTS`.
+pub const QPX_ABI_VERSION_MINOR: u32 = 11;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -702,6 +705,16 @@ pub const QPX_METRIC_PLACEMENT_MOVES: u32 = 13;
 pub const QPX_METRIC_EPOCH: u32 = 14;
 /// Gauge: this replica's position in the leader order in force, 0 when it leads (ABI 0.10).
 pub const QPX_METRIC_LEADER_POSITION: u32 = 15;
+/// Data batches sent to members as their origin, one per member (ABI 0.11).
+pub const QPX_METRIC_DATA_SENT: u32 = 16;
+/// Data batches asked of a holder (ABI 0.11).
+pub const QPX_METRIC_FETCHES: u32 = 17;
+/// Data-batch fetches retried on the next holder (ABI 0.11).
+pub const QPX_METRIC_FETCH_RETRIES: u32 = 18;
+/// Data batches served to a fetching member (ABI 0.11).
+pub const QPX_METRIC_FETCHES_SERVED: u32 = 19;
+/// Record requests held back until referenced content arrived (ABI 0.11).
+pub const QPX_METRIC_PARKED_REQUESTS: u32 = 20;
 
 /// Reads counter or gauge `metric` (`QPX_METRIC_*`, see the Rust `Metrics`) into `out`; an
 /// unknown metric is `QPX_ERR_INVALID_ARGUMENT`.
@@ -731,6 +744,11 @@ pub unsafe extern "C" fn qpx_metric(h: *mut qpx_replica, metric: u32, out: *mut 
             QPX_METRIC_PLACEMENT_MOVES => m.placement_moves,
             QPX_METRIC_EPOCH => m.epoch,
             QPX_METRIC_LEADER_POSITION => m.leader_position,
+            QPX_METRIC_DATA_SENT => m.data_sent,
+            QPX_METRIC_FETCHES => m.fetches,
+            QPX_METRIC_FETCH_RETRIES => m.fetch_retries,
+            QPX_METRIC_FETCHES_SERVED => m.fetches_served,
+            QPX_METRIC_PARKED_REQUESTS => m.parked_requests,
             _ => {
                 set_last_error(&format!("unknown metric {metric}"));
                 return QPX_ERR_INVALID_ARGUMENT;

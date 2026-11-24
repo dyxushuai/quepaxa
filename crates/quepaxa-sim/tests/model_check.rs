@@ -275,3 +275,65 @@ fn of_two_rival_changes_only_the_first_decided_applies() {
     assert!(report.served > 0 && report.exhausted, "{report:?}");
     assert!(report.reconfigured > 0, "{report:?}");
 }
+
+/// Three replicas, follower `n1` with `inline_batch_bytes = 64` (its >64B write disseminates
+/// `Data` and forwards a `Ref` to leader `n0`). `n1`'s initial `Data` to recorder `n2` is
+/// lost; `n0` and `n1` decide the slot, then origin `n1` crashes. Recorder `n2` parks the
+/// request (rule R), fetches the batch from the surviving holder `n0`, applies the slot
+/// (`emitted == committed`), and serves a linearizable read covering it.
+#[test]
+fn lost_data_decided_by_others_fetches_and_applies_after_origin_crashes() {
+    let cfg = ModelConfig {
+        reads: vec![2],
+        inline_batch_bytes: 64,
+        drop_data_to: Some(2),
+        crash_after_warmup: Some(1),
+        max_depth: depth(200),
+        max_states: budget(2_000_000),
+        ..ModelConfig::new(vec![1], deviations(1), 0)
+    };
+    let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
+    println!("{report:?}");
+    assert!(report.complete > 0 && report.exhausted, "{report:?}");
+    assert!(report.parked > 0 && report.fetches > 0, "{report:?}");
+}
+
+/// Variant: follower `n1`'s `Data` to recorder `n2` is lost, and requester `n0` crashes while
+/// `n2` holds its parked record request. `n2` rotates its `Fetch` from crashed requester `n0`
+/// to origin `n1`, unparks, and `{n1, n2}` decide and apply the write.
+#[test]
+fn requester_crashes_while_recorder_is_parked_rotates_fetch_and_commits() {
+    let cfg = ModelConfig {
+        inline_batch_bytes: 64,
+        drop_data_to: Some(2),
+        crash_on_parked: Some(0),
+        link_delay: 2 * MS,
+        max_depth: depth(200),
+        max_states: budget(2_000_000),
+        ..ModelConfig::new(vec![1], deviations(1), 0)
+    };
+    let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
+    println!("{report:?}");
+    assert!(report.complete > 0 && report.exhausted, "{report:?}");
+    assert!(report.parked > 0 && report.fetches > 0 && report.fetch_retries > 0, "{report:?}");
+}
+
+/// Compaction variant: recorder `n2` misses `n1`'s `Data`, and holders `n0` and `n1` compact
+/// past `n2`'s emitted prefix before `n2`'s fetch is answered; `n2` receives `Compacted`,
+/// installs the snapshot, and serves the linearizable read.
+#[test]
+fn replica_missing_content_whose_holders_compact_installs_snapshot() {
+    let cfg = ModelConfig {
+        reads: vec![2],
+        inline_batch_bytes: 64,
+        drop_data_to: Some(2),
+        compact_on_commit: true,
+        max_depth: depth(200),
+        max_states: budget(2_000_000),
+        ..ModelConfig::new(vec![1], deviations(1), 0)
+    };
+    let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
+    println!("{report:?}");
+    assert!(report.complete > 0 && report.exhausted, "{report:?}");
+    assert!(report.snapshots_installed > 0, "{report:?}");
+}

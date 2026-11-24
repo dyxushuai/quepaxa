@@ -16,7 +16,7 @@ use super::{At, Entries};
 use super::{LocalBatch, Own};
 #[cfg(test)]
 use crate::batch::Item;
-use crate::batch::{self, Kind};
+use crate::batch::{self, Kind, Piece};
 use crate::dedup::Dedup;
 use crate::replica::Replica;
 use crate::types::ProposalId;
@@ -59,12 +59,11 @@ impl Replica {
             .filter(|b| b.slot.is_some())
             .flat_map(|b| b.entries.iter().filter(|&&(o, n, _)| o == me && n == inc).map(|&(_, _, id)| id))
             .collect();
-        let pending = e.pending.iter().filter(|i| i.entry.origin == me && i.entry.incarnation == inc);
-        pending
-            .map(|i| i.entry.id)
-            .chain(e.forwarded.keys().copied())
-            .filter(|id| slotted.contains(id))
-            .collect()
+        let pending = e.pending.iter().filter_map(|p| match p {
+            Piece::Entry(i) if i.entry.origin == me && i.entry.incarnation == inc => Some(i.entry.id),
+            _ => None,
+        });
+        pending.chain(e.forwarded.keys().copied()).filter(|id| slotted.contains(id)).collect()
     }
 
     /// D1: counts own entries that newly sit both with the target (or on their way to it) and
@@ -150,12 +149,15 @@ impl Entries {
             ));
         }
         let mut seen: BTreeMap<ProposalId, Copies> = BTreeMap::new();
-        let mine = |i: &&batch::Item| i.entry.origin == me && i.entry.incarnation == inc;
-        for i in self.pending.iter().filter(mine) {
-            seen.entry(i.entry.id).or_default().pending += 1;
+        let mine = |p: &Piece| match p {
+            Piece::Entry(i) if i.entry.origin == me && i.entry.incarnation == inc => Some(i.entry.id),
+            _ => None,
+        };
+        for id in self.pending.iter().filter_map(mine) {
+            seen.entry(id).or_default().pending += 1;
         }
-        for i in self.relayed.iter().filter(mine) {
-            seen.entry(i.entry.id).or_default().relayed += 1;
+        for id in self.relayed.iter().filter_map(mine) {
+            seen.entry(id).or_default().relayed += 1;
         }
         for (seq, b) in &self.batches {
             for &(_, _, id) in b.entries.iter().filter(|&&(o, n, _)| o == me && n == inc) {
@@ -203,13 +205,13 @@ impl Entries {
         let unslotted: BTreeSet<u64> = self
             .batches
             .iter()
-            .filter(|(_, b)| b.slot.is_none() && !b.entries.is_empty())
+            .filter(|(_, b)| b.slot.is_none() && (!b.entries.is_empty() || !b.refs.is_empty()))
             .map(|(seq, _)| *seq)
             .collect();
-        let foreign = self.relayed.iter().filter(|i| i.entry.origin != self.me).count()
-            + self.batches.values().flat_map(|b| &b.entries).filter(|&&(o, _, _)| o != self.me).count();
+        let foreign = self.relayed.iter().filter(|p| super::piece_origin(p) != self.me).count()
+            + self.batches.values().map(|b| self.foreign_in(b)).sum::<usize>();
         let changes = self.own.values().filter(|o| o.kind == Kind::Reconfigure).count()
-            + self.pending.iter().chain(&self.relayed).filter(|i| i.kind == Kind::Reconfigure).count()
+            + self.pending.iter().chain(&self.relayed).filter(|p| super::piece_is_change(p)).count()
             + self.batches.values().map(|b| batch::changes(&b.value).len()).sum::<usize>();
         if (&unslotted, foreign, changes) != (&self.unslotted, self.foreign, self.changes) {
             return Err(format!(
@@ -218,7 +220,9 @@ impl Entries {
             ));
         }
         let dead = self.batches.iter().find(|(_, b)| {
-            b.slot.is_none() && !b.entries.iter().any(|&(o, i, id)| !dedup.contains(o, i, id))
+            b.slot.is_none()
+                && b.refs.is_empty()
+                && !b.entries.iter().any(|&(o, i, id)| !dedup.contains(o, i, id))
         });
         if let Some((seq, _)) = dead
             && !self.prune_due
@@ -247,11 +251,11 @@ pub(in crate::replica) struct Probes {
 /// What tests poke at in place of the fields.
 #[cfg(test)]
 impl Entries {
-    pub(in crate::replica) fn pending(&self) -> &VecDeque<Item> {
+    pub(in crate::replica) fn pending(&self) -> &VecDeque<Piece> {
         &self.pending
     }
 
-    pub(in crate::replica) fn relayed(&self) -> &VecDeque<Item> {
+    pub(in crate::replica) fn relayed(&self) -> &VecDeque<Piece> {
         &self.relayed
     }
 
@@ -268,11 +272,11 @@ impl Entries {
     }
 
     pub(in crate::replica) fn queue_pending(&mut self, i: Item) {
-        self.push_pending(i);
+        self.push_pending(Piece::Entry(i));
     }
 
     pub(in crate::replica) fn queue_relayed(&mut self, i: Item) {
-        self.push_relayed(i);
+        self.push_relayed(Piece::Entry(i));
     }
 
     /// An own entry with no place: the replica's checks reject it.

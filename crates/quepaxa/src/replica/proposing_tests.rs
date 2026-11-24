@@ -189,8 +189,14 @@ fn a_stepped_aside_leader_losing_its_slots_proposes_nothing_and_hands_its_own_on
         Some(at),
         "handed on when the slot was lost"
     );
-    assert!(!r.entries.pending().iter().any(|i| i.entry.id == own), "not also pending");
-    assert!(!r.entries.relayed().iter().any(|i| i.entry.id == own), "not also relayed");
+    assert!(
+        !r.entries.pending().iter().any(|p| matches!(p, Piece::Entry(i) if i.entry.id == own)),
+        "not also pending"
+    );
+    assert!(
+        !r.entries.relayed().iter().any(|p| matches!(p, Piece::Entry(i) if i.entry.id == own)),
+        "not also relayed"
+    );
     assert!(r.entries.batches().values().all(|b| !b.entries.iter().any(|e| e.2 == own)), "in no batch");
 }
 

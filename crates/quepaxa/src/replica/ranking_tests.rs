@@ -83,8 +83,10 @@ fn moved(r: &Replica) -> Option<Vec<u32>> {
         .entries
         .pending()
         .iter()
-        .find(|i| i.entry.id == id)
-        .map(|i| i.entry.payload.clone())
+        .find_map(|p| match p {
+            Piece::Entry(i) if i.entry.id == id => Some(i.entry.payload.clone()),
+            _ => None,
+        })
         .or_else(|| {
             r.entries
                 .batches()

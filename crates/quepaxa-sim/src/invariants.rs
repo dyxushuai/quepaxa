@@ -47,7 +47,7 @@ impl Epochs {
     }
 
     /// Whether `seen` holds a majority of `slot`'s members.
-    fn majority(&self, slot: u64, seen: &BTreeSet<usize>) -> bool {
+    pub fn majority(&self, slot: u64, seen: &BTreeSet<usize>) -> bool {
         let members = self.members(slot);
         2 * members.iter().filter(|m| seen.contains(m)).count() > members.len()
     }
@@ -65,6 +65,10 @@ pub struct History {
 }
 
 impl History {
+    /// Every decided slot and its agreed value `(origin, incarnation, seq, digest)`.
+    pub fn decided(&self) -> &BTreeMap<u64, (u32, u64, u64, u64)> {
+        &self.decided
+    }
     /// A replica crashed: evidence only its volatile state showed is gone.
     pub fn forget(&mut self, epochs: &Epochs, replica: usize) {
         for values in self.leader_values.values_mut() {

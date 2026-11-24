@@ -107,7 +107,22 @@ What the paper leaves open, the crate fixes as follows (the repository's
   decided prefix it asks for only on the timer, as bulk catch-up usually brings it first.
   The leader so sends each
   value once per peer per slot.
-- **Durability.** Recorder state is written before any reply that reports it leaves.
+- **Batch references.** With `Config::inline_batch_bytes` lowered below `max_batch_bytes`
+  (off by default at `u32::MAX`), an origin whose forwarded chunk of application entries
+  exceeds `inline_batch_bytes` sends the chunk directly to every member as `Data { id, bytes }`
+  and puts only a 33-byte `Ref { id, len, crc32c }` in `Forward`; control entries (barriers
+  and membership changes) stay inline so the decided prefix, leader schedule and membership
+  never wait for content. Consensus still agrees on slot values: rule R delays any
+  *changing* record request until the recorder holds every referenced data batch and writes
+  its `Data` record ahead of `Recorder` (a non-changing request is answered at once), and
+  rule P delays a proposer's record requests until it holds every reference in its working
+  value (fetching adopted content from the recorder that reported it first). Missing content
+  is fetched from the requester or sender first, then rotated across the origin and the
+  slot's members once per `retransmit_interval`. Applied commits (`emitted`) wait for
+  missing content; catch-up and retirement progress use the *held* prefix (decided, with
+  every reference's content durable).
+- **Durability.** Recorder state (and any referenced `Data` record it needs) is written
+  before any reply that reports it leaves.
 - **Snapshots, catch-up, membership.** See the other chapters.
 
 ### Disk health

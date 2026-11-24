@@ -14,7 +14,7 @@
 use alloc::vec::Vec;
 
 use super::{At, Entries, Left};
-use crate::batch::{self, Item};
+use crate::batch::{self, Piece, Ref};
 use crate::dedup::Dedup;
 use crate::types::ProposalId;
 
@@ -24,7 +24,7 @@ impl Entries {
     pub(super) fn unslot(&mut self, seq: u64) {
         let Some(b) = self.batches.get_mut(&seq) else { return };
         b.slot = None;
-        if b.entries.is_empty() {
+        if b.entries.is_empty() && b.refs.is_empty() {
             return;
         }
         self.unslotted.insert(seq);
@@ -40,27 +40,37 @@ impl Entries {
         }
     }
 
-    /// The entries `items` of batch `seq`, handed back to a queue, own ones moving out of it;
+    /// The pieces of batch `seq`, handed back to a queue, own entries moving out of it;
     /// those of other members are dropped if the batch was `handed` on.
     fn take_back(
         &mut self,
         seq: u64,
-        items: Vec<Item>,
+        pieces: Vec<Piece>,
         handed: bool,
         dedup: &Dedup,
-        mut push: impl FnMut(&mut Self, Item),
+        mut push: impl FnMut(&mut Self, Piece),
     ) {
-        for e in items {
-            let (o, inc, id) = e.key();
-            if dedup.contains(o, inc, id) {
-                continue;
+        for p in pieces {
+            match p {
+                Piece::Entry(e) => {
+                    let (o, inc, id) = e.key();
+                    if dedup.contains(o, inc, id) {
+                        continue;
+                    }
+                    if self.mine(&e) {
+                        self.moved(id, At::Batched { seq }, At::Pending);
+                    } else if handed {
+                        continue;
+                    }
+                    push(self, Piece::Entry(e));
+                }
+                Piece::Ref(r) => {
+                    if handed && r.id.origin != self.me {
+                        continue;
+                    }
+                    push(self, Piece::Ref(r));
+                }
             }
-            if self.mine(&e) {
-                self.moved(id, At::Batched { seq }, At::Pending);
-            } else if handed {
-                continue;
-            }
-            push(self, e);
         }
     }
 
@@ -72,27 +82,34 @@ impl Entries {
         }
     }
 
-    /// Batch `seq` lost its slot and its entries are handed back: own ones (and, if the slot
+    /// Batch `seq` lost its slot and its pieces are handed back: own ones (and, if the slot
     /// went to the target `deciding`, every one) to `pending`, those of other members to
     /// `relayed`, unless the batch was handed on when this replica stepped aside: they went
-    /// to the target then.
-    pub(in crate::replica) fn lost_slot(&mut self, seq: u64, deciding: bool, dedup: &Dedup) {
-        let Some(b) = self.remove_batch(seq) else { return };
+    /// to the target then. Returns any references the batch held (for releasing dropped ones).
+    pub(in crate::replica) fn lost_slot(&mut self, seq: u64, deciding: bool, dedup: &Dedup) -> Vec<Ref> {
+        let Some(b) = self.remove_batch(seq) else { return Vec::new() };
         // Our own encoding: it decodes.
-        let entries = batch::decode(&b.value).unwrap_or_default();
+        let pieces = batch::decode_pieces(&b.value).unwrap_or_default();
         let handed = b.handed;
-        self.take_back(seq, entries, handed, dedup, |s, e| {
+        let refs = b.refs;
+        self.take_back(seq, pieces, handed, dedup, |s, p| {
             #[cfg(feature = "model")]
-            if !s.mine(&e) {
-                s.probes.d2_foreign += u64::from(handed);
-            } else if s.forwarded.contains_key(&e.entry.id) || s.pending.iter().any(|i| i.key() == e.key()) {
-                s.probes.d2_own += 1;
+            if let Piece::Entry(e) = &p {
+                if !s.mine(e) {
+                    s.probes.d2_foreign += u64::from(handed);
+                } else if s.forwarded.contains_key(&e.entry.id)
+                    || s.pending.iter().any(|q| matches!(q, Piece::Entry(i) if i.key() == e.key()))
+                {
+                    s.probes.d2_own += 1;
+                }
             }
-            if e.entry.origin == s.me || deciding { s.push_pending(e) } else { s.push_relayed(e) }
+            let to_pending = super::piece_origin(&p) == s.me || deciding;
+            if to_pending { s.push_pending(p) } else { s.push_relayed(p) }
         });
+        refs
     }
 
-    /// No longer the leader: the entries of batches not yet in a slot go to `pending`.
+    /// No longer the leader: the pieces of batches not yet in a slot go to `pending`.
     pub(in crate::replica) fn lost_lead(&mut self, dedup: &Dedup) {
         let unstarted: Vec<u64> =
             self.batches.iter().filter(|(_, b)| b.slot.is_none()).map(|(seq, _)| *seq).collect();
@@ -100,15 +117,15 @@ impl Entries {
         for seq in unstarted {
             if let Some(b) = self.remove_batch(seq) {
                 // Our own encoding: it decodes.
-                handed.push((seq, batch::decode(&b.value).unwrap_or_default()));
+                handed.push((seq, batch::decode_pieces(&b.value).unwrap_or_default()));
             }
         }
-        for (seq, items) in handed {
-            self.take_back(seq, items, false, dedup, Self::push_pending);
+        for (seq, pieces) in handed {
+            self.take_back(seq, pieces, false, dedup, Self::push_pending);
         }
     }
 
-    /// Stepped aside: the entries of every local batch go to `pending` (a batch already in a
+    /// Stepped aside: the pieces of every local batch go to `pending` (a batch already in a
     /// slot stays there too, `handed`), own ones counted as hedged, and so does everything
     /// relayed.
     pub(in crate::replica) fn step_aside(&mut self, dedup: &Dedup) {
@@ -116,7 +133,7 @@ impl Entries {
         let mut unstarted = Vec::new();
         for (seq, b) in &mut self.batches {
             // Our own encoding: it decodes.
-            handed.push((*seq, batch::decode(&b.value).unwrap_or_default()));
+            handed.push((*seq, batch::decode_pieces(&b.value).unwrap_or_default()));
             if b.slot.is_none() {
                 unstarted.push(*seq);
             }
@@ -125,22 +142,25 @@ impl Entries {
         for seq in unstarted {
             self.remove_batch(seq);
         }
-        for (seq, items) in handed {
-            self.take_back(seq, items, false, dedup, |s, e| {
+        for (seq, pieces) in handed {
+            self.take_back(seq, pieces, false, dedup, |s, p| {
                 // Its wait on the stuck disk must not count as an ordinary commit latency.
-                if e.entry.origin == s.me
+                if let Piece::Entry(e) = &p
+                    && e.entry.origin == s.me
                     && let Some(out) = s.own.get_mut(&e.entry.id)
                 {
                     out.hedged = true;
                 }
-                s.push_pending(e);
+                s.push_pending(p);
             });
         }
-        while let Some(e) = self.pop(true) {
-            if self.mine(&e) {
+        while let Some(p) = self.pop(true) {
+            if let Piece::Entry(e) = &p
+                && self.mine(e)
+            {
                 self.moved(e.entry.id, At::Relayed, At::Pending);
             }
-            self.push_pending(e);
+            self.push_pending(p);
         }
     }
 
@@ -157,7 +177,7 @@ impl Entries {
             }
             hedged += 1;
             self.changes += usize::from(super::is_change(&e));
-            self.pending.push_front(e);
+            self.pending.push_front(Piece::Entry(e));
         }
         hedged
     }
@@ -171,7 +191,7 @@ impl Entries {
                 let from = At::Forwarded { since };
                 if aside {
                     self.moved(id, from, At::Pending);
-                    self.push_pending(e);
+                    self.push_pending(Piece::Entry(e));
                     continue;
                 }
                 self.moved(id, from, At::Relayed);
@@ -179,7 +199,7 @@ impl Entries {
                     o.hedged = true;
                 }
                 hedged += 1;
-                self.push_relayed(e);
+                self.push_relayed(Piece::Entry(e));
             }
         }
         hedged

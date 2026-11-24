@@ -98,13 +98,10 @@ fn a_membership_change_without_an_order_keeps_the_leader() {
     let mut r = leader(2, &[2, 0, 1]);
     r.propose_reconfiguration(r.now, alloc::vec![NodeId(0), NodeId(1), NodeId(2), NodeId(3)], Vec::new())
         .unwrap();
-    let item = r
-        .entries
-        .pending()
-        .iter()
-        .chain(r.entries.relayed())
-        .find(|i| i.kind == Kind::Reconfigure)
-        .map(|i| i.entry.payload.clone());
+    let item = r.entries.pending().iter().chain(r.entries.relayed()).find_map(|p| match p {
+        Piece::Entry(i) if i.kind == Kind::Reconfigure => Some(i.entry.payload.clone()),
+        _ => None,
+    });
     let item = item
         .or_else(|| {
             r.entries.batches().values().flat_map(|b| batch::changes(&b.value)).map(|(_, p)| p).next()

@@ -57,10 +57,29 @@ fn fault_free_cluster_commits_every_proposal() {
 }
 
 #[test]
+fn large_commands_commit_and_converge() {
+    for n in [1, 3, 5] {
+        let cfg = SimConfig { payload_bytes: Some((256, 2048)), ..calm(n, 1) };
+        let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            report.entries > 100 && report.entries == report.proposals && report.reads > 50,
+            "{report:?}"
+        );
+    }
+}
+
+#[test]
 fn hostile_runs_stay_safe_and_converge() {
     for_seeds(seed_count(40), |seed| {
         let n = [3, 5][(seed % 2) as usize];
-        if let Err(e) = Sim::new(SimConfig::hostile(n, seed)).run() {
+        let mut cfg = SimConfig::hostile(n, seed);
+        if seed % 4 >= 2 {
+            // Keep large-command arrival rate within 4 KiB batch capacity over a 6 s fault
+            // phase so the progress bound measures liveness rather than queue saturation.
+            cfg.payload_bytes = Some((256, 2048));
+            cfg.propose = 100;
+        }
+        if let Err(e) = Sim::new(cfg).run() {
             panic!("{e}");
         }
     });
@@ -74,7 +93,14 @@ fn writes_commit_within_the_bound_while_a_majority_is_connected() {
     // duplicate.
     for_seeds(seed_count(40), |seed| {
         let n = [3, 5][(seed % 2) as usize];
-        let cfg = SimConfig { crash: 0, partition: 1, fault_phase_ms: 6_000, ..SimConfig::hostile(n, seed) };
+        let mut cfg =
+            SimConfig { crash: 0, partition: 1, fault_phase_ms: 6_000, ..SimConfig::hostile(n, seed) };
+        if seed % 4 >= 2 {
+            // Keep large-command arrival rate within 4 KiB batch capacity over a 6 s fault
+            // phase so the progress bound measures liveness rather than queue saturation.
+            cfg.payload_bytes = Some((256, 2048));
+            cfg.propose = 100;
+        }
         let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
         assert!(report.held_writes > 0, "seed {seed}: no write was held to the bound");
     });
@@ -98,7 +124,11 @@ fn a_write_cut_off_in_a_minority_is_not_held_to_the_bound() {
 #[test]
 fn crash_heavy_runs_never_lose_acknowledged_state() {
     for_seeds(seed_count(40), |seed| {
-        if let Err(e) = Sim::new(SimConfig::durability_stress(3, seed)).run() {
+        let mut cfg = SimConfig::durability_stress(3, seed);
+        if seed % 2 == 1 {
+            cfg.payload_bytes = Some((256, 2048));
+        }
+        if let Err(e) = Sim::new(cfg).run() {
             panic!("{e}");
         }
     });
@@ -194,7 +224,13 @@ fn membership_changes_under_faults_stay_safe_and_converge() {
     let (applied, shrunk, grown) = (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
     let ran = for_seeds(seeds, |seed| {
         let n = [3, 5][(seed % 2) as usize];
-        let cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(n, seed) };
+        let mut cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(n, seed) };
+        if seed % 4 >= 2 {
+            // Keep large-command arrival rate within 4 KiB batch capacity over a 6 s fault
+            // phase so the progress bound measures liveness rather than queue saturation.
+            cfg.payload_bytes = Some((256, 2048));
+            cfg.propose = 100;
+        }
         let report = Sim::new(cfg).run().unwrap_or_else(|e| panic!("{e}"));
         applied.fetch_add(report.reconfigurations, Relaxed);
         // Changes draw any size: down to one or two members, up to every replica.
@@ -293,7 +329,7 @@ fn no_slow_machine_leaves_the_schedule_unchanged() {
     // The default configuration must not draw from the random stream or reorder events
     // differently because slow machines exist. A change to how replicas behave changes these
     // hashes too: re-record them then, from a run without slow machines.
-    for (n, seed, hash) in [(3, 7, 0xc9f3_c5ad_9d77_2108_u64), (5, 3, 0x3829_43f9_f044_8a7e)] {
+    for (n, seed, hash) in [(3, 7, 0xf299_49a2_c0ca_b432_u64), (5, 3, 0xa455_84cf_3f84_0fc7_u64)] {
         let r = Sim::new(SimConfig::hostile(n, seed)).run().unwrap();
         assert_eq!(r.trace_hash, hash, "{n} replicas, seed {seed}");
     }
