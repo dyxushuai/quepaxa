@@ -73,8 +73,44 @@ fn a_stalled_leader_disk_delays_writes_less_than_the_stall() {
             worst(&r, &[0])
         );
         assert!(max < STALL_MS, "seed {seed}: slowest follower write {max} ms");
-        // The leader steps aside and hands its own clients' writes to the next member.
+        // The leader either steps aside (4δ) or is rotated out first (ROTATE_AFTER consecutive
+        // follower-decided slots), and either way hands its own clients' writes to the next member.
         let own = worst(&r, &[0]);
+        assert!(
+            r.metrics[0].stepped_aside > 0 || r.final_order[0] != 0,
+            "seed {seed}: leader neither stepped aside nor rotated out (waited out the stall, slowest write {own} ms)"
+        );
+        assert!(own < STALL_MS - 20, "seed {seed}: slowest leader write {own} ms waited out the stall");
+    }
+}
+
+#[test]
+fn a_stalled_leader_disk_with_quiet_followers_steps_aside() {
+    for seed in 0..seeds() {
+        let cfg = SimConfig {
+            disk_stall: Some((vec![0], STALL_AT_MS, STALL_MS)),
+            // Warm up on all nodes, give the leader a stuck write at STALL_AT_MS, let follower 1
+            // send 2 writes (enough for decided_elsewhere without reaching ROTATE_AFTER = 8), then
+            // keep follower 1 forwarding across the 4δ step-aside boundary (~+110-130 ms, after
+            // follower 1's busy-leader hedge of its +1 ms writes decides) so a coalesced forward
+            // ack is guaranteed to be due when the leader steps aside.
+            write_weights: Some(vec![
+                (0, vec![1, 1, 1]),
+                (STALL_AT_MS, vec![1, 0, 0]),
+                (STALL_AT_MS + 1, vec![0, 1, 0]),
+                (STALL_AT_MS + 3, vec![1, 0, 0]),
+                (STALL_AT_MS + 100, vec![0, 1, 0]),
+                (STALL_AT_MS + 150, vec![1, 0, 0]),
+                (STALL_AT_MS + STALL_MS, vec![1, 1, 1]),
+            ]),
+            ..config(seed)
+        };
+        let r = sim(cfg);
+        let own = worst(&r, &[0]);
+        println!(
+            "leader disk stalled {STALL_MS} ms (quiet followers), seed {seed}: stepped_aside={}, slowest leader write {own} ms",
+            r.metrics[0].stepped_aside
+        );
         assert!(
             r.metrics[0].stepped_aside > 0,
             "seed {seed}: leader did not step aside (waited out the stall, slowest write {own} ms)"

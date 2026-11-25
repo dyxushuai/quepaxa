@@ -241,3 +241,51 @@ fn the_usual_persist_latency_moves_by_an_eighth_of_each_sample() {
     r.handle(Timestamp(9 * MS), Input::Persisted(last)).unwrap();
     assert_eq!(r.watch.disk.usual(), Some(16 * MS - 2 * MS + MS), "an 8 ms write");
 }
+
+#[test]
+fn a_coalesced_forward_ack_is_cleared_while_stepped_aside() {
+    let (mut r, _) = leader_with_a_stuck_disk();
+    let mut out = Vec::new();
+    let decided = Body::decided(Slot(9), proposal(1, 1, 0));
+    r.handle(Timestamp(10 * MS), from_peer(1, 0, decided)).unwrap();
+    r.poll_actions(&mut out);
+
+    // Two forwards within the ack cooldown leave a coalesced ack due right after 4δ (80 ms).
+    let fwd = |seq, id| {
+        let items = [batch::Item {
+            entry: crate::batch::Entry {
+                origin: NodeId(2),
+                incarnation: 1,
+                id: ProposalId(id),
+                payload: Bytes::from_static(b"x"),
+            },
+            kind: batch::Kind::App,
+        }];
+        from_peer(2, 0, Body::Forward { seq, batch: batch::encode(&items) })
+    };
+    r.handle(Timestamp(MS + 78 * MS), fwd(0, 10)).unwrap();
+    r.poll_actions(&mut out);
+    r.handle(Timestamp(MS + 79 * MS), fwd(1, 11)).unwrap();
+    r.poll_actions(&mut out);
+    let due = *r.watch.ack_due.get(&NodeId(2)).expect("coalesced ack scheduled");
+    assert!(due > Timestamp(MS + 80 * MS));
+
+    // Step aside at 4δ, then let the coalesced ack deadline fire: no ForwardAck and no stuck timer.
+    r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();
+    out.clear();
+    r.poll_actions(&mut out);
+    assert!(r.stepped_aside());
+
+    r.handle_timeout(due).unwrap();
+    out.clear();
+    r.poll_actions(&mut out);
+    let acked = out.iter().any(|a| {
+        matches!(a, Action::Send(o) if matches!(
+            Message::decode(&o.bytes, &r_wire()),
+            Ok(Message { body: Body::ForwardAck { .. }, .. })
+        ))
+    });
+    assert!(!acked, "no ForwardAck sent while stepped aside");
+    assert!(!r.watch.ack_due.contains_key(&NodeId(2)), "ack_due cleared while stepped aside");
+    assert!(r.next_deadline().is_none_or(|d| d > due), "no past deadline left behind");
+}
