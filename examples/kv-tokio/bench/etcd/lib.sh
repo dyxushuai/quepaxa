@@ -3,12 +3,18 @@
 # root), $here (this directory) and $data (the data directory on the disk under test).
 
 image=qpx-bench:local
+openraft_image=qpx-openraft:local
 etcd_image=gcr.io/etcd-development/etcd:v3.7.2@sha256:7c6c239825d00e3f6328a69caafd54be92063acf0c2ce78b8394699f52b75dc3
 
 build_images() {
   echo "building $image"
   docker build -q -t "$image" -f "$here/Dockerfile" "$root" >/dev/null
   docker pull -q "$etcd_image" >/dev/null
+}
+
+build_openraft_image() {
+  echo "building $openraft_image"
+  docker build -q -t "$openraft_image" -f "$root/examples/kv-tokio/bench/openraft/Dockerfile" "$root" >/dev/null
 }
 
 # The host, versions and measured fsync latency, for env.txt.
@@ -20,6 +26,9 @@ describe_host() {
   echo "load: $(cut -d' ' -f1-3 /proc/loadavg)"
   echo "docker: $(docker version --format '{{.Server.Version}}')"
   echo "image: $(docker image inspect --format '{{.Id}}' "$image")"
+  if docker image inspect "$openraft_image" >/dev/null 2>&1; then
+    echo "openraft image: $(docker image inspect --format '{{.Id}}' "$openraft_image")"
+  fi
   echo "etcd image: $etcd_image"
   echo "data filesystem: $(df -T "$data" | awk 'NR==2 {print $1, $2}')"
   # 200 appends of 512 bytes, each fsynced, in a container on the data disk.

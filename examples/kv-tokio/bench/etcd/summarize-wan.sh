@@ -108,7 +108,7 @@ combine() {
 
 # Cases in run order: <system>-<case>, with the run number and region stripped.
 cases=$(find "$dir" -name '*-r0.txt' -printf '%f\n' | sed 's/-[0-9]*-r0\.txt$//' | sort -u)
-systems="quepaxa etcd etcd-tuned"
+systems="quepaxa etcd etcd-tuned openraft openraft-tuned"
 regions=$(sed -n 's/^regions: \([^;]*\);.*/\1/p' "$dir/env.txt")
 far=$(sed -n 's/^regions: .*far: \([^,]*\),.*/\1/p' "$dir/env.txt")
 best=$(sed -n 's/^regions: .*best: \([^ ]*\).*/\1/p' "$dir/env.txt")
@@ -138,8 +138,9 @@ for system in $systems; do
   for c in $cases; do
     case $c in "$system"-*) ;; *) continue ;; esac
     rest=${c#"$system"-}
-    # "etcd-tuned-calm" also starts with "etcd-".
+    # "etcd-tuned-calm" also starts with "etcd-" (and "openraft-tuned-calm" with "openraft-").
     [ "$system" = etcd ] && [[ $rest == tuned-* ]] && continue
+    [ "$system" = openraft ] && [[ $rest == tuned-* ]] && continue
     case $rest in
       crash | partition) over=$others ;;
       hedge-crash-*) over=$others_best ;;
@@ -172,6 +173,7 @@ for system in $systems; do
     case $c in "$system"-*) ;; *) continue ;; esac
     rest=${c#"$system"-}
     [ "$system" = etcd ] && [[ $rest == tuned-* ]] && continue
+    [ "$system" = openraft ] && [[ $rest == tuned-* ]] && continue
     i=0
     for region in $regions; do
       rows=$(for f in "$dir/$c"-[0-9]*-r"$i".txt; do region_row "$f"; done)

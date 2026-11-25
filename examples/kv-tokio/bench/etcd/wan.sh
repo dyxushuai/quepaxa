@@ -26,7 +26,9 @@
 #   default "--placement on --placement-periods 30000,120000") for the policy scenarios,
 #   and for the others too with POLICY_EVERYWHERE=1; SLOW_CPUS (the heterogeneous and
 #   speedup scenarios' quota, default 0.5); SLOW_REGION (the region whose container gets that
-#   quota, default the first leader's); SYSTEMS (default "quepaxa etcd etcd-tuned"); PROBE_CPUS
+#   quota, default the first leader's); SYSTEMS (default "quepaxa etcd etcd-tuned"; also
+#   supports "openraft" and "openraft-tuned"); INTERLEAVE=1 (interleave systems within each
+#   scenario/repeat instead of running all repeats of one system first); PROBE_CPUS
 #   (the disk probe's cpuset, default the generators'); DATA_TMPFS=1 (each replica's data
 #   on its own tmpfs: no disk in the comparison, and no durability either); QUEPAXA_FLAGS
 #   (extra kv-tokio flags for every QuePaxa replica, e.g. "--max-in-flight-slots 10");
@@ -101,6 +103,13 @@ sample_s=${SAMPLE_S:-5}
 conns=${CONNS:-4}
 jitter_ms=${JITTER_MS:-50}
 loss=${LOSS:-1}
+interleave=${INTERLEAVE:-0}
+openraft_hb=${OPENRAFT_HEARTBEAT_MS:-400}
+openraft_emin=${OPENRAFT_ELECTION_MIN_MS:-1000}
+openraft_emax=${OPENRAFT_ELECTION_MAX_MS:-1500}
+openraft_tuned_hb=${OPENRAFT_TUNED_HEARTBEAT_MS:-1000}
+openraft_tuned_emin=${OPENRAFT_TUNED_ELECTION_MIN_MS:-2000}
+openraft_tuned_emax=${OPENRAFT_TUNED_ELECTION_MAX_MS:-3000}
 
 # Round trips in ms between rough public-cloud regions, the same matrix as
 # crates/quepaxa-sim/examples/wan_leaders.rs.
@@ -152,13 +161,18 @@ cleanup() {
 }
 trap 'cleanup; docker network rm "$net" >/dev/null 2>&1 || true' EXIT
 
+read -r -a systems <<< "${SYSTEMS:-quepaxa etcd etcd-tuned}"
+need_openraft=0
+for s in "${systems[@]}"; do [[ $s == openraft* ]] && need_openraft=1; done
+
 build_images
+[ "$need_openraft" = 1 ] && build_openraft_image
 docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet "$prefix.0/24" "$net" >/dev/null
 {
   describe_host
   echo "regions: ${regions[*]}; far: ${regions[$far]}, best: ${regions[$best]}"
   for i in $(seq 0 $((n - 1))); do echo "rtt ${regions[$i]}: ${rtt[$i]}"; done
-  echo "rate: $rate/s in total, size ${size}B, run ${secs}s, fault at ${fault}s, heal at ${heal}s, repeats $repeats, smoke=$smoke"
+  echo "rate: $rate/s in total, size ${size}B, run ${secs}s, fault at ${fault}s, heal at ${heal}s, repeats $repeats, smoke=$smoke, interleave=$interleave"
   echo "slow: +${slow_ms}ms; jitter: ${jitter_ms}ms, ${loss}% loss"
   echo "policy: $policy (everywhere: ${POLICY_EVERYWHERE:-0}); policy runs ${policy_secs}s, change at ${change_at}s for ${change_for}s, settled from ${settled_from}s; heterogeneous and speedup quota $slow_cpus CPUs on ${slow_region:-the first leader} (speedup: until the change)"
   echo "cpus: replicas ${replica_cpus[*]}, generators $gen_cpus, disk probe $probe_cpus"
@@ -168,7 +182,7 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
   echo "ladder quotas: ${ladder_cpus[*]} CPUs (period ${cpu_period_us}us), first leader ${regions[$slowest]}; leader sampled every ${sample_s}s"
   # summarize-wan.sh reads this line.
   if [ "$data_tmpfs" = 1 ]; then echo "data: tmpfs"; else echo "data: host disk"; fi
-  echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms (ladder: the library defaults; hedge-crash: fixed hedge_min=hedge_max per delay); etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
+  echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms (ladder: the library defaults; hedge-crash: fixed hedge_min=hedge_max per delay); etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms; openraft ${openraft_hb}/${openraft_emin}-${openraft_emax}ms; openraft-tuned ${openraft_tuned_hb}/${openraft_tuned_emin}-${openraft_tuned_emax}ms"
 } > "$results/env.txt"
 cat "$results/env.txt"
 
@@ -231,7 +245,30 @@ start_etcd() {
   done
 }
 
+# start_openraft <heartbeat ms> <election min ms> <election max ms>
+start_openraft() {
+  local members="" i mount
+  for i in $(seq 0 $((n - 1))); do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
+  for i in $(seq 0 $((n - 1))); do
+    read -r -a mount <<< "$(data_mount "$i")"
+    docker run -d --name "qpx-r$i" --network "$net" --ip "$(replica_ip "$i")" --cpuset-cpus "${replica_cpus[$i]}" \
+      "${mount[@]}" "$openraft_image" \
+      openraft-kv --id "$i" --members "$members" --peer 0.0.0.0:7000 --etcd 0.0.0.0:2379 --data /data \
+      --heartbeat-ms "$1" --election-min-ms "$2" --election-max-ms "$3" >/dev/null
+  done
+}
+
 running() { [ "$(docker inspect -f '{{.State.Running}}' "qpx-r$1" 2>/dev/null)" = true ]; }
+
+# Openraft's leader node ID, as any running member with a known leader reports it.
+openraft_leader() {
+  local i lid
+  for i in $(seq 0 $((n - 1))); do
+    running "$i" || continue
+    lid=$(docker exec "qpx-r$i" openraft-kv ctl --endpoint "$(replica_ip "$i"):7000" leader 2>/dev/null || true)
+    [[ $lid =~ ^[0-9]+$ ]] && { echo "$lid"; return; }
+  done
+}
 
 # The client endpoints of the replicas still running.
 endpoints() {
@@ -328,7 +365,7 @@ epoch_now() {
 }
 
 # The region leading now: the first replica of the order in force any QuePaxa replica
-# reports, or what etcd reports.
+# reports, or what Openraft or etcd reports.
 leader_now() {
   local i
   if [ "$1" = quepaxa ]; then
@@ -337,6 +374,11 @@ leader_now() {
       order=$(leaders_of "$i")
       [ -n "$order" ] && { echo "${regions[${order%%,*}]}"; return; }
     done
+    echo none
+  elif [[ $1 == openraft* ]]; then
+    local lid
+    lid=$(openraft_leader)
+    [ -n "$lid" ] && { echo "${regions[$lid]}"; return; }
     echo none
   else
     local ip
@@ -348,13 +390,26 @@ leader_now() {
 
 # Waits for the cluster to take writes, then puts the leader in region <pinned>.
 ready() {
-  local system=$1 pinned=$2 deadline=$((SECONDS + 120)) hex
+  local system=$1 pinned=$2 deadline=$((SECONDS + 120)) hex cur
+  if [[ $system == openraft* ]]; then
+    until docker exec "qpx-r$pinned" openraft-kv ctl --endpoint "$(replica_ip "$pinned"):7000" init >/dev/null 2>&1; do
+      [ $SECONDS -lt $deadline ] || { echo "openraft init failed" >&2; exit 1; }
+      sleep 1
+    done
+  fi
   until docker run --rm --network "$net" "$image" benchmark --endpoints="$(endpoints)" \
     put --total 10 >/dev/null 2>&1; do
     [ $SECONDS -lt $deadline ] || { echo "cluster did not come up" >&2; exit 1; }
     sleep 1
   done
-  if [ "$system" != quepaxa ]; then
+  if [[ $system == openraft* ]]; then
+    for _ in $(seq 10); do
+      [ "$(leader_now "$system")" = "${regions[$pinned]}" ] && break
+      cur=$(openraft_leader)
+      [ -n "$cur" ] && docker exec "qpx-r$cur" openraft-kv ctl --endpoint "$(replica_ip "$cur"):7000" transfer "$pinned" >/dev/null 2>&1 || true
+      sleep 2
+    done
+  elif [ "$system" != quepaxa ]; then
     for _ in $(seq 10); do
       [ "$(leader_now "$system")" = "${regions[$pinned]}" ] && break
       hex=$(docker exec qpx-r0 etcdctl --endpoints="$(replica_ip "$pinned"):2379" endpoint status -w simple |
@@ -632,10 +687,33 @@ stop() {
   wipe_data
 }
 
-read -r -a systems <<< "${SYSTEMS:-quepaxa etcd etcd-tuned}"
-for system in "${systems[@]}"; do
+quepaxa_only_case() {
+  policy_case "$1" || [ "$1" = load ] || [ "$1" = adversary ] || [ "$1" = hedge-crash ]
+}
+
+run_trial() {
+  local system=$1 scenario=$2 pinned=$3 label=$4 run=$5 delay=${6:-}
+  echo "$system: $label, run $run"
+  case $system in
+    quepaxa) start_quepaxa "$pinned" "$scenario" "$delay" ;;
+    etcd) start_etcd 100 1000 ;;
+    etcd-tuned) start_etcd "$max_rtt" $((10 * max_rtt)) ;;
+    openraft) start_openraft "$openraft_hb" "$openraft_emin" "$openraft_emax" ;;
+    openraft-tuned) start_openraft "$openraft_tuned_hb" "$openraft_tuned_emin" "$openraft_tuned_emax" ;;
+    *) echo "unknown system $system" >&2; exit 2 ;;
+  esac
+  if ! quota_case "$scenario"; then
+    shape_links
+    check_links $(seq 0 $((n - 1)))
+  fi
+  check_generators
+  ready "$system" "$pinned"
+  run_case "$system" "$scenario" "$pinned" "$system-$label-$run" "$run"
+  stop
+}
+
+if [ "$interleave" = 1 ]; then
   for scenario in "${scenarios[@]}"; do
-    { policy_case "$scenario" || [ "$scenario" = load ] || [ "$scenario" = adversary ] || [ "$scenario" = hedge-crash ]; } && [ "$system" != quepaxa ] && continue
     placements=(far)
     [ "$scenario" = calm ] && placements+=(best)
     # The write shift starts where the first writers are best served.
@@ -656,26 +734,47 @@ for system in "${systems[@]}"; do
           [ "$scenario" = adversary ] && label=adversary-$rate
           [ "$scenario" = hedge-crash ] && label=hedge-crash-$delay
           for run in $(seq 1 "$repeats"); do
-            echo "$system: $label, run $run"
-            case $system in
-              quepaxa) start_quepaxa "$pinned" "$scenario" "$delay" ;;
-              etcd) start_etcd 100 1000 ;;
-              etcd-tuned) start_etcd "$max_rtt" $((10 * max_rtt)) ;;
-            esac
-            if ! quota_case "$scenario"; then
-              shape_links
-              check_links $(seq 0 $((n - 1)))
-            fi
-            check_generators
-            ready "$system" "$pinned"
-            run_case "$system" "$scenario" "$pinned" "$system-$label-$run" "$run"
-            stop
+            for system in "${systems[@]}"; do
+              quepaxa_only_case "$scenario" && [ "$system" != quepaxa ] && continue
+              run_trial "$system" "$scenario" "$pinned" "$label" "$run" "$delay"
+            done
           done
         done
       done
     done
   done
-done
+else
+  for system in "${systems[@]}"; do
+    for scenario in "${scenarios[@]}"; do
+      quepaxa_only_case "$scenario" && [ "$system" != quepaxa ] && continue
+      placements=(far)
+      [ "$scenario" = calm ] && placements+=(best)
+      # The write shift starts where the first writers are best served.
+      { [ "$scenario" = shift ] || [ "$scenario" = burst ] || [ "$scenario" = load ] || [ "$scenario" = adversary ] || [ "$scenario" = hedge-crash ]; } && placements=(best)
+      # region_load reads $rate: load and adversary set it per run, the others keep RATE.
+      rates=("$base_rate")
+      { [ "$scenario" = load ] || [ "$scenario" = adversary ]; } && rates=("${load_rates[@]}")
+      delays=("")
+      [ "$scenario" = hedge-crash ] && delays=("${hedge_delays[@]}")
+      for placement in "${placements[@]}"; do
+        for rate in "${rates[@]}"; do
+          for delay in "${delays[@]}"; do
+            [ "$placement" = far ] && pinned=$far || pinned=$best
+            [ "$scenario" = ladder ] && pinned=$slowest
+            label=$scenario
+            [ "$placement" = best ] && label=$scenario-best
+            [ "$scenario" = load ] && label=load-$rate
+            [ "$scenario" = adversary ] && label=adversary-$rate
+            [ "$scenario" = hedge-crash ] && label=hedge-crash-$delay
+            for run in $(seq 1 "$repeats"); do
+              run_trial "$system" "$scenario" "$pinned" "$label" "$run" "$delay"
+            done
+          done
+        done
+      done
+    done
+  done
+fi
 "$here/summarize-wan.sh" "$results" > "$results/summary.md"
 echo "results: $results"
 cat "$results/summary.md"

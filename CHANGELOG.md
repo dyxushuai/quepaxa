@@ -5,13 +5,18 @@ All notable changes to this project are documented here. The project follows
 
 ## Unreleased
 
+- `examples/kv-tokio/bench/openraft` (#156): add a standalone `openraft 0.10.1` KV benchmark
+  server (isolated from the root workspace) serving the etcd v3 KV gRPC subset on a durable
+  group-commit `sync_data()` WAL with pipelined `StreamAppend`, dedicated heartbeat channels,
+  Pre-Vote, and follower-to-leader forwarding; extend `examples/kv-tokio/bench/etcd/wan.sh`,
+  `lib.sh`, and `summarize-wan.sh` with `openraft`, `openraft-tuned`, and `INTERLEAVE=1`; and
+  document the interleaved five-region WAN comparison in `docs/benchmarks.md`.
 - `examples/kv-tokio/bench` (#174): complete the paper's §7 evaluation harness with Fig. 8
   (`adversary`: dynamic minority of 2 of 5 WAN replicas delayed 1–500 ms every 5 s in place)
   and Fig. 9 (`hedge-crash`: 5-region WAN leader `SIGKILL` at 15 s at 25k/s across fixed
   hedging delays 50–500 ms plus adaptive control) in `wan.sh`, `summarize-wan.sh`,
   `paper-eval.sh`, and `paper-summarize.sh`, and record three-run results next to §7.4/§7.5
   in `docs/benchmarks.md` and `docs/paper-conformance.md`.
-
 - `quepaxa` (#240): prevent healthy-leader rotations on brief loopback/LAN scheduling
   hiccups and eliminate the lagging-leader egress blast and handover hedge burst:
   - Raise default `Config::hedge_min` from 1 ms to 20 ms so sub-millisecond loopback/tmpfs
