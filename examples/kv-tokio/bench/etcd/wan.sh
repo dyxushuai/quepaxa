@@ -12,8 +12,12 @@
 #     regions write five times as much for 10 s), speedup (heterogeneous with the quota
 #     lifted at 150 s: does the lead come back to the member that got faster), ladder (no WAN
 #     delay, every replica on its own CPU quota from LADDER_CPUS, the slowest leading first:
-#     paper Fig. 10); and load (QuePaxa only, never by default: no fault, the leader in the
-#     best-placed region, one run per rate in LOAD_RATES: paper Fig. 6c-d)
+#     paper Fig. 10); load (QuePaxa only, never by default: no fault, the leader in the
+#     best-placed region, one run per rate in LOAD_RATES: paper Fig. 6c-d); adversary (QuePaxa
+#     only, never by default: like load, with a changing minority delayed up to ADVERSARY_MAX_MS
+#     every ADVERSARY_EPOCH_S seconds: paper Fig. 8); and hedge-crash (QuePaxa only, never by
+#     default: best-placed leader crashed at HEDGE_FAULT_S across hedging delays in
+#     HEDGE_DELAYS: paper Fig. 9)
 #   --smoke    short single runs, to check the harness works
 # Environment: RATE (total writes/s, default 1000), REPEATS (runs per case, default 3),
 #   REPLICA_CPUS ("0-1 2-3 4-5 6-7 8-9"), GEN_CPUS (10-15), SLOW_MS (one-way delay added to
@@ -28,8 +32,11 @@
 #   (extra kv-tokio flags for every QuePaxa replica, e.g. "--max-in-flight-slots 10");
 #   INLINE_BATCH_BYTES (if set, passes --inline-batch-bytes BYTES to every QuePaxa replica);
 #   SIZE (command size in bytes passed to kv-bench --size, default 17);
-#   LOAD_RATES (total writes/s per load run, default "1000 10000 50000 100000") and
-#   LOAD_SECS (default 60); LADDER_CPUS (one CPU quota per region in order, default
+#   LOAD_RATES (total writes/s per load/adversary run, default "1000 10000 50000 100000") and
+#   LOAD_SECS (default 60); ADVERSARY_EPOCH_S (default 5), ADVERSARY_MAX_MS (default 500),
+#   ADVERSARY_VICTIMS (default (n-1)/2); HEDGE_DELAYS (ms or "adaptive", default
+#   "50 100 150 200 300 400 500"), HEDGE_SECS (default 40), HEDGE_FAULT_S (default 15);
+#   LADDER_CPUS (one CPU quota per region in order, default
 #   "2 1 1.5 0.5 0.75"; a quota of 2 is none on the two-CPU cpusets) and CPU_PERIOD_US (the
 #   quota's period, default 10000), LADDER_FIRST (the region leading first, default the
 #   slowest); POLICY_SECS and SETTLED_FROM (the policy scenarios' run
@@ -45,7 +52,7 @@ scenarios=()
 for a in "$@"; do
   case $a in
     --smoke) smoke=1 ;;
-    calm | crash | partition | slow | jitter | convergence | heterogeneous | shift | burst | speedup | ladder | load)
+    calm | crash | partition | slow | jitter | convergence | heterogeneous | shift | burst | speedup | ladder | load | adversary | hedge-crash)
       scenarios+=("$a") ;;
     *) echo "unknown argument $a" >&2; exit 2 ;;
   esac
@@ -72,10 +79,12 @@ policy_case() { case $1 in convergence | heterogeneous | shift | burst | speedup
 # The scenarios with no WAN delay and members on a CPU quota.
 quota_case() { case $1 in heterogeneous | speedup | ladder) return 0 ;; esac; return 1; }
 if [ $smoke = 1 ]; then
-  policy_secs=30 change_at=15 change_for=5 settled_from=20 load_secs=8
+  policy_secs=30 change_at=15 change_for=5 settled_from=20 load_secs=${LOAD_SECS:-8}
+  hedge_secs=${HEDGE_SECS:-15} hedge_fault=${HEDGE_FAULT_S:-5}
 else
   policy_secs=${POLICY_SECS:-300} change_at=150 change_for=10 settled_from=${SETTLED_FROM:-240}
   load_secs=${LOAD_SECS:-60}
+  hedge_secs=${HEDGE_SECS:-40} hedge_fault=${HEDGE_FAULT_S:-15}
 fi
 read -r -a quepaxa_flags <<< "${QUEPAXA_FLAGS:-}"
 if [ -n "${INLINE_BATCH_BYTES:-}" ]; then
@@ -83,6 +92,9 @@ if [ -n "${INLINE_BATCH_BYTES:-}" ]; then
 fi
 size=${SIZE:-17}
 read -r -a load_rates <<< "${LOAD_RATES:-1000 10000 50000 100000}"
+read -r -a hedge_delays <<< "${HEDGE_DELAYS:-50 100 150 200 300 400 500}"
+adversary_epoch_s=${ADVERSARY_EPOCH_S:-5}
+adversary_max_ms=${ADVERSARY_MAX_MS:-500}
 read -r -a ladder_cpus <<< "${LADDER_CPUS:-2 1 1.5 0.5 0.75}"
 cpu_period_us=${CPU_PERIOD_US:-10000}
 sample_s=${SAMPLE_S:-5}
@@ -101,6 +113,7 @@ rtt=(
   "120 170 190 300 0"
 )
 n=${#regions[@]}
+adversary_victims=${ADVERSARY_VICTIMS:-$(((n - 1) / 2))}
 [ ${#ladder_cpus[@]} = "$n" ] || { echo "LADDER_CPUS: one quota per region ($n)" >&2; exit 2; }
 # The ladder's slowest member (the smallest quota) leads first, or LADDER_FIRST's.
 slowest=$(for i in $(seq 0 $((n - 1))); do echo "${ladder_cpus[$i]} $i"; done | sort -g -k1,1 | head -1 | cut -d' ' -f2)
@@ -150,10 +163,12 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
   echo "policy: $policy (everywhere: ${POLICY_EVERYWHERE:-0}); policy runs ${policy_secs}s, change at ${change_at}s for ${change_for}s, settled from ${settled_from}s; heterogeneous and speedup quota $slow_cpus CPUs on ${slow_region:-the first leader} (speedup: until the change)"
   echo "cpus: replicas ${replica_cpus[*]}, generators $gen_cpus, disk probe $probe_cpus"
   echo "quepaxa extra flags: ${quepaxa_flags[*]:-none}; load rates ${load_rates[*]} for ${load_secs}s each"
+  echo "adversary: $adversary_victims of $n replicas delayed 1-${adversary_max_ms}ms every ${adversary_epoch_s}s for ${load_secs}s"
+  echo "hedge-crash: delays ${hedge_delays[*]} ms, run ${hedge_secs}s, crash at ${hedge_fault}s, rate ${base_rate}/s"
   echo "ladder quotas: ${ladder_cpus[*]} CPUs (period ${cpu_period_us}us), first leader ${regions[$slowest]}; leader sampled every ${sample_s}s"
   # summarize-wan.sh reads this line.
   if [ "$data_tmpfs" = 1 ]; then echo "data: tmpfs"; else echo "data: host disk"; fi
-  echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms (ladder: the library defaults); etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
+  echo "timers: quepaxa retransmit 400ms, hedge_max 3000ms (ladder: the library defaults; hedge-crash: fixed hedge_min=hedge_max per delay); etcd 100/1000ms; etcd-tuned $max_rtt/$((10 * max_rtt))ms"
 } > "$results/env.txt"
 cat "$results/env.txt"
 
@@ -170,13 +185,17 @@ slow_of() {
   echo "$1"
 }
 
-# start_quepaxa <pinned> <scenario>: the pinned region leads first; the policy flags apply
-# to the policy scenarios (and to all with POLICY_EVERYWHERE=1); the quota scenarios put
-# the first leader's container (or SLOW_REGION's) on a CPU quota.
+# start_quepaxa <pinned> <scenario> [hedge_delay_ms]: the pinned region leads first; the
+# policy flags apply to the policy scenarios (and to all with POLICY_EVERYWHERE=1); the
+# quota scenarios put the first leader's container (or SLOW_REGION's) on a CPU quota;
+# hedge-crash pins hedge_min = hedge_max to the swept delay (unless "adaptive").
 start_quepaxa() {
   local members="" i flags=() quota mount slow timers=(--retransmit-ms 400 --hedge-max-ms 3000)
   # The ladder is a LAN: the library's default timers.
   [ "$2" = ladder ] && timers=()
+  if [ "$2" = hedge-crash ] && [ -n "${3:-}" ] && [ "$3" != adaptive ]; then
+    timers=(--retransmit-ms 400 --hedge-min-ms "$3" --hedge-max-ms "$3")
+  fi
   slow=$(slow_of "$1")
   for i in $(seq 0 $((n - 1))); do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
   if policy_case "$2" || [ "${POLICY_EVERYWHERE:-0}" = 1 ]; then read -r -a flags <<< "$policy"; fi
@@ -398,6 +417,67 @@ heal() {
   esac
 }
 
+# set_replica_delay <replica> <extra ms>: updates every peer link out of <replica> in place.
+set_replica_delay() {
+  local l=$1 ms=$2 j cmd=""
+  for j in $(peers_of "$l"); do cmd+="$(netem_cmd change "$l" "$j" "$ms"); "; done
+  sidecar "qpx-r$l" "$cmd"
+}
+
+# Dynamic network adversary (paper §7.4, Fig. 8): every adversary_epoch_s seconds, picks a
+# fresh minority of replicas and adds uniform 1..adversary_max_ms egress delay to their peer
+# links in place, restoring replicas no longer targeted.
+run_adversary() {
+  local t0=$1 total=$2 run=$3 log=$4 epochs=$((($2 + adversary_epoch_s - 1) / adversary_epoch_s))
+  local cur=() want=() pids=() i e line fields=() desc
+  for i in $(seq 0 $((n - 1))); do cur+=(0); done
+  : > "$log"
+  while read -r line; do
+    read -r -a fields <<< "$line"
+    e=${fields[0]}
+    sleep_until $((t0 + e * adversary_epoch_s * 1000))
+    want=()
+    for i in $(seq 0 $((n - 1))); do want+=(0); done
+    desc="$((e * adversary_epoch_s))"
+    for ((i = 1; i < ${#fields[@]}; i += 2)); do
+      want[fields[i]]=${fields[$((i + 1))]}
+      desc+=" ${regions[${fields[$i]}]}=${fields[$((i + 1))]}ms"
+    done
+    pids=()
+    for i in $(seq 0 $((n - 1))); do
+      if [ "${want[$i]}" != "${cur[$i]}" ]; then
+        set_replica_delay "$i" "${want[$i]}" &
+        pids+=($!)
+        cur[i]=${want[$i]}
+      fi
+    done
+    for i in "${pids[@]}"; do wait "$i"; done
+    echo "$desc" >> "$log"
+  done < <(awk -v n="$n" -v k="$adversary_victims" -v max="$adversary_max_ms" -v epochs="$epochs" -v seed="$run" '
+    BEGIN {
+      srand(seed * 1315423911 + 17)
+      for (e = 0; e < epochs; e++) {
+        for (i = 0; i < n; i++) a[i] = i
+        for (i = 0; i < k; i++) {
+          j = i + int(rand() * (n - i))
+          t = a[i]; a[i] = a[j]; a[j] = t
+        }
+        printf "%d", e
+        for (i = 0; i < k; i++) printf " %d %d", a[i], 1 + int(rand() * max)
+        printf "\n"
+      }
+    }')
+  sleep_until $((t0 + total * 1000))
+  pids=()
+  for i in $(seq 0 $((n - 1))); do
+    if [ "${cur[$i]}" != 0 ]; then
+      set_replica_delay "$i" 0 &
+      pids+=($!)
+    fi
+  done
+  for i in "${pids[@]}"; do wait "$i"; done
+}
+
 # region_load <scenario> <region>: kv-bench rate flags for that region's generator.
 region_load() {
   local per=$((rate / n)) region=${regions[$2]}
@@ -457,9 +537,10 @@ probe_disk() {
 run_case() {
   local system=$1 scenario=$2 pinned=$3 name=$4 run=$5 i pids=() before load sampler="" prober=""
   # The policy scenarios report the longest stall after their load changes instead.
-  local run_secs=$secs fault_at=$fault lifter=""
+  local run_secs=$secs fault_at=$fault lifter="" adversary_pid=""
   policy_case "$scenario" && run_secs=$policy_secs fault_at=$change_at
-  [ "$scenario" = load ] && run_secs=$load_secs
+  { [ "$scenario" = load ] || [ "$scenario" = adversary ]; } && run_secs=$load_secs
+  [ "$scenario" = hedge-crash ] && run_secs=$hedge_secs fault_at=$hedge_fault
   # Probes (containers of their own) run before and after the load, never during it; only
   # the policy scenarios sample the leader meanwhile, from the generators' CPUs, and the
   # disk probe (one 512-byte fsync a second, on PROBE_CPUS) runs throughout.
@@ -487,6 +568,12 @@ run_case() {
       { sleep_until $((t0 + change_at * 1000)); docker update --cpus "$(nproc)" "qpx-r$(slow_of "$pinned")" >/dev/null; } &
       lifter=$!
     fi
+  elif [ "$scenario" = adversary ]; then
+    run_adversary "$t0" "$run_secs" "$run" "$results/$name-adversary.txt" &
+    adversary_pid=$!
+  elif [ "$scenario" = hedge-crash ]; then
+    sleep_until $((t0 + fault_at * 1000))
+    inject crash "$pinned"
   else
     sleep_until $((t0 + fault * 1000))
     inject "$scenario" "$pinned"
@@ -496,6 +583,7 @@ run_case() {
   for i in "${pids[@]}"; do wait "$i"; done
   [ -z "$prober" ] || wait "$prober"
   [ -z "$lifter" ] || wait "$lifter"
+  [ -z "$adversary_pid" ] || wait "$adversary_pid"
   if [ -n "$sampler" ]; then
     touch "$results/$name.stop"
     wait "$sampler"
@@ -547,36 +635,42 @@ stop() {
 read -r -a systems <<< "${SYSTEMS:-quepaxa etcd etcd-tuned}"
 for system in "${systems[@]}"; do
   for scenario in "${scenarios[@]}"; do
-    { policy_case "$scenario" || [ "$scenario" = load ]; } && [ "$system" != quepaxa ] && continue
+    { policy_case "$scenario" || [ "$scenario" = load ] || [ "$scenario" = adversary ] || [ "$scenario" = hedge-crash ]; } && [ "$system" != quepaxa ] && continue
     placements=(far)
     [ "$scenario" = calm ] && placements+=(best)
     # The write shift starts where the first writers are best served.
-    [ "$scenario" = shift ] || [ "$scenario" = burst ] || [ "$scenario" = load ] && placements=(best)
-    # region_load reads $rate: the load scenario sets it per run, the others keep RATE.
+    { [ "$scenario" = shift ] || [ "$scenario" = burst ] || [ "$scenario" = load ] || [ "$scenario" = adversary ] || [ "$scenario" = hedge-crash ]; } && placements=(best)
+    # region_load reads $rate: load and adversary set it per run, the others keep RATE.
     rates=("$base_rate")
-    [ "$scenario" = load ] && rates=("${load_rates[@]}")
+    { [ "$scenario" = load ] || [ "$scenario" = adversary ]; } && rates=("${load_rates[@]}")
+    delays=("")
+    [ "$scenario" = hedge-crash ] && delays=("${hedge_delays[@]}")
     for placement in "${placements[@]}"; do
       for rate in "${rates[@]}"; do
-        [ "$placement" = far ] && pinned=$far || pinned=$best
-        [ "$scenario" = ladder ] && pinned=$slowest
-        label=$scenario
-        [ "$placement" = best ] && label=$scenario-best
-        [ "$scenario" = load ] && label=load-$rate
-        for run in $(seq 1 "$repeats"); do
-          echo "$system: $label, run $run"
-          case $system in
-            quepaxa) start_quepaxa "$pinned" "$scenario" ;;
-            etcd) start_etcd 100 1000 ;;
-            etcd-tuned) start_etcd "$max_rtt" $((10 * max_rtt)) ;;
-          esac
-          if ! quota_case "$scenario"; then
-            shape_links
-            check_links $(seq 0 $((n - 1)))
-          fi
-          check_generators
-          ready "$system" "$pinned"
-          run_case "$system" "$scenario" "$pinned" "$system-$label-$run" "$run"
-          stop
+        for delay in "${delays[@]}"; do
+          [ "$placement" = far ] && pinned=$far || pinned=$best
+          [ "$scenario" = ladder ] && pinned=$slowest
+          label=$scenario
+          [ "$placement" = best ] && label=$scenario-best
+          [ "$scenario" = load ] && label=load-$rate
+          [ "$scenario" = adversary ] && label=adversary-$rate
+          [ "$scenario" = hedge-crash ] && label=hedge-crash-$delay
+          for run in $(seq 1 "$repeats"); do
+            echo "$system: $label, run $run"
+            case $system in
+              quepaxa) start_quepaxa "$pinned" "$scenario" "$delay" ;;
+              etcd) start_etcd 100 1000 ;;
+              etcd-tuned) start_etcd "$max_rtt" $((10 * max_rtt)) ;;
+            esac
+            if ! quota_case "$scenario"; then
+              shape_links
+              check_links $(seq 0 $((n - 1)))
+            fi
+            check_generators
+            ready "$system" "$pinned"
+            run_case "$system" "$scenario" "$pinned" "$system-$label-$run" "$run"
+            stop
+          done
         done
       done
     done

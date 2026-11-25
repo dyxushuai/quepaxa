@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Turns a results directory from paper-eval.sh into markdown tables: each value the median
 # over runs, with the range in parentheses. The kind of experiment is read from the
-# directory's name (fig6-lan-*, fig7-*, fig6-wan-*, fig10-*).
+# directory's name (fig6-lan-*, fig7-*, fig6-wan-*, fig8-*, fig9-*, fig10-*).
 # Usage: paper-summarize.sh <results dir>
 set -euo pipefail
 dir=${1%/}
@@ -38,6 +38,28 @@ pct_csvs() {
       { v[NR] = $1 }
       function pct(p) { return NR ? v[int((NR - 1) * p + 0.5) + 1] / 1000 : 0 }
       END { printf "%.2f %.2f", pct(0.5), pct(0.99) }'
+}
+
+# cluster_gap_ms <from s> <to s> <csv...>: longest time (ms) in [from, to] with no
+# successful completion across all given generators.
+cluster_gap_ms() {
+  local from=$1 to=$2
+  shift 2
+  awk -F, -v f="$from" -v t="$to" 'FNR > 1 && $3 == "Ok" && $2 >= f * 1e6 && $2 <= t * 1e6 { print $2 }' "$@" |
+    sort -n -S 1G | awk -v f="$from" -v t="$to" '
+      BEGIN { prev = f * 1e6; gap = 0 }
+      { d = $1 - prev; if (d > gap) gap = d; prev = $1 }
+      END { d = t * 1e6 - prev; if (d > gap) gap = d; printf "%.1f", gap / 1000 }'
+}
+
+# tput_window <from s> <to s> <csv...>: successful completions per second with done_us in
+# [from, to) across all given generators.
+tput_window() {
+  local from=$1 to=$2
+  shift 2
+  awk -F, -v f="$from" -v t="$to" '
+    FNR > 1 && $3 == "Ok" && $2 >= f * 1e6 && $2 < t * 1e6 { c++ }
+    END { printf "%d", (t > f ? c / (t - f) + 0.5 : 0) }' "$@"
 }
 
 host() {
@@ -83,6 +105,63 @@ case $(basename "$dir") in
         lost=$(cat "$name"-r?.txt | awk '/^offered=/ { for (i = 1; i <= NF; i++) if ($i ~ /^(errors|unanswered)=/) { split($i, a, "="); s += a[2] } } END { print s + 0 }')
         echo "$tput $(pct_csvs 0 "$secs" "$name"-r?.csv) $lost"
       done | { printf '| %s' "$rate"; combine; }
+    done
+    ;;
+  fig8-*)
+    echo "### Fig. 8: emulated WAN, 5 replicas, adversary delaying a changing minority up to 500 ms every 5 s"
+    echo
+    host
+    secs=$(sed -n 's/.*adversary: .* for \([0-9]*\)s/\1/p' "$dir/env.txt")
+    echo "| Offered | Throughput | p50 (ms) | p99 (ms) | Errors + unanswered |"
+    echo "|---|---|---|---|---|"
+    for rate in $(find "$dir" -name 'quepaxa-adversary-*-r0.txt' -printf '%f\n' | cut -d- -f3 | sort -nu); do
+      for f in "$dir"/quepaxa-adversary-"$rate"-*-r0.txt; do
+        name=${f%-r0.txt}
+        tput=$(cat "$name"-r?.txt | awk '/^offered=/ { for (i = 1; i <= NF; i++) if ($i ~ /^throughput=/) { v = substr($i, 12); sub(/\/s$/, "", v); s += v } } END { print s + 0 }')
+        lost=$(cat "$name"-r?.txt | awk '/^offered=/ { for (i = 1; i <= NF; i++) if ($i ~ /^(errors|unanswered)=/) { split($i, a, "="); s += a[2] } } END { print s + 0 }')
+        echo "$tput $(pct_csvs 0 "$secs" "$name"-r?.csv) $lost"
+      done | { printf '| %s' "$rate"; combine; }
+    done
+    ;;
+  fig9-*)
+    echo "### Fig. 9: emulated WAN, 5 replicas, leader failure across hedging delays"
+    echo
+    host
+    secs=$(sed -n 's/.*hedge-crash: .* run \([0-9]*\)s.*/\1/p' "$dir/env.txt")
+    fault_s=$(sed -n 's/.*hedge-crash: .* crash at \([0-9]*\)s.*/\1/p' "$dir/env.txt")
+    best=$(sed -n 's/^regions: .*best: \([^ ]*\).*/\1/p' "$dir/env.txt")
+    read -r -a regions <<< "$(sed -n 's/^regions: \([^;]*\);.*/\1/p' "$dir/env.txt")"
+    surv=()
+    for i in "${!regions[@]}"; do [ "${regions[$i]}" = "$best" ] || surv+=("$i"); done
+    pre_from=$((fault_s >= 10 ? 5 : 1))
+    echo "Leader ($best) killed with SIGKILL at ${fault_s}s; pre-crash throughput covers 0-${fault_s}s and pre p50 covers ${pre_from}-$((fault_s - 1))s (all regions); post-crash throughput, recovery gaps and post latency cover ${fault_s}-${secs}s on the four surviving regions; errors + unanswered, hedged and egress are whole-run totals on the four surviving regions."
+    echo
+    echo "| Hedging delay (ms) | Pre-crash (/s) | Post-crash (/s) | Recovery gap (ms) | Worst-region gap (ms) | Pre p50 (ms) | Post p50 (ms) | Post p99 (ms) | Errors + unanswered | Hedged | Egress (MiB) |"
+    echo "|---|---|---|---|---|---|---|---|---|---|---|"
+    for delay in $(find "$dir" -name 'quepaxa-hedge-crash-*-r0.txt' -printf '%f\n' | sed 's/^quepaxa-hedge-crash-\(.*\)-[0-9]*-r0\.txt$/\1/' | sort -u -V); do
+      for f in "$dir"/quepaxa-hedge-crash-"$delay"-[0-9]*-r0.txt; do
+        name=${f%-r0.txt}
+        surv_csvs=() surv_txts=()
+        for i in "${surv[@]}"; do surv_csvs+=("$name-r$i.csv"); surv_txts+=("$name-r$i.txt"); done
+        pre_tput=$(tput_window 0 "$fault_s" "$name"-r?.csv)
+        post_tput=$(tput_window "$fault_s" "$secs" "${surv_csvs[@]}")
+        rec_gap=$(cluster_gap_ms "$fault_s" "$secs" "${surv_csvs[@]}")
+        worst_gap=$(awk '/^fault_at/ { for (i = 1; i <= NF; i++) if ($i ~ /^longest_gap=/) { v = substr($i, 13) + 0; if (v > m) m = v } } END { print m + 0 }' "${surv_txts[@]}")
+        read -r pre_p50 _ <<< "$(pct_csvs "$pre_from" $((fault_s - 1)) "$name"-r?.csv)"
+        read -r post_p50 post_p99 <<< "$(pct_csvs "$fault_s" "$secs" "${surv_csvs[@]}")"
+        lost=$(awk '/^offered=/ { for (i = 1; i <= NF; i++) if ($i ~ /^(errors|unanswered)=/) { split($i, a, "="); s += a[2] } } END { print s + 0 }' "${surv_txts[@]}")
+        read -r hedged egress <<< "$(awk '
+          {
+            if (match($0, /hedged: [0-9]+/)) h += substr($0, RSTART + 8, RLENGTH - 8)
+            if (match($0, /EGRESS [^ ]+/)) {
+              eg = substr($0, RSTART + 7, RLENGTH - 7)
+              k = split(eg, a, ",")
+              for (i = 1; i <= k; i++) { split(a[i], kv, "="); b += kv[2] }
+            }
+          }
+          END { printf "%d %.1f", h + 0, b / 1048576 }' "$name-stats.txt")"
+        echo "$pre_tput $post_tput $rec_gap $worst_gap $pre_p50 $post_p50 $post_p99 $lost $hedged $egress"
+      done | { printf '| %s' "$delay"; combine; }
     done
     ;;
   fig10-*)
