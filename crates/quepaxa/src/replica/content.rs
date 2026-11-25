@@ -423,7 +423,16 @@ impl Replica {
                 }
             }
         }
+        let before = self.held;
         self.advance_held();
+        // If unblocking missing data advanced the held prefix, advertise the new tip so a peer
+        // that earlier saw a stale commit_index learns the newly held slots in a quiet cluster.
+        if self.held > before
+            && let Some(d) = self.log.get(&Slot(self.held - 1))
+        {
+            let (priority, key) = (d.proposal.priority, d.proposal.key);
+            self.broadcast_decided(Slot(self.held - 1), priority, key);
+        }
         self.emit_commits();
     }
 

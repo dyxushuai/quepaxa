@@ -208,14 +208,8 @@ impl Replica {
                 self.lost_slot(a.batch, proposal.key.origin, a.started);
             }
         }
-        if broadcast {
-            // Everyone in the current or a pending epoch: joining replicas catch up early.
-            let peers: Vec<NodeId> = self.schedule.everyone().into_iter().filter(|&m| m != self.me).collect();
-            for peer in peers {
-                self.send(peer, Body::Decided { slot, priority: proposal.priority, key: proposal.key });
-            }
-        }
         let origin = proposal.key.origin;
+        let (priority, key) = (proposal.priority, proposal.key);
         self.log.insert(slot, Decision { proposal });
         if !missing.is_empty() {
             self.note_missing_slot(slot, hint);
@@ -223,10 +217,21 @@ impl Replica {
         }
         self.advance_committed();
         self.advance_held();
+        if broadcast {
+            self.broadcast_decided(slot, priority, key);
+        }
         // A decision is already durable at a majority of recorders, so it is applied before
         // its local record is: a replica that crashes first learns it again from peers.
         self.emit_commits();
         self.after_durable(Effect::DecidedDurable(slot));
+    }
+
+    /// Announces `slot` decided to every known replica in the current or pending epoch.
+    pub(super) fn broadcast_decided(&mut self, slot: Slot, priority: u64, key: ValueKey) {
+        let peers: Vec<NodeId> = self.schedule.everyone().into_iter().filter(|&m| m != self.me).collect();
+        for peer in peers {
+            self.send(peer, Body::Decided { slot, priority, key });
+        }
     }
 
     /// Extends the contiguous decided prefix, feeding each newly decided slot to the leader

@@ -166,3 +166,46 @@ fn a_decision_far_ahead_is_asked_for_on_the_timer() {
     assert_eq!(decided_value(&r, far.0).as_deref(), Some(&b"far"[..]));
     assert!(r.unresolved.is_empty());
 }
+
+#[test]
+fn decided_broadcast_advertises_the_advanced_held_prefix() {
+    let mut r0 = replica_as(0);
+    let p0 = with_value(proposal(LEADER_PRIORITY, 0, 0), b"slot0");
+    let p1 = with_value(proposal(LEADER_PRIORITY, 2, 1), b"slot1");
+    // Replica 0 already learned slot 1 while a peer missed it; held is still 0.
+    r0.learn(Slot(1), p1, false, Some(NodeId(2)));
+    sent(&mut r0);
+    assert_eq!(r0.held, 0);
+
+    // Deciding slot 0 with broadcast advances held to 2 before encoding Decided,
+    // so peers hear commit_index = 2 rather than the stale 0.
+    r0.learn(Slot(0), p0.clone(), true, None);
+    let mut out = Vec::new();
+    r0.poll_actions(&mut out);
+    let decided_to_n1 = out
+        .into_iter()
+        .find_map(|a| match a {
+            Action::Send(o) if o.to == NodeId(1) => {
+                let m = Message::decode(&o.bytes, &r_wire()).unwrap();
+                matches!(m.body, Body::Decided { slot: Slot(0), .. }).then_some((o, m))
+            }
+            _ => None,
+        })
+        .expect("Decided broadcast for slot 0 to n1");
+    assert_eq!(
+        decided_to_n1.1.env.commit_index, 2,
+        "Decided envelope must carry the post-learn held prefix (2), not stale 0"
+    );
+
+    // Feeding that message to n1 (which already knows slot 0's value from a record request)
+    // commits slot 0 AND schedules slot 1 in `seen`, so n1 cannot stall behind in a quiet cluster.
+    let mut r1 = replica_as(1);
+    r1.handle(Timestamp(1), from_peer(0, 1, Body::RecordRequest { slot: Slot(0), step: 4, proposal: p0 }))
+        .unwrap();
+    sent(&mut r1);
+    r1.handle(Timestamp(2), Input::Message(decided_to_n1.0.bytes)).unwrap();
+    sent(&mut r1);
+    assert_eq!(r1.commit_index(), 1);
+    assert!(r1.seen.contains_key(&Slot(1)), "n1 must schedule slot 1 after hearing commit_index = 2");
+    assert!(r1.next_deadline().is_some());
+}

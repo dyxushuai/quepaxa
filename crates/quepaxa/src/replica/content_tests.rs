@@ -631,3 +631,45 @@ fn ref_forwards_track_ack_resend_compactly_and_ack_after_staging_wakes() {
     follower.poll_actions(&mut out);
     assert!(follower.watch.fwd.is_acked(id), "ref-forwarded own entry marked acked");
 }
+
+#[test]
+fn waking_missing_log_broadcasts_the_newly_held_tip() {
+    let mut c = Config::new([3; 16], NodeId(1), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    c.inline_batch_bytes = 64;
+    let p0 = Proposal {
+        priority: crate::proposal::LEADER_PRIORITY,
+        key: ValueKey { origin: NodeId(0), incarnation: 1, seq: 0 },
+        value: Bytes::from_static(b"slot0"),
+    };
+    let data_bytes = content();
+    let data_id = data_id(1, 0);
+    let p1 = referencing();
+    let records = [
+        Record::Incarnation(1).encode(),
+        Record::Decided { slot: Slot(0), proposal: p0 }.encode(),
+        Record::Decided { slot: Slot(1), proposal: p1 }.encode(),
+    ];
+    let mut rep = Replica::new(c, records, Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(1));
+    assert_eq!(rep.commit_index(), 2);
+    assert_eq!(rep.held, 1);
+
+    // Delivering the missing data for slot 1 advances held to 2 and advertises slot 1 to peers.
+    rep.handle(Timestamp(2), from_peer(2, 1, Body::Data { id: data_id, bytes: data_bytes })).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(rep.held, 2);
+    let decided: Vec<(NodeId, u64, Slot)> = sent(&out)
+        .into_iter()
+        .filter_map(|o| {
+            let m = decode_msg(&o.bytes);
+            match m.body {
+                Body::Decided { slot, .. } => Some((o.to, m.env.commit_index, slot)),
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(decided, [(NodeId(0), 2, Slot(1)), (NodeId(2), 2, Slot(1))]);
+}
