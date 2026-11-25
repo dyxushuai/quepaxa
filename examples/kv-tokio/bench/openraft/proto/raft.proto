@@ -1,0 +1,65 @@
+syntax = "proto3";
+
+package openraftkv;
+
+// Internal peer RPCs (Raft consensus + follower-to-leader client forwarding) and cluster
+// control RPCs used by the benchmark harness.
+service RaftPeer {
+  rpc StreamAppend(stream BytesMsg) returns (stream BytesMsg);
+  rpc Vote(BytesMsg) returns (BytesMsg);
+  rpc PreVote(BytesMsg) returns (BytesMsg);
+  rpc InstallSnapshot(BytesMsg) returns (BytesMsg);
+  rpc TransferLeader(BytesMsg) returns (BytesMsg);
+
+  rpc ForwardPut(ForwardPutReq) returns (ForwardPutResp);
+  rpc ForwardRange(ForwardRangeReq) returns (ForwardRangeResp);
+
+  rpc Init(Empty) returns (Empty);
+  rpc Status(Empty) returns (StatusResp);
+  rpc MoveLeader(MoveLeaderReq) returns (Empty);
+}
+
+message Empty {}
+
+message BytesMsg {
+  bytes data = 1;
+}
+
+message ForwardPutReq {
+  bytes key = 1;
+  bytes value = 2;
+}
+
+message ForwardPutResp {
+  uint64 revision = 1;
+  // Set when the target is no longer leader and has not proposed the write.
+  bool redirected = 2;
+  uint64 leader_id = 3;
+}
+
+message ForwardRangeReq {
+  bytes key = 1;
+}
+
+message ForwardRangeResp {
+  uint64 revision = 1;
+  bool found = 2;
+  bytes value = 3;
+  bool redirected = 4;
+  uint64 leader_id = 5;
+  uint64 create_revision = 6;
+  uint64 mod_revision = 7;
+  uint64 version = 8;
+}
+
+message StatusResp {
+  uint64 node_id = 1;
+  bool has_leader = 2;
+  uint64 leader_id = 3;
+  uint64 term = 4;
+  bool initialized = 5;
+}
+
+message MoveLeaderReq {
+  uint64 target_id = 1;
+}

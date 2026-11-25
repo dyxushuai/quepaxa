@@ -1,0 +1,33 @@
+[workspace]
+
+[package]
+name = "openraft-kv"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Minimal fsync-backed Openraft KV server serving the etcd v3 KV subset for WAN comparison"
+
+[dependencies]
+crc32fast = "1.5"
+futures-util = { version = "0.3", default-features = false, features = ["alloc", "std"] }
+mimalloc = { version = "0.1.52", default-features = false }
+openraft = { version = "0.10.1", default-features = false, features = ["tokio-rt", "serde"] }
+prost = "0.14.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.53.3", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-stream = "0.1"
+tonic = { version = "0.14.6", default-features = false, features = ["codegen", "router", "server", "channel", "transport"] }
+tonic-prost = "0.14.6"
+
+[build-dependencies]
+protox = "0.10.0"
+tonic-prost-build = { version = "0.14.6", default-features = false, features = ["transport"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

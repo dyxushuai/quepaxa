@@ -90,6 +90,15 @@ generator reaches its local replica in under 1 ms.
 - **Timers.** QuePaxa runs with `--retransmit-ms 400 --hedge-max-ms 3000`, the WAN values
   in `quepaxa::Config`'s docs. etcd runs with its defaults (100 ms, 1000 ms) and tuned per
   its guide: heartbeat at the largest round trip (300 ms), election timeout ten times it.
+  Openraft (`SYSTEMS="quepaxa openraft openraft-tuned" INTERLEAVE=1 wan.sh`, built from
+  the standalone `examples/kv-tokio/bench/openraft/` crate) runs with `openraft` (400 ms
+  heartbeat, 1000-1500 ms election timeout; Openraft 0.10 sets each heartbeat's hard RPC
+  timeout to `heartbeat_interval`, so heartbeats must exceed the 300 ms max RTT, and sets
+  follower `leader_lease = election_timeout_max`, so elections fire after
+  `election_timeout_max + [min, max)` = 2.5-3.0 s) and `openraft-tuned` (1000 ms
+  heartbeat, 2000-3000 ms election timeout; 5.0-6.0 s failover, matching `etcd-tuned`'s
+  ~5 s failover). Both Openraft profiles enable Pre-Vote, pipelined `StreamAppend`,
+  dedicated heartbeat channels, and an append-only CRC32-framed `sync_data()` WAL.
 - **Load.** `RATE` (1000 writes/s) split evenly over a generator per region, each with its
   own seed, writing only to its region's replica.
 - **Runs.** Each case runs `REPEATS` (3) times on fresh containers; `summary.md` gives the

@@ -879,6 +879,118 @@ The data: `target/bench-etcd/wan-20261114-094533/` (the three runs) and
 `wan-20261114-004901/` (one earlier run in the fast regime: ap-ne as follower p90 10.2 ms
 against 9.7 ms for us-east; as leader 14.6 against 9.7-9.8).
 
+## Against Openraft (across regions, #156)
+
+Interleaved five-region WAN comparison of `kv-tokio` (QuePaxa) against a standalone
+`openraft 0.10.1` KV server (`examples/kv-tokio/bench/openraft/`, isolated from the root
+workspace so core dependencies stay untouched). Both systems run five containers pinned to
+CPUs `0-1 2-3 4-5 6-7 8-9` across the `wan_leaders` five-region RTT matrix (70-300 ms via
+`tc netem`), persist to the host ext4 disk with group-commit `sync_data()` on a CRC32-framed
+append-only WAL (`records.log` vs `raft.log`), use `mimalloc`, and serve the same etcd v3 KV
+gRPC API driven by five open-loop `kv-bench --protocol etcd` generators (200 puts/s per
+region, 1,000 puts/s total, 40 s runs, fault at 10 s, heal at 25 s). Openraft enables
+Pre-Vote (`enable_pre_vote = Some(true)`), pipelined bidirectional `StreamAppend`, dedicated
+heartbeat HTTP/2 channels, atomic durable snapshots every 10,000 entries, and follower-to-leader
+`ForwardPut` with immediate cancellation on local leader change and a 7 s timeout (matching
+etcd).
+
+```sh
+SYSTEMS="quepaxa openraft openraft-tuned" INTERLEAVE=1 REPEATS=3 \
+  examples/kv-tokio/bench/etcd/wan.sh
+```
+
+**Timers.** QuePaxa runs with its WAN timers (`--retransmit-ms 400 --hedge-max-ms 3000`).
+Openraft 0.10.1 enforces `C::timeout(heartbeat_interval)` on every heartbeat RPC (so
+`heartbeat_interval` must exceed the 300 ms maximum WAN RTT) and sets each follower's
+`leader_lease` to `election_timeout_max` (so follower elections fire after
+`election_timeout_max + [election_timeout_min, election_timeout_max)`). To match etcd's and
+`etcd-tuned`'s failover windows fairly rather than penalizing Openraft with library LAN
+defaults (`50 / 150-300 ms`, which cannot hold a leader across 300 ms RTTs) or overly wide
+leases:
+
+- `openraft`: heartbeat 400 ms, election 1,000-1,500 ms (2.5-3.0 s nominal failover).
+- `openraft-tuned`: heartbeat 1,000 ms, election 2,000-3,000 ms (5.0-6.0 s nominal failover).
+
+Measured 2026-11-24 at `a790ff2` on the 16-vCPU VM above (idle 512-byte `fsync`: 1.69 ms
+mean, starting 1-minute load 5.91, all 54 trials interleaved per scenario and repeat under
+`flock target/ops/bench.lock`). Raw data and `summary.md` are kept outside the repo under
+`~/.local/share/quepaxa-eval/openraft-156/full/`. Medians of three runs with min-max ranges
+in parentheses, latencies in ms.
+
+With the leader's region alive, across all five regions' writes:
+
+| Leader's region | System | p50 | p99 | max | Longest gap | Errors | Disk regime (probe p50) |
+|---|---|---|---|---|---|---|---|
+| far (`ap-ne`), no fault | QuePaxa | 435 (434–438) | 648 (648–649) | 814 (765–899) | 184 (184–186) | 0 | fast (2.5–2.8 ms) |
+| | openraft | 365 (365–366) | 489 (489–554) | 842 (776–868) | 116 (114–370) | 0 | fast (3.0–3.5 ms) |
+| | openraft-tuned | 365 (365–366) | 488 (488–533) | 872 (871–1,096) | 52 (50–61) | 0 | fast (3.1–3.3 ms) |
+| best (`us-east`), no fault | QuePaxa | 200 (185–205) | 323 (315–365) | 450 (372–478) | 182 (84–223) | 0 | fast (2.6–3.2 ms) |
+| | openraft | 173 (165–185) | 410 (277–543) | 624 (431–864) | 340 (170–439) | 0 | mixed (3.1–7.5 ms) |
+| | openraft-tuned | 174 (166–205) | 382 (376–998) | 661 (608–1,207) | 392 (366–666) | 0 | mixed (3.1–7.0 ms) |
+| far, +100 ms on its links | QuePaxa | 499 (486–503) | 914 (831–918) | 963 (907–964) | 288 (242–289) | 0 | fast (2.6–2.9 ms) |
+| | openraft | 416 (415–2,789) | 767 (732–13,605) | 1,122 (1,033–14,530) | 471 (353–9,330) | 0 (0–9,931) | mixed (3.2–70.7 ms) |
+| | openraft-tuned | 416 (415–422) | 720 (695–724) | 1,138 (1,001–1,142) | 172 (122–315) | 0 | mixed (3.2–6.9 ms) |
+| far, jitter (σ 50 ms) & 1% loss | QuePaxa | 460 (450–472) | 891 (877–910) | 1,144 (1,087–1,229) | 511 (467–535) | 0 | fast (2.6–4.7 ms) |
+| | openraft | 621 (604–2,433) | 7,349 (6,880–7,785) | 7,842 (7,060–8,392) | 3,958 (1,386–7,185) | 2,939 (865–5,532) | mixed (3.0–54.9 ms) |
+| | openraft-tuned | 747 (637–957) | 5,730 (5,021–6,455) | 6,173 (5,506–6,701) | 568 (539–986) | 0 | fast (2.9–3.4 ms) |
+
+With the leader's region (`ap-ne`) crashed or cut off, across the four surviving regions'
+writes (percentiles cover successful requests only; requests Openraft fails during elections
+are counted in `Errors`, not in latency percentiles):
+
+| Fault | System | Errors | Longest gap | p50 | p99 | max | Leader after | Disk regime |
+|---|---|---|---|---|---|---|---|---|
+| crash (`SIGKILL`) | QuePaxa | 0 | 714 (707–780) | 208 (190–209) | 1,092 (928–1,127) | 12,398 (12,354–12,417) | `us-east` (3/3) | mixed (2.7–6.4 ms) |
+| | openraft | 3,035 (2,997–3,143) | 3,951 (3,921–3,979) | 287 (286–293) | 588 (573–590) | 869 (862–1,091) | `eu-west` (3/3) | mixed (3.0–6.0 ms) |
+| | openraft-tuned | 4,896 (4,701–5,358) | 6,027 (5,991–6,846) | 204 (204–346) | 528 (527–662) | 873 (850–1,094) | `us-east` (2), `sa-east` (1) | fast (3.2–3.7 ms) |
+| partition (15 s) | QuePaxa | 0 | 732 (608–754) | 211 (207–212) | 963 (865–1,076) | 12,415 (1,364–12,417) | `us-east` (3/3) | fast (2.5–3.0 ms) |
+| | openraft | 5,188 (3,366–5,820) | 6,624 (6,366–7,552) | 286 (166–346) | 649 (593–2,264) | 3,160 (2,733–4,090) | `us-east`, `sa-east`, `us-west` | fast (3.3–3.8 ms) |
+| | openraft-tuned | 5,367 (5,073–5,402) | 7,557 (6,825–8,662) | 295 (285–346) | 959 (582–2,178) | 1,379 (1,132–2,564) | `us-west`, `eu-west`, `sa-east` | fast (3.1–3.4 ms) |
+
+What the tables show, and what they do not:
+
+- **Steady state (`calm`, `calm-best`) and uniform `+100 ms` delay (`slow`): Openraft has lower
+  steady-state latency.** With `ap-ne` leading, Openraft's local commit p50 is 185 ms (180 ms
+  RTT to its second-nearest peer `us-east` plus ~5 ms `fsync`) and all-region p50/p99 is
+  365/488-489 ms, against QuePaxa's 263 ms local p50 and 435/648 ms overall. Under `+100 ms`
+  uniform leader delay (`slow`), `ap-ne` stays leader in all three systems and `openraft-tuned`
+  commits at 416/720 ms with 0 errors versus QuePaxa's 499/914 ms. Openraft streams
+  `AppendEntries` continuously over `StreamAppend` without filling a fixed 8-slot in-flight
+  window, whereas QuePaxa's default `max_in_flight_slots = 8` fills in bursts on a 180 ms
+  quorum RTT (visible in its 184 ms `calm` gap). In `calm-best`, Openraft's p50 stays lower
+  (173 vs 200 ms), while its p99 (382-410 vs 323 ms) reflects both mixed disk spikes and
+  40,000 single-entry Raft logs crossing its 10,000-entry snapshot threshold 3-4 times per
+  run (QuePaxa batches many writes per slot and stays below its 10,000-slot snapshot
+  threshold).
+- **Host disk stalls affected two Openraft runs.** `openraft` run 3 of `slow` hit a shared-host
+  disk stall (probe `fsync` p50 70.7 ms, max 6.79 s), which broke its 400 ms heartbeat and
+  caused all 9,931 errors (runs 1-2 in the fast regime had 0 errors and p99 732-767 ms).
+  `openraft` run 2 of `jitter` similarly hit a 54.9 ms disk p50 (5,532 errors), though runs 1
+  and 3 in the fast disk regime (3.0-3.1 ms) still saw 865-2,939 errors and 6.9-7.3 s p99.
+- **Jitter + 1% loss (`jitter`): QuePaxa cuts p99 by 6.4×–8.2× with 0 errors.** All three
+  `quepaxa` and `openraft-tuned` runs stayed in the fast disk regime (2.6-4.7 ms, 21-39 TCP
+  reorders). QuePaxa held p99 at 891 ms with 0 errors. `openraft-tuned` avoided spurious
+  elections (0 errors) via its 1 s heartbeat / 3 s lease, yet sequential Raft replication
+  head-of-line blocked behind 1% packet loss and netem jitter to a 5,730 ms p99 (similar to
+  `etcd-tuned`'s 6,880 ms). Aggressive `openraft` (400 ms heartbeat) suffered both elections
+  and head-of-line backlog (2,939 median errors, 7,349 ms p99).
+- **Leader crash and partition: QuePaxa fails 0 requests and recovers 5.5×–10.3× faster.**
+  QuePaxa rotated deterministically to `us-east` (next in `--leader-order`) in 714 ms
+  (`crash`) and 732 ms (`partition`) with 0 errors. Openraft failed 3,035-5,367 writes across
+  3,951-6,027 ms (`crash`) and 6,624-7,557 ms (`partition`) while waiting out its follower
+  lease plus election timeout (and TCP/HTTP2 keepalive teardown under silent `iptables DROP`),
+  and elected whichever survivor won the race (`eu-west`, `us-west`, `sa-east`, or `us-east`),
+  moving post-fault p50 accordingly. Openraft's lower post-fault p99 (528-959 ms vs QuePaxa's
+  963-1,092 ms) omits the 3k-5.4k failed requests, whereas QuePaxa's p99 includes every
+  request delayed across the 714-732 ms failover.
+- **QuePaxa `sa-east` 12.4 s max outlier on crash/partition.** In `crash` (3/3 runs) and
+  `partition` (2/3 runs), 10-30 writes from `sa-east` (out of 32,000 surviving-region writes)
+  forwarded right before `ap-ne` failed waited until the `4 · hedge_max` (12 s) upper bound
+  introduced in #231 before hedging, completing at 12.3-12.4 s with 0 errors (`us-east`,
+  `us-west`, and `eu-west` max stayed at 0.94-1.43 s).
+- Single-host caveats apply identically to "Against etcd" above: emulated links, shared host
+  CPUs and ext4 disk, and no bandwidth cap; hypotheses for real regions, not production claims.
+
 ## The paper's evaluation (§7, #174)
 
 Figs. 6, 7, 8, 9 and 10 of the paper (Tennage et al., SOSP'23, §7.2–§7.6), rerun on this
