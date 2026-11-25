@@ -76,7 +76,7 @@ The paper does not cover reads; everything here is an extension.
 |---|---|---|---|
 | Fig. 6 | LAN and WAN throughput against latency | Implemented (single-host LAN and emulated WAN; real regions wait on #159) | `examples/kv-tokio/bench/paper-eval.sh`, `docs/benchmarks.md`; #174 |
 | Fig. 7 | LAN scalability, 3 to 13 replicas | Implemented (single-host; 3–7 generator-limited, 9–13 cluster-limited) | `examples/kv-tokio/bench/paper-eval.sh`, `docs/benchmarks.md`; #174 |
-| Fig. 8 | Adversary delaying a changing minority by up to 500 ms | Partly: fixed slow, jitter and loss faults on the leader's region; dynamic minority waits on #231 | `examples/kv-tokio/bench/etcd/wan.sh`; #174 |
-| Fig. 9 | Recovery and throughput across hedging delays after a leader failure | Partly: leader crash and partition at fixed delays; delay sweep waits on #231 | `docs/benchmarks.md`; #174 |
+| Fig. 8 | Adversary delaying a changing minority by up to 500 ms | Implemented (single-host emulated WAN, 2 of 5 replicas delayed 1–500 ms every 5 s; real regions wait on #159) | `examples/kv-tokio/bench/paper-eval.sh`, `examples/kv-tokio/bench/etcd/wan.sh`, `docs/benchmarks.md`; #174 |
+| Fig. 9 | Recovery and throughput across hedging delays after a leader failure | Implemented (single-host emulated WAN, 50–500 ms fixed delays + adaptive control at 25k/s; real regions wait on #159) | `examples/kv-tokio/bench/paper-eval.sh`, `examples/kv-tokio/bench/etcd/wan.sh`, `docs/benchmarks.md`; #174 |
 | Fig. 10 | Convergence to the best leader among heterogeneous machines | Implemented (single-host CPU quotas; 40k/s did not saturate the 1-CPU leader) | `examples/kv-tokio/bench/paper-eval.sh`, `docs/benchmarks.md`; #174 |
 | §8 | Automated tuning of batch size and pipeline length (related work the paper calls complementary) | Open | #175 |

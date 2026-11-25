@@ -881,24 +881,22 @@ against 9.7 ms for us-east; as leader 14.6 against 9.7-9.8).
 
 ## The paper's evaluation (§7, #174)
 
-Figs. 6, 7 and 10 of the paper (Tennage et al., SOSP'23, §7.2, §7.3, §7.6), rerun on this
+Figs. 6, 7, 8, 9 and 10 of the paper (Tennage et al., SOSP'23, §7.2–§7.6), rerun on this
 host with `examples/kv-tokio/bench/paper-eval.sh`, which drives `run-local.sh` (LAN) and
-`bench/etcd/wan.sh` (emulated WAN and Fig. 10). Figs. 8 and 9 (adversarial egress delay,
-leader failure across hedging delays) depend on the hedging and resend timing being changed
-in #231 and come in a follow-up.
+`bench/etcd/wan.sh` (emulated WAN and Fig. 10).
 
 ```sh
-examples/kv-tokio/bench/paper-eval.sh fig6-lan fig7 fig6-wan fig10
-examples/kv-tokio/bench/paper-eval.sh --smoke fig6-lan fig7 fig6-wan fig10
+examples/kv-tokio/bench/paper-eval.sh fig6-lan fig7 fig6-wan fig8 fig9 fig10
+examples/kv-tokio/bench/paper-eval.sh --smoke fig6-lan fig7 fig6-wan fig8 fig9 fig10
 ```
 
 Each figure takes the shared bench lock (`target/ops/bench.lock` in the main checkout) from
 its build through its last run and writes raw outputs, `env.txt`/`host.txt` and `summary.md`
-(`paper-summarize.sh`) under `~/.local/share/quepaxa-eval/paper-eval/`. All runs below were
-taken on 2026-11-22 at `17e983d` on the 16-vCPU VM above (78 GiB RAM, Linux
-`7.0.14-17-pve`, tmpfs data, 17-byte `PUT` commands, `--snapshot-every 1000000000000` so
-log compaction stays off as in the paper's prototype, §7.1 footnote 8). Values are medians
-over three runs with min–max ranges in parentheses.
+(`paper-summarize.sh`) under `~/.local/share/quepaxa-eval/paper-eval/`. Figs. 6, 7 and 10
+below were taken on 2026-11-22 at `17e983d` and Figs. 8 and 9 on 2026-11-24 at `a790ff2` on
+the 16-vCPU VM above (78 GiB RAM, Linux `7.0.14-17-pve`, tmpfs data, 17-byte `PUT` commands,
+`--snapshot-every 1000000000000` so log compaction stays off as in the paper's prototype,
+§7.1 footnote 8). Values are medians over three runs with min–max ranges in parentheses.
 
 These are single-host measurements, not production claims. The paper ran each replica on its
 own 16-vCPU EC2 `c4.4xlarge` and each submitter on a `c4.2xlarge`; here every replica and
@@ -983,6 +981,96 @@ leader `us-east`), `--max-in-flight-slots 10`, WAN timers (`retransmit 400 ms`, 
   p99 climbs past 1.5 s at 10k/s and errors appear past 30k/s as five containers, `tc netem`
   queues, five generators and the concurrent host load (12.6–13.0) contend for 16 vCPUs.
   Real-region numbers wait on #159.
+
+### Fig. 8: emulated WAN, adversary delaying a changing minority (§7.4)
+
+Same 5-region emulated WAN layout and parameters as Fig. 6c–d (`us-east` leading initially,
+`--max-in-flight-slots 10`, `--snapshot-every 1000000000000`, WAN timers `retransmit 400 ms`
+and `hedge_max 3 s`, 60 s per offered rate, 3 runs), with a dynamic adversary (`wan.sh
+adversary`) that every 5 s chooses a fresh minority (2 of 5 replicas, deterministic per run
+and epoch) and adds uniform `1–500 ms` extra egress delay to all peer links of those two
+replicas in place via `tc qdisc change`, restoring replicas no longer targeted. The initial
+leader (`us-east`) is targeted in 5–6 of the 12 epochs per run. Measured 2026-11-24 at
+`a790ff2` (`~/.local/share/quepaxa-eval/paper-fig8-9/fig8-20261124-231550`, load 18.90 at
+start, 9.81 at end).
+
+| Offered (/s) | Throughput (/s) | p50 (ms) | p99 (ms) | Errors + unanswered |
+|---|---|---|---|---|
+| 1,000 | 997 (988–1,000) | 437 (409–536) | 3,332 (2,007–4,873) | 0 |
+| 5,000 | 4,996 (4,983–5,002) | 504 (482–699) | 6,741 (5,866–7,667) | 0 |
+| 10,000 | 10,000 (9,979–10,001) | 524 (489–1,103) | 9,125 (9,045–9,702) | 0 |
+| 20,000 | 19,982 (19,976–20,022) | 669 (512–835) | 10,788 (7,746–12,893) | 0 |
+| 30,000 | 29,651 (29,275–29,883) | 1,249 (528–1,650) | 15,257 (9,800–15,339) | 19,237 (7,683–40,893) |
+| 40,000 | 37,782 (36,549–39,257) | 820 (536–1,617) | 16,479 (10,628–17,315) | 131,629 (46,584–204,359) |
+| 60,000 | 50,972 (49,447–52,179) | 615 (559–1,295) | 17,118 (16,481–18,011) | 545,971 (468,096–631,806) |
+
+- **Next to the paper:** §7.4 reports at least 75k cmd/s under 380 ms median latency on five
+  dedicated `c4.4xlarge` replicas while Multi-Paxos and Raft saturate at 2.5k cmd/s. Here
+  QuePaxa stays live across the whole sweep, sustaining 100% of offered load with zero errors
+  up to 20k/s (p50 437–669 ms vs 197–228 ms fault-free in Fig. 6c–d) and reaching 51.0k/s at
+  60k/s offered.
+- **Why median latency is 437–669 ms and errors appear from 30k/s:** (1) each epoch delays
+  two of five replicas' outgoing peer links by up to 500 ms, hitting the leader in 5–6 of 12
+  epochs (triggering miss-based rotations to `us-west` or `eu-west`) and adding the egress
+  delay directly to victim followers' forwarded writes; (2) all five containers, five
+  generators and `tc netem` share one 16-vCPU VM (start load 18.90), so at 30k–60k/s victim
+  backlogs hit `kv-tokio`'s byte-bounded admission control / `max_outstanding_proposals`
+  (`unanswered` stayed 0; `errors` are `Busy` rejections reported by `kv-bench --protocol
+  etcd`). Real-region numbers wait on #159.
+
+### Fig. 9: emulated WAN, leader failure across hedging delays (§7.5)
+
+Five Docker containers across the same 5-region matrix (average pairwise RTT 159 ms vs the
+paper's 180 ms; initial leader `us-east`), 25,000 puts/s total (5,000/s per region),
+`--max-in-flight-slots 10`, `--snapshot-every 1000000000000`, `--retransmit-ms 400`, 40 s
+per run with the leader killed (`SIGKILL`) at `t = 15 s`, 3 runs per delay (`wan.sh
+hedge-crash`). Fixed hedging delays `50–500 ms` pin `--hedge-min-ms D --hedge-max-ms D`
+(which also disables `silent_leader_takeover` below `D`, isolating fixed hedging delay `δ`);
+`adaptive` runs QuePaxa's default WAN timers (`hedge_min 20 ms`, `hedge_max 3 s` with
+`silent_leader_takeover`). Measured 2026-11-24 at `a790ff2`
+(`~/.local/share/quepaxa-eval/paper-fig8-9/fig9-20261124-231550`, load 7.32 at start, 3.20 at
+end).
+
+Pre-crash throughput covers `0–15 s` and `Pre p50` covers settled `5–14 s` (all 5 regions,
+25k/s offered). Once `us-east` is killed, its local generator cannot write; post-crash
+throughput (`15–40 s`, 20k/s offered), cluster-wide recovery gap (longest stretch in
+`15–40 s` with no completion across any surviving region), worst-region longest gap and post
+latency cover `15–40 s` on the four surviving regions; `Errors + unanswered`, `Hedged` and
+`Egress (MiB)` are whole-run totals across the four surviving regions.
+
+| Hedging delay (ms) | Pre-crash (/s) | Post-crash (/s) | Recovery gap (ms) | Worst-region gap (ms) | Pre p50 (ms) | Post p50 (ms) | Post p99 (ms) | Errors + unanswered | Hedged | Egress (MiB) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 50 | 23,856 (23,112–24,071) | 19,829 (19,801–20,114) | 658 (524–999) | 1,955 (1,468–3,011) | 892 (583–2,474) | 856 (833–865) | 4,070 (1,615–4,179) | 0 | 1,334,641 (1,241,110–1,451,133) | 2,476 (2,415–4,088) |
+| 100 | 24,048 (23,810–24,100) | 19,900 (19,737–20,000) | 1,027 (993–1,037) | 5,818 (5,040–7,609) | 1,006 (539–1,498) | 872 (863–903) | 7,071 (5,077–7,331) | 0 | 1,639,220 (1,577,852–1,756,361) | 2,005 (1,956–2,046) |
+| 150 | 23,502 (23,173–23,686) | 20,162 (20,048–20,203) | 979 (417–1,042) | 4,978 (1,590–6,377) | 724 (564–2,243) | 871 (824–871) | 5,376 (2,860–6,897) | 0 | 1,749,615 (1,400,177–1,771,857) | 1,965 (1,866–2,009) |
+| 200 | 24,550 (24,516–24,578) | 19,566 (19,550–19,682) | 1,059 (691–1,185) | 4,767 (4,069–5,530) | 387 (237–521) | 893 (868–921) | 6,377 (6,077–7,155) | 0 | 1,292,879 (1,169,122–1,484,884) | 1,377 (1,346–1,485) |
+| 300 | 24,622 (24,547–24,640) | 19,916 (19,899–19,951) | 1,104 (1,104–1,109) | 4,628 (3,627–8,694) | 237 (234–1,058) | 419 (397–649) | 8,345 (5,907–9,070) | 0 | 997,458 (658,811–1,082,394) | 942 (664–992) |
+| 400 | 24,585 (24,548–24,637) | 19,905 (19,902–19,992) | 1,300 (916–1,307) | 5,281 (4,474–6,415) | 229 (228–242) | 403 (387–404) | 7,591 (6,349–8,188) | 0 | 808,680 (568,598–814,678) | 712 (605–725) |
+| 500 | 24,582 (24,526–24,639) | 19,927 (16,258–19,979) | 1,839 (1,495–2,360) | 9,611 (5,167–10,180) | 227 (227–227) | 1,841 (1,399–5,787) | 12,975 (9,977–13,886) | 0 (0–29,909) | 866,307 (742,487–1,469,263) | 829 (827–2,188) |
+| adaptive | 24,575 (24,543–24,631) | 19,911 (19,883–19,971) | 1,493 (1,426–2,208) | 3,514 (2,524–6,419) | 225 (224–226) | 404 (404–3,817) | 7,074 (5,206–12,209) | 0 | 207,424 (114,752–364,314) | 654 (380–1,326) |
+
+- **Liveness across all hedging delays (next to §7.5):** §7.5 reports 25k cmd/s sustained
+  across `50–500 ms` hedging delays (even at `50 ms`, ~1/3 of the 180 ms average RTT), while
+  Multi-Paxos and Raft fail to stabilize below 200 ms and require timeouts ≥ 1.8× RTT
+  (~330 ms). Here QuePaxa stays live and sustains the full rate at every delay from `50 ms`
+  (~1/3 of our 159 ms average RTT) to `500 ms` and `adaptive`: `23.5k–24.6k/s` pre-crash and
+  `19.6k–20.2k/s` post-crash on the four surviving regions, zero median errors/unanswered,
+  and 24/24 runs rotating cleanly to `us-west`.
+- **Recovery time vs hedging delay:** §7.5 reports 303–473 ms recovery time (lowest around
+  200 ms). Here the cluster-wide recovery gap rises with hedging delay from `658 ms` at
+  `50 ms` to `1,059 ms` at `200 ms` (`764 ms`, range `691–1,059 ms`, inside the immediate
+  `15–20 s` crash window) to `1,839 ms` at `500 ms`. Gaps are ~2–3× the paper's because
+  followers forward to the leader rather than submitters broadcasting to every replica,
+  rotation waits for 8 missed slots (`LAG = 64`), and single-host CPU contention at 25k/s
+  stretches failover drain (in one of three `500 ms` runs, 29,909 tail writes remained
+  unanswered at the 5 s post-run drain cutoff, with 0 errors).
+- **Bandwidth cost of aggressive hedging (Fig. 9 bottom):** setting `δ` below the ~200 ms
+  commit path causes heavy redundant hedging (`1.33M–1.75M` hedged entries and
+  `1,965–2,476 MiB` survivor egress at `50–150 ms`, lifting pre-crash p50 to `724–1,006 ms`).
+  Once `δ ≥ 300 ms`, pre-crash p50 settles to `227–237 ms` and egress drops to
+  `712–942 MiB`. `adaptive` gives the lowest pre-crash p50 (`225 ms`), lowest hedging
+  (`207k`, 6–8× fewer) and lowest egress (`654 MiB`), with a `1,493 ms` recovery gap
+  (`1,426 ms` in `15–20 s`). Real-region numbers wait on #159.
 
 ### Fig. 10: convergence to the best leader among heterogeneous machines
 

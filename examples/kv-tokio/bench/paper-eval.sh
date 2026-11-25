@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # The paper's evaluation (QuePaxa, SOSP'23, §7) on this host: Fig. 6 (throughput against
 # median and p99 latency, LAN and emulated WAN), Fig. 7 (LAN saturation throughput with 3 to
-# 13 replicas) and Fig. 10 (convergence to the best leader among heterogeneous machines).
-# It drives the existing harness: run-local.sh for the LAN, bench/etcd/wan.sh for the WAN and
-# Fig. 10. See docs/benchmarks.md, "The paper's evaluation". Each figure holds the shared
-# bench lock from its build to its last run, so no other locked job runs in between.
+# 13 replicas), Fig. 8 (adversary delaying a changing minority up to 500 ms every 5 s on
+# 5-replica WAN), Fig. 9 (leader failure recovery and throughput across hedging delays
+# 50-500 ms on 5-replica WAN) and Fig. 10 (convergence to the best leader among heterogeneous
+# machines). It drives the existing harness: run-local.sh for the LAN, bench/etcd/wan.sh for
+# the WAN and Fig. 10. See docs/benchmarks.md, "The paper's evaluation". Each figure holds
+# the shared bench lock from its build to its last run, so no other locked job runs in between.
 #
-# Usage: paper-eval.sh [--smoke] <fig6-lan|fig7|fig6-wan|fig10>...
+# Usage: paper-eval.sh [--smoke] <fig6-lan|fig7|fig6-wan|fig8|fig9|fig10>...
 # Environment: OUT (raw results, default ~/.local/share/quepaxa-eval/paper-eval), LOCK (the
 #   bench lock, default the main checkout's target/ops/bench.lock; - when the caller holds
 #   it), REPEATS (default 3); LAN layout: LEADER_CPUS (0-1), FOLLOWER_CPUS (2-11, shared by
 #   every follower), BENCH_CPUS (12-15), PORT (21100); LAN_RATES (Fig. 6 LAN offered rates),
 #   LAN_SECS (60), RAMP_SECS (20, per Fig. 7 step), SIZES (Fig. 7 replica counts,
-#   "3 5 7 9 11 13"); WAN_RATES (Fig. 6 WAN offered rates); LADDER_RATE (40000), LADDER_SECS
-#   (240), LADDER_REPLICA_CPUS ("0 1-2 3-4 5-7 8-11") and LADDER_CPUS ("1 1.5 2 3 4": the
-#   quota on each cpuset; the second member's makes it 1.5 CPUs), LADDER_GEN_CPUS (12-15);
-#   SNAPSHOT_EVERY (kv-tokio --snapshot-every for every figure, default 10^12: never, as the
-#   paper's prototype does no log compaction, §7.1 footnote 8; 10000 is kv-tokio's default).
+#   "3 5 7 9 11 13"); WAN_RATES (Fig. 6 WAN offered rates); FIG8_RATES (Fig. 8 offered rates),
+#   FIG8_SECS (60), ADVERSARY_EPOCH_S (5), ADVERSARY_MAX_MS (500); FIG9_RATE (25000),
+#   FIG9_DELAYS ("50 100 150 200 300 400 500 adaptive"), FIG9_SECS (40), FIG9_FAULT_S (15);
+#   LADDER_RATE (40000), LADDER_SECS (240), LADDER_REPLICA_CPUS ("0 1-2 3-4 5-7 8-11") and
+#   LADDER_CPUS ("1 1.5 2 3 4": the quota on each cpuset; the second member's makes it 1.5
+#   CPUs), LADDER_GEN_CPUS (12-15); SNAPSHOT_EVERY (kv-tokio --snapshot-every for every
+#   figure, default 10^12: never, as the paper's prototype does no log compaction, §7.1
+#   footnote 8; 10000 is kv-tokio's default).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
@@ -32,6 +37,11 @@ lan_rates=${LAN_RATES:-50000 100000 200000 300000 400000 500000 600000}
 lan_secs=${LAN_SECS:-60} ramp_secs=${RAMP_SECS:-20}
 sizes=${SIZES:-3 5 7 9 11 13}
 wan_rates=${WAN_RATES:-1000 5000 10000 20000 30000 40000 60000 100000}
+fig8_rates=${FIG8_RATES:-1000 5000 10000 20000 30000 40000 60000}
+fig8_secs=${FIG8_SECS:-60} adversary_epoch_s=${ADVERSARY_EPOCH_S:-5} adversary_max_ms=${ADVERSARY_MAX_MS:-500}
+fig9_rate=${FIG9_RATE:-25000}
+fig9_delays=${FIG9_DELAYS:-50 100 150 200 300 400 500 adaptive}
+fig9_secs=${FIG9_SECS:-40} fig9_fault_s=${FIG9_FAULT_S:-15}
 ladder_rate=${LADDER_RATE:-40000} ladder_secs=${LADDER_SECS:-240}
 # Fig. 10's machines: one cpuset per replica (us-east, us-west, eu-west, ap-ne, sa-east), the
 # smallest leading first.
@@ -45,9 +55,11 @@ smoke=0
 [ "${1:-}" = --smoke ] && { smoke=1; shift; }
 if [ $smoke = 1 ]; then
   repeats=1 lan_rates="100000 400000" lan_secs=5 ramp_secs=5 sizes="3 13" wan_rates="1000 50000"
+  fig8_rates="1000 10000" fig8_secs=15
+  fig9_delays="50 200 500 adaptive" fig9_secs=15 fig9_fault_s=5
   ladder_secs=40
 fi
-[ $# -gt 0 ] || { sed -n '9,18p' "$0" >&2; exit 2; }
+[ $# -gt 0 ] || { sed -n '10,23p' "$0" >&2; exit 2; }
 mkdir -p "$out"
 [ "$lock" = - ] || mkdir -p "$(dirname "$lock")"
 stamp=$(date +%Y%m%d-%H%M%S)
@@ -150,6 +162,30 @@ fig6_wan() {
   echo "$dir"
 }
 
+fig8() {
+  local dir=$out/fig8-$stamp smokeflag=()
+  [ $smoke = 1 ] && smokeflag=(--smoke)
+  mkdir -p "$dir"
+  SYSTEMS=quepaxa DATA_TMPFS=1 REPEATS=$repeats LOAD_RATES=$fig8_rates LOAD_SECS=$fig8_secs \
+    ADVERSARY_EPOCH_S=$adversary_epoch_s ADVERSARY_MAX_MS=$adversary_max_ms RESULTS_DIR=$dir \
+    QUEPAXA_FLAGS="--max-in-flight-slots 10 $snapshots" \
+    "$here/etcd/wan.sh" "${smokeflag[@]}" adversary > "$dir/wan.log" 2>&1
+  describe > "$dir/host.txt"
+  echo "$dir"
+}
+
+fig9() {
+  local dir=$out/fig9-$stamp smokeflag=()
+  [ $smoke = 1 ] && smokeflag=(--smoke)
+  mkdir -p "$dir"
+  SYSTEMS=quepaxa DATA_TMPFS=1 REPEATS=$repeats RATE=$fig9_rate HEDGE_DELAYS=$fig9_delays \
+    HEDGE_SECS=$fig9_secs HEDGE_FAULT_S=$fig9_fault_s RESULTS_DIR=$dir \
+    QUEPAXA_FLAGS="--max-in-flight-slots 10 $snapshots" \
+    "$here/etcd/wan.sh" "${smokeflag[@]}" hedge-crash > "$dir/wan.log" 2>&1
+  describe > "$dir/host.txt"
+  echo "$dir"
+}
+
 fig10() {
   local base=$out/fig10-$stamp policy dir smokeflag=()
   [ $smoke = 1 ] && smokeflag=(--smoke)
@@ -167,7 +203,7 @@ fig10() {
 }
 
 for a in "$@"; do
-  case $a in fig6-lan | fig7 | fig6-wan | fig10) ;; *) echo "unknown argument $a" >&2; exit 2 ;; esac
+  case $a in fig6-lan | fig7 | fig6-wan | fig8 | fig9 | fig10) ;; *) echo "unknown argument $a" >&2; exit 2 ;; esac
 done
 for a in "$@"; do
   if [ "$lock" != - ]; then
@@ -179,6 +215,8 @@ for a in "$@"; do
     fig6-lan) build; dir=$(fig6_lan | tail -1) ;;
     fig7) build; dir=$(fig7 | tail -1) ;;
     fig6-wan) dir=$(fig6_wan | tail -1) ;;
+    fig8) dir=$(fig8 | tail -1) ;;
+    fig9) dir=$(fig9 | tail -1) ;;
     fig10) dir=$(fig10 | tail -1) ;;
   esac
   if [ "$lock" != - ]; then flock -u 9; exec 9>&-; fi

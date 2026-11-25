@@ -111,10 +111,12 @@ cases=$(find "$dir" -name '*-r0.txt' -printf '%f\n' | sed 's/-[0-9]*-r0\.txt$//'
 systems="quepaxa etcd etcd-tuned"
 regions=$(sed -n 's/^regions: \([^;]*\);.*/\1/p' "$dir/env.txt")
 far=$(sed -n 's/^regions: .*far: \([^,]*\),.*/\1/p' "$dir/env.txt")
-all="" others="" i=0
+best=$(sed -n 's/^regions: .*best: \([^ ]*\).*/\1/p' "$dir/env.txt")
+all="" others="" others_best="" i=0
 for region in $regions; do
   all+=" $i"
   [ "$region" = "$far" ] || others+=" $i"
+  [ "$region" = "$best" ] || others_best+=" $i"
   i=$((i + 1))
 done
 
@@ -138,7 +140,11 @@ for system in $systems; do
     rest=${c#"$system"-}
     # "etcd-tuned-calm" also starts with "etcd-".
     [ "$system" = etcd ] && [[ $rest == tuned-* ]] && continue
-    case $rest in crash | partition) over=$others ;; *) over=$all ;; esac
+    case $rest in
+      crash | partition) over=$others ;;
+      hedge-crash-*) over=$others_best ;;
+      *) over=$all ;;
+    esac
     rows=$(for f in "$dir/$c"-[0-9]*-r0.txt; do
       name=$(basename "$f" -r0.txt)
       echo "$(run_row "$name" "$over") $(disk_row "$name")"
