@@ -20,8 +20,9 @@ All notable changes to this project are documented here. The project follows
     64-slot handover window when draining FIFO peer messages and stops followers from
     forwarding to the outgoing leader and hedging slot by slot.
 - `quepaxa` (wire and storage, breaking; #172): agree on batch references instead of
-  carrying large forwarded batches through the leader (paper §6.1, off by default via
-  `Config::inline_batch_bytes = u32::MAX`, validated at least 64, per replica). A follower
+  carrying large forwarded batches through the leader (paper §6.1, enabled by default at
+  `Config::inline_batch_bytes = 1024`, validated at least 64, per replica; set to
+  `u32::MAX` to keep every chunk inline). A follower
   whose chunk of forwarded application entries exceeds `inline_batch_bytes` broadcasts
   `Data { id, bytes }` directly to every member and sends only a compact `ENTRY_REF` item
   `(origin, incarnation, seq, len, crc32c)` in `Forward`; control entries stay inline.
@@ -37,7 +38,15 @@ All notable changes to this project are documented here. The project follows
   `Metrics` gains `data_sent`, `fetches`, `fetch_retries`, `fetches_served` and
   `parked_requests`. C (ABI 0.11): `QPX_CONFIG_INLINE_BATCH_BYTES` and matching
   `QPX_METRIC_*` constants. kv-tokio: `--inline-batch-bytes <BYTES>` (metrics appear in
-  `STATS`). Durable format version 2 refuses version 1 records with `CorruptRecord`.
+  `STATS`); `run-local.sh` adds `KV_INLINE_BATCH_BYTES`, `wan.sh` adds `SIZE` and
+  `INLINE_BATCH_BYTES` and records `STATS` for QuePaxa runs, and `kv-bench --size` works
+  with `--protocol etcd`. Phase 3 LAN and WAN A/B benchmarks (`docs/benchmarks.md`)
+  confirmed 1.6–2.3× higher large-command throughput over Phase 1 (3.3–4.0× over Phase 0)
+  on 1 Gbit/s LAN, 2.1–4.9× lower p99 on 4 KiB WAN (eliminating jitter collapse), and zero
+  fetches on 17-byte WAN; `on_forward`, `wake_pending_forwards`, `entries.cut`, and
+  `entries.prune` also skip already-committed `Ref` items so a lagging rotated-out leader
+  cannot re-propose committed references as deputy work. Durable format version 2 refuses
+  version 1 records with `CorruptRecord`.
 - `examples/kv-tokio`: a replica answers writes with `Busy` while its own accepted writes
   not yet committed exceed twice what its slots carry at once (`max_batch_bytes ×
   max_in_flight_slots × 2`, 16 MiB by default), instead of queueing up to 65,536 of them

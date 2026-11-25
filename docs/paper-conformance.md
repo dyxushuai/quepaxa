@@ -11,7 +11,7 @@ How this crate implements *QuePaxa: Escaping the Tyranny of Timeouts in Consensu
   records why it stays.
 - **Missing**: in the paper, not in the crate yet; the issue tracks it.
 
-Last checked against the paper on 2026-11-22.
+Last checked against the paper on 2026-11-24.
 
 ## Consensus core (§3.3, §4)
 
@@ -46,7 +46,7 @@ Last checked against the paper on 2026-11-22.
 | §5.3, footnote 7 | Restless-bandit re-exploration of non-leaders | Partly: a measurement older than eight holds is taken again. A cheaper trigger was measured and not adopted (#206): a member's speed as leader shows in no tail it reports as a follower, so after a quota lift (`wan.sh speedup`) its follower p90 stayed within 0.3 ms of the others', before and after | `replica/ranking.rs`; `docs/benchmarks.md` |
 | — | Rotation after eight consecutive slots not decided by their leader; silent-leader takeover by a deputy; a leader with a stuck disk steps aside | Extension: failure handling the paper leaves to hedging and §5.3's monitoring; none of it affects safety | `schedule.rs`, `replica/watch.rs`; `leader_loss.rs`, `disk_faults.rs` |
 | — | Announcing a decision to the other replicas | Extension (the paper leaves learning to the proposers): `Decided` names the value by key; a receiver that holds no value under the key catches the slot up from the sender, retried through the slot's members. A key names one value, so safety is unaffected | `replica/log.rs`; `replica/decided_tests.rs`, canary `decided-resolves-any-key` |
-| §6.1 | Submitters disseminate batches to every replica; consensus agrees on batch IDs, and a recorder fetches a batch it lacks before answering | **Missing** | #172 |
+| §6.1 | Submitters disseminate batches to every replica; consensus agrees on batch IDs, and a recorder fetches a batch it lacks before answering | Implemented | `replica/content.rs`, `content.rs`, `replica/egress_tests.rs`; `Content.tla`, `ContentProof.tla`, G6 content custody; `docs/design/batch-ids.md`, `docs/benchmarks.md`; #172 |
 | §6 | Reconfiguration "via standard practices" | Extension: membership and leader-order changes through the log, with a generation check | `schedule.rs`; `Membership.tla`, `MembershipProof.tla`, Verus |
 | §7.1 (Rabia's log compaction) | Log compaction | Extension: snapshots and catch-up | `crates/quepaxa/docs/snapshots.md` |
 | — | Durability: recorder state persisted before any reply that reports it | Extension (the paper's crash-stop model needs none) | `durable.rs`; crash-restart in simulation and model checking |

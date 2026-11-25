@@ -17,6 +17,8 @@
 #   KV_PORT=BASE         peer ports BASE..BASE+N-1, client ports BASE+100.. (default 7100)
 #   KV_CPUS="A B C"      taskset CPU list per replica, e.g. "0-1 2-3 4-5"
 #   KV_FLAGS="..."       extra kv-tokio flags for every replica, e.g. "--max-in-flight-slots 1"
+#   KV_INLINE_BATCH_BYTES=BYTES
+#                        pass --inline-batch-bytes BYTES to every kv-tokio replica
 #   KV_CONNS=N           kv-bench connections, spread over the replicas (default 24)
 #   KV_BENCH_CPUS=LIST   taskset CPU list for kv-bench, e.g. 8-15
 #   KV_BIN=DIR           use kv-tokio and kv-bench from DIR instead of building
@@ -29,6 +31,9 @@ size=${KV_SIZE:-17}; gets=${KV_GETS:-0.5}; egress=${KV_EGRESS:-}; port=${KV_PORT
 nodes=${KV_NODES:-3}; conns=${KV_CONNS:-24}
 read -r -a cpus <<<"${KV_CPUS:-}"
 read -r -a flags <<<"${KV_FLAGS:-}"
+if [ -n "${KV_INLINE_BATCH_BYTES:-}" ]; then
+  flags+=(--inline-batch-bytes "$KV_INLINE_BATCH_BYTES")
+fi
 if [ "$nodes" -lt 1 ] || [ "$nodes" -gt 99 ]; then echo "KV_NODES: 1 to 99, not $nodes" >&2; exit 2; fi
 ids=$(seq 0 $((nodes - 1)))
 root=$(cd "$(dirname "$0")/../.." && pwd)

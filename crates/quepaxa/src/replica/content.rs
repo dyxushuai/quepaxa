@@ -72,6 +72,25 @@ pub(super) struct Fetching {
 }
 
 impl Replica {
+    /// Returns `true` when `content` holds `r`'s verified bytes and every entry inside them
+    /// has already committed in `dedup`.
+    pub(super) fn ref_all_committed(
+        content: &crate::content::Store,
+        dedup: &crate::dedup::Dedup,
+        r: Ref,
+    ) -> bool {
+        let Some(bytes) = content.get_checked(r) else {
+            return false;
+        };
+        let Ok(items) = batch::decode_content(bytes) else {
+            return false;
+        };
+        items.iter().all(|i| {
+            let (o, inc, id) = i.key();
+            dedup.contains(o, inc, id)
+        })
+    }
+
     /// Encodes a chunk of application entries; if larger than `inline_batch_bytes`, sends it
     /// as `Body::Data` to every member in `schedule.everyone()` and returns a single `Ref`.
     pub(super) fn disseminate_chunk(&mut self, items: Vec<Item>) -> Vec<Piece> {
@@ -340,14 +359,34 @@ impl Replica {
                 keep_staged.push(pf);
                 continue;
             }
-            if self.entries.received(pf.pieces, pf.to_pending, cap) {
-                for id in refs {
+            let mut live_pieces = Vec::with_capacity(pf.pieces.len());
+            let mut live_refs = Vec::new();
+            for p in pf.pieces {
+                match p {
+                    Piece::Entry(ref i) => {
+                        let (o, inc, id) = i.key();
+                        if !self.dedup.contains(o, inc, id) {
+                            live_pieces.push(p);
+                        }
+                    }
+                    Piece::Ref(r) => {
+                        if Self::ref_all_committed(&self.content, &self.dedup, r) {
+                            released.push(r.id);
+                        } else {
+                            live_refs.push(r.id);
+                            live_pieces.push(Piece::Ref(r));
+                        }
+                    }
+                }
+            }
+            if self.entries.received(live_pieces, pf.to_pending, cap) {
+                for id in live_refs {
                     self.content.keep(id);
                 }
                 self.watch.fwd.took(pf.from, pf.seq);
                 self.ack_forward(pf.from);
             } else {
-                released.extend(refs);
+                released.extend(live_refs);
             }
         }
         self.fetching.pending_forwards = keep_staged;

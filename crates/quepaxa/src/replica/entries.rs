@@ -389,10 +389,11 @@ impl Entries {
         pieces
     }
 
-    /// Batches whose entries all committed elsewhere are dead weight.
-    pub(super) fn prune(&mut self, dedup: &Dedup) {
+    /// Batches whose entries all committed elsewhere are dead weight. Returns any data batch
+    /// ids that the pruned batches referenced so the caller can release them.
+    pub(super) fn prune(&mut self, dedup: &Dedup, ref_committed: impl Fn(Ref) -> bool) -> Vec<DataId> {
         if !self.prune_due {
-            return;
+            return Vec::new();
         }
         self.prune_due = false;
         let dead: Vec<u64> = self
@@ -400,21 +401,33 @@ impl Entries {
             .iter()
             .filter(|(_, b)| {
                 b.slot.is_none()
-                    && b.refs.is_empty()
                     && !b.entries.iter().any(|&(o, i, id)| !dedup.contains(o, i, id))
+                    && b.refs.iter().all(|&r| ref_committed(r))
             })
             .map(|(seq, _)| *seq)
             .collect();
+        let mut released = Vec::new();
         for seq in dead {
-            self.remove_batch(seq);
+            if let Some(b) = self.remove_batch(seq) {
+                released.extend(b.refs.into_iter().map(|r| r.id));
+            }
         }
+        released
     }
 
     /// Cuts the next batch: relayed pieces always, pending ones only when proposing them
-    /// directly (`lead`).
-    pub(super) fn cut(&mut self, lead: bool, max_bytes: usize, dedup: &Dedup) -> Option<u64> {
+    /// directly (`lead`). Returns the new batch sequence (if any) and the data batch ids of
+    /// any already-committed references skipped from the queues.
+    pub(super) fn cut(
+        &mut self,
+        lead: bool,
+        max_bytes: usize,
+        dedup: &Dedup,
+        ref_committed: impl Fn(Ref) -> bool,
+    ) -> (Option<u64>, Vec<DataId>) {
         let seq = self.next_batch;
         let mut pieces = batch::PieceBuilder::new(max_bytes);
+        let mut skipped_refs = Vec::new();
         // `relayed` drains before `pending`: the first `from_relayed` pieces taken came from it.
         let mut from_relayed = 0;
         loop {
@@ -431,21 +444,29 @@ impl Entries {
                 break;
             }
             let Some(p) = self.pop(relayed) else { break };
-            if let Piece::Entry(e) = &p {
-                let (o, inc, id) = e.key();
-                if dedup.contains(o, inc, id) {
-                    continue;
+            match &p {
+                Piece::Entry(e) => {
+                    let (o, inc, id) = e.key();
+                    if dedup.contains(o, inc, id) {
+                        continue;
+                    }
+                }
+                Piece::Ref(r) => {
+                    if ref_committed(*r) {
+                        skipped_refs.push(r.id);
+                        continue;
+                    }
                 }
             }
             from_relayed += usize::from(relayed);
             pieces.push(p);
         }
         if pieces.is_empty() {
-            return None;
+            return (None, skipped_refs);
         }
         let items = pieces.take();
         self.batched(&items, from_relayed, seq);
-        Some(self.new_batch(items))
+        (Some(self.new_batch(items)), skipped_refs)
     }
 
     /// The own entries among `pieces` (the first `from_relayed` taken from `relayed`, the rest

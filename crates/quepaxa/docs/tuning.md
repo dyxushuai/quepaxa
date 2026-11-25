@@ -19,7 +19,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `silent_leader_takeover` | on | Stop waiting for a leader that has said nothing for about a commit latency since a forward. |
 | `placement` | off | Move the leader to the member that gives writers the lowest commit latency. Enable it on every member or on none. |
 | `placement_sustain`, `placement_hold` | 3 min, 10 min | How long a gain must last before a move, and how long any order change is left alone. |
-| `inline_batch_bytes` | `u32::MAX` (off) | Largest forwarded chunk (bytes, at least 64) sent inline; larger chunks travel directly to every member as data batches and by reference in consensus. Per replica. |
+| `inline_batch_bytes` | `1024` | Largest forwarded chunk (bytes, at least 64) sent inline; larger chunks travel directly to every member as data batches and by reference in consensus. Set to `u32::MAX` to keep every chunk inline. Per replica. |
 
 ## Throughput
 
@@ -38,15 +38,21 @@ each `fsync` carries: write on a dedicated thread and acknowledge in groups
 
 ### Batch references (`inline_batch_bytes`)
 
-By default (`u32::MAX`), every forwarded chunk travels inline through the leader, which then
-sends it to each recorder. Lowering `inline_batch_bytes` (for example to a few hundred bytes
-or a few KiB on a bandwidth-limited LAN with large commands written to followers) lets each
-origin broadcast large chunks directly to every member and send only a 33-byte reference to
-the leader, evening egress across replicas and avoiding writing the payload twice on disk.
-Keep it at `u32::MAX` when commands are small (a reference is 33 bytes on its own), when
-clients write only to the leader (nothing is forwarded), or across a WAN where the direct
-`Data` broadcast can lose the race to the leader's `RecordRequest` and trigger a round-trip
-fetch. Because the setting is per replica, mixed values across a cluster are safe.
+By default (`1024` bytes), a forwarded chunk of application entries larger than 1 KiB is
+broadcast directly from its origin to every member as `Data` and named by a 33-byte
+reference in `Forward` and the slot value, evening egress across replicas and avoiding
+writing large payloads twice on disk. Smaller chunks (such as 17-byte commands at moderate
+rates) stay inline automatically. In the repository's 1 Gbit/s LAN and five-region WAN
+A/B benchmarks (`docs/benchmarks.md`, "#172 Phase 3"), `1024` raised 4 KiB and 64 KiB
+saturation throughput 1.6–2.3× over inline Phase 1 (3.3–4.0× over Phase 0), cut 4 KiB WAN
+p99 latency 2.1–4.9× (eliminating collapse under jitter/loss), and left 17-byte workloads
+within noise with zero fetches on the WAN.
+
+Raise `inline_batch_bytes` (or set it to `u32::MAX` to disable references) if your
+workload has clients writing only to the leader (nothing is forwarded), or on a quiet WAN
+where non-triangle-inequality routes make direct `Data` broadcasts routinely lose the race
+to the leader's `RecordRequest` and drive up `fetches` and `parked_requests`. Because the
+setting is per replica, mixed values across a cluster are safe.
 
 ## Wide-area deployments
 

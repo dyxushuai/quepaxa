@@ -39,9 +39,15 @@ struct Net {
 
 impl Net {
     fn new(n: u32) -> Self {
+        Self::with_inline_limit(n, u32::MAX)
+    }
+
+    fn with_inline_limit(n: u32, inline_batch_bytes: u32) -> Self {
         let rs = (0..n)
             .map(|id| {
-                let cfg = Config::new(CLUSTER, NodeId(id), (0..n).map(NodeId).collect(), [id as u8 + 1; 32]);
+                let mut cfg =
+                    Config::new(CLUSTER, NodeId(id), (0..n).map(NodeId).collect(), [id as u8 + 1; 32]);
+                cfg.inline_batch_bytes = inline_batch_bytes;
                 Replica::new(cfg, [], Timestamp(0)).unwrap()
             })
             .collect();
@@ -113,6 +119,42 @@ fn leader_egress_bytes_per_slot() {
             assert_eq!(per_slot, expected(n, v), "n={n} payload={payload}");
             let total: usize = per_slot.values().map(|(b, _)| b).sum();
             assert_eq!(total, (n - 1) * (169 + v), "n={n} payload={payload}");
+        }
+    }
+}
+
+/// Phase 2 (#172): with `inline_batch_bytes` below a forwarded chunk's encoded size, the origin
+/// broadcasts `Data` directly to every member and the leader's slot value carries only a 33-byte
+/// `ENTRY_REF` item (`v_ref = 4 + 33 = 37`). Leader egress per slot drops to `(n - 1) * (169 + 37)`
+/// regardless of payload size, with zero fetches when `Data` arrives in order. Chunks at or below
+/// `inline_batch_bytes` stay inline.
+#[test]
+fn leader_egress_bytes_per_slot_with_references() {
+    const SLOTS: usize = 4;
+    const INLINE_LIMIT: u32 = 1024;
+    const V_REF: usize = 4 + 33;
+    for n in [3, 5] {
+        for payload in [17, 4 << 10, 64 << 10] {
+            let mut net = Net::with_inline_limit(n as u32, INLINE_LIMIT);
+            let mut per_slot = BTreeMap::new();
+            for s in 0..SLOTS {
+                let committed = net.rs[0].emitted_index();
+                net.rs[1].propose(Timestamp(0), Bytes::from(alloc::vec![s as u8; payload])).unwrap();
+                net.run();
+                assert_eq!(net.rs[0].emitted_index(), committed + 1, "n={n} payload={payload}: one slot");
+                per_slot = core::mem::take(&mut net.leader_egress);
+            }
+            let v_inline = 29 + payload;
+            let by_ref = v_inline > INLINE_LIMIT as usize;
+            let v_slot = if by_ref { V_REF } else { v_inline };
+            assert_eq!(per_slot, expected(n, v_slot), "n={n} payload={payload}");
+            let total: usize = per_slot.values().map(|(b, _)| b).sum();
+            assert_eq!(total, (n - 1) * (169 + v_slot), "n={n} payload={payload}");
+            let expected_data_sent = if by_ref { (SLOTS * (n - 1)) as u64 } else { 0 };
+            assert_eq!(net.rs[1].metrics().data_sent, expected_data_sent, "n={n} payload={payload}");
+            for r in &net.rs {
+                assert_eq!(r.metrics().fetches, 0, "n={n} payload={payload}");
+            }
         }
     }
 }

@@ -22,6 +22,8 @@ pub struct Load {
     pub secs: f64,
     pub conns: usize,
     pub gets: f64,
+    /// Command size in bytes (`1 + 8 + value.len()`, at least 17).
+    pub size: usize,
     /// When the run starts on the wall clock, so another process can time faults against
     /// it; `None`: as soon as the clients exist.
     pub start_at: Option<SystemTime>,
@@ -87,7 +89,10 @@ pub async fn run(load: &Load) -> (Vec<Sample>, u64) {
         tokio::time::sleep_until(next.into()).await;
         let due_us = (next - start).as_micros() as u64;
         let mut client = clients[handles.len() % clients.len()].clone();
-        let (key, value, get) = (word(&mut rng), word(&mut rng), rng.unit() < load.gets);
+        let (key, mut value, get) = (word(&mut rng), word(&mut rng), rng.unit() < load.gets);
+        if !get && load.size > 17 {
+            value.extend(std::iter::repeat_n('x', load.size - 17));
+        }
         let samples = samples.clone();
         let task = tokio::spawn(async move {
             let ok = if get {
@@ -127,7 +132,17 @@ mod tests {
     use super::*;
 
     fn load(rate: f64, rate_at: Vec<(f64, f64)>) -> Load {
-        Load { targets: Vec::new(), rate, rate_at, secs: 2.0, conns: 1, gets: 0.0, start_at: None, seed: 1 }
+        Load {
+            targets: Vec::new(),
+            rate,
+            rate_at,
+            secs: 2.0,
+            conns: 1,
+            gets: 0.0,
+            size: 17,
+            start_at: None,
+            seed: 1,
+        }
     }
 
     fn arrivals(l: &Load, until: f64) -> Vec<f64> {
