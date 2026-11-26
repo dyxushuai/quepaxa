@@ -44,7 +44,10 @@ impl Replica {
                 ));
             }
         }
-        self.entries.check(self.proposes_directly(), &self.dedup).map_err(|e| format!("n{}: {e}", self.me.0))
+        let may_hold_pending = self.proposes_directly()
+            || (self.forward_flush_at().is_some()
+                && !self.entries.pending_urgent(self.cfg.max_batch_bytes as usize));
+        self.entries.check(may_hold_pending, &self.dedup).map_err(|e| format!("n{}: {e}", self.me.0))
     }
 
     /// Own entries of this incarnation both waiting to be handed on (or handed on) and in a
@@ -128,11 +131,12 @@ impl Entries {
     /// - E2: own entries left only through a `Left`, and none is still awaited once committed;
     /// - E4: the counters match the queues and batches, and a batch `drive` would prune is
     ///   due to be pruned;
-    /// - E5: a replica that does not propose its own entries `direct`ly has routed every one
-    ///   of them on.
-    pub(in crate::replica) fn check(&self, direct: bool, dedup: &Dedup) -> Result<(), String> {
+    /// - E5: a replica that does not propose its own entries directly has routed every one
+    ///   of them on, unless forward coalescing holds non-urgent entries behind a scheduled
+    ///   flush timer (`may_hold_pending`).
+    pub(in crate::replica) fn check(&self, may_hold_pending: bool, dedup: &Dedup) -> Result<(), String> {
         self.check_own(dedup)?;
-        if !direct && !self.pending.is_empty() {
+        if !may_hold_pending && !self.pending.is_empty() {
             return Err(format!("E5: hands its entries on but kept {} pending", self.pending.len()));
         }
         self.check_counters(dedup)

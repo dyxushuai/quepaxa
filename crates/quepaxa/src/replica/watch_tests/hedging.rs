@@ -179,6 +179,13 @@ fn hedging_around_a_talking_leader_drives_one_slot_at_a_time() {
         r.propose(Timestamp(MS), Bytes::from(alloc::vec![i; 80])).unwrap();
         r.poll_actions(&mut out);
     }
+    // Flush any coalesced trailing forward before the leader speaks at 4 ms.
+    if let Some(t) = r.earliest_timer()
+        && t < Timestamp(4 * MS)
+    {
+        r.handle_timeout(t).unwrap();
+        r.poll_actions(&mut out);
+    }
     r.handle(Timestamp(4 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: 0 })).unwrap();
     r.poll_actions(&mut out);
     r.handle_timeout(Timestamp(MS + 80 * MS)).unwrap();

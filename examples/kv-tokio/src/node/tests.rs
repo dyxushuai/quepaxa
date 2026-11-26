@@ -141,7 +141,7 @@ fn a_full_peer_queue_drops_frames_instead_of_blocking() {
     // Nothing drains these queues, like a peer that is unreachable.
     let (msgs, mut rx) = tokio::sync::mpsc::channel(1);
     let (bulk, _bulk) = tokio::sync::mpsc::channel(1);
-    n.peers.insert(1, PeerLink::new(msgs, bulk));
+    n.peers.insert(1, PeerLink::new(msgs.clone(), msgs.clone(), msgs, bulk));
     n.send(1, PeerFrame::Msg(Bytes::from_static(b"first")));
     n.send(1, PeerFrame::Msg(Bytes::from_static(b"second")));
     assert_eq!(rx.try_recv().unwrap(), PeerFrame::Msg(Bytes::from_static(b"first")).encode());
@@ -151,19 +151,35 @@ fn a_full_peer_queue_drops_frames_instead_of_blocking() {
 #[test]
 fn snapshots_take_the_bulk_queue_and_nothing_else_does() {
     let mut n = node("bulk-peer");
+    let (ctrl, mut ctrl_rx) = tokio::sync::mpsc::channel(8);
     let (msgs, mut msgs_rx) = tokio::sync::mpsc::channel(8);
+    let (data, mut data_rx) = tokio::sync::mpsc::channel(8);
     let (bulk, mut bulk_rx) = tokio::sync::mpsc::channel(1);
-    n.peers.insert(1, PeerLink::new(msgs, bulk));
+    n.peers.insert(1, PeerLink::new(ctrl, msgs, data, bulk));
     let snapshot = || PeerFrame::Snapshot(Bytes::from_static(b"state"));
     n.send(1, snapshot());
     n.send(1, snapshot());
     // The full bulk queue does not hold messages back.
     n.send(1, PeerFrame::SnapshotRequest);
     n.send(1, PeerFrame::Msg(Bytes::from_static(b"m")));
+    // OutboundClass routes Control (kind 10 = ForwardAck), Consensus (kind 1), Bulk (kind 13 = Data).
+    let wire = |kind: u8| {
+        let mut b = vec![b'Q', b'P', 2, kind];
+        b.extend_from_slice(&[0; 8]);
+        quepaxa::Outbound { to: quepaxa::NodeId(1), bytes: Bytes::from(b) }
+    };
+    n.send_outbound(wire(10));
+    n.send_outbound(wire(1));
+    n.send_outbound(wire(13));
     assert_eq!(bulk_rx.try_recv().unwrap(), snapshot().encode());
     assert!(bulk_rx.try_recv().is_err(), "the snapshot that did not fit was dropped");
+    assert_eq!(ctrl_rx.try_recv().unwrap(), PeerFrame::Msg(wire(10).bytes).encode());
+    assert!(ctrl_rx.try_recv().is_err());
+    assert_eq!(data_rx.try_recv().unwrap(), PeerFrame::Msg(wire(13).bytes).encode());
+    assert!(data_rx.try_recv().is_err());
     assert_eq!(msgs_rx.try_recv().unwrap(), PeerFrame::SnapshotRequest.encode());
     assert_eq!(msgs_rx.try_recv().unwrap(), PeerFrame::Msg(Bytes::from_static(b"m")).encode());
+    assert_eq!(msgs_rx.try_recv().unwrap(), PeerFrame::Msg(wire(1).bytes).encode());
     assert!(msgs_rx.try_recv().is_err());
 }
 

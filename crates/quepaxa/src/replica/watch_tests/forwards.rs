@@ -181,3 +181,69 @@ fn resends_count_the_bytes_they_carry() {
     busy_until(&mut r, Timestamp(11 * MS), 1);
     assert_eq!(r.metrics().forward_resent_bytes, batch::encode(&items).len() as u64);
 }
+
+#[test]
+fn follower_coalesces_subsequent_forwards_until_window_or_batch_full() {
+    let mut r = with_latency(Some(80));
+    r.cfg.retransmit_interval = 400 * MS;
+    r.cfg.max_batch_bytes = 200;
+    let mut out = Vec::new();
+    // First proposal forwards immediately.
+    r.propose(Timestamp(MS), Bytes::from_static(b"a")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 1);
+    let wait = r.forward_coalesce(NodeId(0));
+    assert_eq!(wait, 10 * MS, "R/8 capped at ack_every/2");
+
+    // Subsequent proposals within the coalesce window wait in pending until the timer fires.
+    out.clear();
+    r.propose(Timestamp(2 * MS), Bytes::from_static(b"b")).unwrap();
+    r.poll_actions(&mut out);
+    r.propose(Timestamp(3 * MS), Bytes::from_static(b"c")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 0, "held for coalescing");
+    assert_eq!(r.forward_flush_at(), Some(Timestamp(MS + wait)));
+
+    // Firing the coalesce timer flushes both held entries in one Forward.
+    r.handle_timeout(Timestamp(MS + wait)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 1, "both held entries coalesced into one forward");
+
+    // Filling a full batch bypasses the coalesce wait immediately.
+    out.clear();
+    r.propose(Timestamp(MS + wait + MS), Bytes::from(alloc::vec![7u8; 100])).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 0, "still below max_batch_bytes");
+    r.propose(Timestamp(MS + wait + MS), Bytes::from(alloc::vec![8u8; 100])).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(forwards_to(&out, 0), 2, "exceeding max_batch_bytes flushes without waiting");
+}
+
+#[test]
+fn control_messages_do_not_trigger_speculative_catch_up() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    let ack = Message {
+        env: Envelope {
+            cluster_id: [1; 16],
+            config_epoch: 0,
+            from: NodeId(0),
+            to: NodeId(1),
+            commit_index: 10,
+        },
+        body: Body::ForwardAck { seqs: Vec::new() },
+    };
+    r.handle(Timestamp(2 * MS), Input::Message(ack.encode())).unwrap();
+    r.poll_actions(&mut out);
+    let catch_ups = out
+        .iter()
+        .filter(|a| {
+            matches!(
+                a,
+                Action::Send(o)
+                    if matches!(Message::decode(&o.bytes, &r_wire()), Ok(Message { body: Body::CatchUp { .. }, .. }))
+            )
+        })
+        .count();
+    assert_eq!(catch_ups, 0, "ForwardAck on a control stream must not trigger speculative CatchUp");
+}

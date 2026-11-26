@@ -304,6 +304,12 @@ impl Replica {
     /// Application chunks larger than `inline_batch_bytes` go to every member as `Data`, and
     /// travel in `Forward` as compact `Ref` items; control entries stay inline.
     fn forward_pending(&mut self, direct: bool) {
+        if !direct
+            && self.forward_flush_at().is_some()
+            && !self.entries.pending_urgent(self.cfg.max_batch_bytes as usize)
+        {
+            return;
+        }
         let pieces = self.entries.route(direct, self.now);
         if pieces.is_empty() {
             return;
@@ -316,6 +322,7 @@ impl Replica {
             })
             .collect();
         let leader = self.target();
+        self.watch.last_forward = Some((leader, self.now));
         self.forwarded_now();
         let (me, inc, max) = (self.me, self.incarnation, self.cfg.max_batch_bytes as usize);
         let own_ids = |ps: &[Piece]| -> Vec<_> {
@@ -496,6 +503,7 @@ impl Replica {
             .chain(self.reads.resend_at())
             .chain(self.phase.probe_at())
             .chain(self.watch.ack_due.values().copied())
+            .chain(self.forward_flush_at())
             .chain(self.watch.fwd.due())
             .chain(self.aside_at().filter(|_| !self.watch.aside))
             .chain(self.placement.next_probe)

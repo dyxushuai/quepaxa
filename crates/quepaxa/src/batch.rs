@@ -93,7 +93,7 @@ fn encoded_len(i: &Item) -> usize {
     4 + 8 + 8 + 1 + 4 + i.entry.payload.len()
 }
 
-fn piece_weight(p: &Piece) -> usize {
+pub(crate) fn piece_weight(p: &Piece) -> usize {
     match p {
         Piece::Entry(i) => encoded_len(i),
         // Count both the 33-byte wire ref and the referenced batch's encoded length so the

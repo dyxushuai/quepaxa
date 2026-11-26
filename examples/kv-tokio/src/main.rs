@@ -329,19 +329,24 @@ const MSG_QUEUE: usize = 4096;
 /// up to `MAX_FRAME`, and a peer that asks again meanwhile can wait for the next.
 const BULK_QUEUE: usize = 1;
 
-/// Starts the two connections to a peer: consensus messages on one and snapshots, paced,
-/// on the other, so a message never waits for a whole snapshot. The peer tells them apart
-/// by frame kind only.
+/// Starts four connections to a peer: liveness/probes on `ctrl`, consensus messages on `msgs`,
+/// bulk data (`Data`, `Entries`) unpaced on `data`, and snapshots paced on `bulk`, so liveness
+/// never waits behind proposal payloads and consensus never waits behind bulk data or
+/// snapshots. The peer tells them apart by frame kind.
 fn peer_link<S, C>(me: u32, connect: impl Fn() -> C + Clone + Send + 'static) -> PeerLink
 where
     S: AsyncWrite + Unpin + Send + 'static,
     C: Future<Output = std::io::Result<S>> + Send + 'static,
 {
+    let (ctrl, rx) = tmpsc::channel(MSG_QUEUE);
+    tokio::spawn(outbound(me, connect.clone(), rx, false));
     let (msgs, rx) = tmpsc::channel(MSG_QUEUE);
+    tokio::spawn(outbound(me, connect.clone(), rx, false));
+    let (data, rx) = tmpsc::channel(MSG_QUEUE);
     tokio::spawn(outbound(me, connect.clone(), rx, false));
     let (bulk, rx) = tmpsc::channel(BULK_QUEUE);
     tokio::spawn(outbound(me, connect, rx, true));
-    PeerLink::new(msgs, bulk)
+    PeerLink::new(ctrl, msgs, data, bulk)
 }
 
 /// Connects to a peer for `outbound`.

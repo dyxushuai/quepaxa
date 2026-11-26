@@ -246,6 +246,22 @@ pub enum Input {
     StorageFailed(PersistId),
 }
 
+/// Traffic class of an [`Outbound`] message, for transports that separate streams per peer
+/// to avoid head-of-line blocking. Transports that carry all messages on one channel may
+/// ignore this.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OutboundClass {
+    /// Small liveness and latency probes (`ForwardAck`, `RttProbe`, `RttReply`) that should
+    /// never wait behind proposal payloads or bulk data.
+    Control,
+    /// Ordered consensus messages (`RecordRequest`, `RecordReply`, `Decided`, `Forward`,
+    /// `Fetch`, `CatchUp`, `Compacted`, `ReadQuery`, `ReadReply`).
+    Consensus,
+    /// Bulk payload transfers (`Data` batches and catch-up `Entries`).
+    Bulk,
+}
+
 /// A message to send to one peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "model", derive(Hash))]
@@ -254,6 +270,14 @@ pub struct Outbound {
     pub to: NodeId,
     /// Encoded message.
     pub bytes: Bytes,
+}
+
+impl Outbound {
+    /// Traffic class of this message, for transports that separate streams per peer.
+    #[must_use]
+    pub fn class(&self) -> OutboundClass {
+        crate::codec::outbound_class(&self.bytes)
+    }
 }
 
 /// Why a local proposal is no longer tracked.

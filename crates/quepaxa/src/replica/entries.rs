@@ -278,6 +278,26 @@ impl Entries {
         self.unslotted.first().copied()
     }
 
+    /// Whether any entry waits in `pending`.
+    pub(super) fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    /// Whether `pending` holds a control entry or already fills a batch of `limit` bytes.
+    pub(super) fn pending_urgent(&self, limit: usize) -> bool {
+        let mut bytes = 0usize;
+        for p in &self.pending {
+            if matches!(p, Piece::Entry(i) if i.kind != Kind::App) {
+                return true;
+            }
+            bytes = bytes.saturating_add(batch::piece_weight(p));
+            if bytes >= limit {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Whether there is something to propose: a batch waiting for a slot, or entries `cut`
     /// takes (own pending ones only when proposing them directly).
     pub(super) fn proposable(&self, direct: bool) -> bool {
@@ -358,7 +378,7 @@ impl Entries {
 
     /// Hands everything pending to the target unless this replica proposes it `direct`ly:
     /// own entries are tracked from `now`. Returns the pieces to send. Afterwards nothing is
-    /// pending unless `direct` (E5).
+    /// pending unless `direct` (or the caller deferred routing under forward coalescing; E5).
     pub(super) fn route(&mut self, direct: bool, now: Timestamp) -> Vec<Piece> {
         if direct || self.pending.is_empty() {
             return Vec::new();
