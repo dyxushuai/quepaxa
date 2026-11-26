@@ -204,11 +204,21 @@ jobs:
             exit 0
           fi
           git worktree add -q ../previous "$prev"
-          (cd ../previous && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo bench -p quepaxa --bench replica -- --save-baseline previous)
-          # Only the commit paths gate (the name filter selects them): a ~30 ns benchmark
-          # (reject_malformed_message) swings by 10-40% between runners from code layout
-          # alone, and was faster locally when CI called it a regression.
-          cargo bench -p quepaxa --bench replica -- propose_to_commit --baseline previous --noise-threshold 0.10 | tee bench.txt
+          (cd ../previous && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo bench -p quepaxa --bench replica -- propose_to_commit --save-baseline previous)
+          # Only the commit paths that existed in the previous release gate: a ~30 ns
+          # benchmark (reject_malformed_message) swings 10-40% between runners from code
+          # layout alone, and newly added benchmarks have no previous baseline to compare.
+          names=()
+          if [ -d target/criterion/replica ]; then
+            mapfile -t names < <(find target/criterion/replica -type d -name previous | sed 's|^target/criterion/||; s|/previous$||' | grep propose_to_commit | sort || true)
+          fi
+          if [ "${#names[@]}" -eq 0 ]; then
+            echo "no matching commit-path benchmarks in $prev; measuring this commit only"
+            cargo bench -p quepaxa --bench replica -- propose_to_commit
+            exit 0
+          fi
+          filter="^($(IFS='|'; echo "${names[*]}"))$"
+          cargo bench -p quepaxa --bench replica -- "$filter" --baseline previous --noise-threshold 0.10 | tee bench.txt
           if grep -q "Performance has regressed" bench.txt; then
             echo "::error::commit-path benchmark regression above 10% against the last release ($prev)"
             exit 1

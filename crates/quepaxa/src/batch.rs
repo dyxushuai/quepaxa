@@ -269,11 +269,14 @@ pub(crate) fn refs(buf: &Bytes) -> Vec<Ref> {
     let mut r = Reader::new(buf);
     let Ok(n) = r.u32() else { return found };
     for _ in 0..n {
-        let (Ok(origin), Ok(incarnation), Ok(seq), Ok(kind), Ok(len)) =
-            (r.u32(), r.u64(), r.u64(), r.u8(), r.u32())
-        else {
-            return Vec::new();
-        };
+        let Ok(hdr) = r.take(25) else { return Vec::new() };
+        let origin = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
+        let incarnation =
+            u64::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7], hdr[8], hdr[9], hdr[10], hdr[11]]);
+        let seq =
+            u64::from_le_bytes([hdr[12], hdr[13], hdr[14], hdr[15], hdr[16], hdr[17], hdr[18], hdr[19]]);
+        let kind = hdr[20];
+        let len = u32::from_le_bytes([hdr[21], hdr[22], hdr[23], hdr[24]]);
         let Ok(payload) = r.take(len as usize) else { return Vec::new() };
         if !matches!(kind, ENTRY_APP | ENTRY_BARRIER | ENTRY_RECONFIGURE | ENTRY_REF) || seq == u64::MAX {
             return Vec::new();
@@ -352,17 +355,72 @@ pub(crate) fn decode_pieces(buf: &Bytes) -> Result<Vec<Piece>, DecodeError> {
     Ok(pieces)
 }
 
-/// Decodes a data batch's content: application entries only (no control entries and no
-/// nested references).
-pub(crate) fn decode_content(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
-    let pieces = decode_pieces(buf)?;
-    let mut items = Vec::with_capacity(pieces.len());
-    for piece in pieces {
-        match piece {
-            Piece::Entry(item) if item.kind == Kind::App => items.push(item),
+/// Decodes an encoded batch directly into inline items, expanding any `ENTRY_REF` via `expand`.
+/// Allocates a single `Vec<Item>` (no intermediate `Vec<Piece>` on inline batches).
+pub(crate) fn decode_expanded(
+    buf: &Bytes,
+    mut expand: impl FnMut(Ref) -> Result<Vec<Item>, DecodeError>,
+) -> Result<Vec<Item>, DecodeError> {
+    let mut r = Reader::new(buf);
+    let n = r.u32()? as usize;
+    let mut items = Vec::with_capacity(n.min(buf.len() / 25));
+    for _ in 0..n {
+        let origin = NodeId(r.u32()?);
+        let incarnation = r.u64()?;
+        let id = match r.u64()? {
+            u64::MAX => return Err(DecodeError::BadTag),
+            id => ProposalId(id),
+        };
+        let tag = r.u8()?;
+        let len = r.u32()? as usize;
+        let start = r.pos();
+        let payload = r.take(len)?;
+        match tag {
+            ENTRY_APP | ENTRY_BARRIER | ENTRY_RECONFIGURE => {
+                let kind = match tag {
+                    ENTRY_APP => Kind::App,
+                    ENTRY_BARRIER => Kind::Barrier,
+                    _ => Kind::Reconfigure,
+                };
+                let entry = Entry { origin, incarnation, id, payload: buf.slice(start..start + len) };
+                items.push(Item { entry, kind });
+            }
+            ENTRY_REF => {
+                let id = DataId { origin, incarnation, seq: id.0 };
+                let reference = parse_ref(id, payload).ok_or(DecodeError::BadTag)?;
+                items.extend(expand(reference)?);
+            }
             _ => return Err(DecodeError::BadTag),
         }
     }
+    r.finish()?;
+    Ok(items)
+}
+
+/// Decodes a data batch's content: application entries only (no control entries and no
+/// nested references).
+pub(crate) fn decode_content(buf: &Bytes) -> Result<Vec<Item>, DecodeError> {
+    let mut r = Reader::new(buf);
+    let n = r.u32()? as usize;
+    let mut items = Vec::with_capacity(n.min(buf.len() / 25));
+    for _ in 0..n {
+        let origin = NodeId(r.u32()?);
+        let incarnation = r.u64()?;
+        let id = match r.u64()? {
+            u64::MAX => return Err(DecodeError::BadTag),
+            id => ProposalId(id),
+        };
+        let tag = r.u8()?;
+        if tag != ENTRY_APP {
+            return Err(DecodeError::BadTag);
+        }
+        let len = r.u32()? as usize;
+        let start = r.pos();
+        let _ = r.take(len)?;
+        let entry = Entry { origin, incarnation, id, payload: buf.slice(start..start + len) };
+        items.push(Item { entry, kind: Kind::App });
+    }
+    r.finish()?;
     Ok(items)
 }
 

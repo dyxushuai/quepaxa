@@ -8,8 +8,8 @@ use bytes::Bytes;
 use super::entries::Own;
 use super::{Decision, Effect, Replica};
 use crate::api::{Action, DropReason};
-use crate::batch::{self, Kind, Piece};
-use crate::codec::{Body, reply_proposal};
+use crate::batch::{self, Kind};
+use crate::codec::{Body, DecodeError, reply_proposal};
 use crate::content::PinError;
 use crate::durable::Record;
 use crate::proposal::{Proposal, ValueKey};
@@ -34,11 +34,11 @@ impl Replica {
             return;
         }
         let key = proposal.key;
-        let would_change = self.registers.get(&slot).is_none_or(|reg| reg.would_change(step, &proposal));
-        if would_change {
+        let refs = batch::refs(&proposal.value);
+        if !refs.is_empty() && self.registers.get(&slot).is_none_or(|reg| reg.would_change(step, &proposal)) {
             // Rule R (#172): apply a changing record only while holding every referenced
             // data batch, writing its `Data` record ahead of `Recorder`.
-            let Ok(missing) = self.check_refs(&proposal.value) else {
+            let Ok(missing) = self.check_ref_list(&refs) else {
                 self.metrics.messages_rejected += 1;
                 return;
             };
@@ -46,12 +46,12 @@ impl Replica {
                 self.park_request(slot, from, step, proposal, &missing);
                 return;
             }
-            let _ = self.pin_and_write_refs(&proposal.value, slot);
+            let _ = self.pin_and_write_ref_list(&refs, slot);
         }
         let reg = self.registers.entry(slot).or_default();
         let before = reg.step;
         if reg.record(step, proposal) {
-            let rec = Record::Recorder { slot, reg: reg.clone() }.encode();
+            let rec = Record::encode_recorder(slot, reg);
             self.gate.write(rec);
         }
         let s = reg.summary();
@@ -198,8 +198,15 @@ impl Replica {
             return;
         }
         self.metrics.slots_decided += 1;
-        let missing = self.pin_and_write_refs(&proposal.value, slot).unwrap_or_default();
-        self.gate.write(Record::Decided { slot, proposal: proposal.clone() }.encode());
+        let refs = batch::refs(&proposal.value);
+        let missing = match self.pin_and_write_ref_list(&refs, slot) {
+            Ok(missing) => missing,
+            Err(()) => {
+                self.note_mismatched_slot(slot);
+                Vec::new()
+            }
+        };
+        self.gate.write(Record::encode_decided(slot, &proposal));
         if let Some(a) = self.proposers.remove(&slot) {
             if a.waiting_content {
                 self.release_value_refs(&a.prop.working().value);
@@ -228,9 +235,10 @@ impl Replica {
 
     /// Announces `slot` decided to every known replica in the current or pending epoch.
     pub(super) fn broadcast_decided(&mut self, slot: Slot, priority: u64, key: ValueKey) {
-        let peers: Vec<NodeId> = self.schedule.everyone().into_iter().filter(|&m| m != self.me).collect();
-        for peer in peers {
-            self.send(peer, Body::Decided { slot, priority, key });
+        for peer in self.schedule.everyone() {
+            if peer != self.me {
+                self.send(peer, Body::Decided { slot, priority, key });
+            }
         }
     }
 
@@ -254,8 +262,8 @@ impl Replica {
         self.seen = self.seen.split_off(&Slot(self.committed));
         // Something past our prefix is decided (or a peer is ahead): keep the next slot
         // driven so a quiet cluster cannot strand us behind.
-        let ahead =
-            self.catch_up.ahead_of(self.committed) || self.log.range(Slot(self.committed)..).next().is_some();
+        let ahead = self.catch_up.ahead_of(self.committed)
+            || self.log.last_key_value().is_some_and(|(&s, _)| s.0 >= self.committed);
         if ahead {
             self.seen.entry(Slot(self.committed)).or_insert(self.now);
         }
@@ -271,8 +279,8 @@ impl Replica {
     pub(super) fn emit_commits(&mut self) {
         while let Some(d) = self.log.get(&Slot(self.emitted)) {
             let slot = Slot(self.emitted);
-            let refs = batch::refs(&d.proposal.value);
-            if !refs.is_empty() {
+            if self.is_missing_slot(slot) {
+                let refs = batch::refs(&d.proposal.value);
                 let missing: Vec<_> =
                     refs.into_iter().filter(|r| self.content.check(*r) == Err(PinError::Missing)).collect();
                 if !missing.is_empty() {
@@ -283,20 +291,28 @@ impl Replica {
                 }
             }
             let key = d.proposal.key;
-            let value = d.proposal.value.clone();
+            let expanded = Self::expand_batch(&self.content, &d.proposal.value);
+            let changes = expanded.is_err().then(|| batch::changes(&d.proposal.value));
+            let mut items = match expanded {
+                Ok(items) => items,
+                Err(()) => {
+                    self.metrics.corrupt_batches += 1;
+                    Vec::new()
+                }
+            };
             self.applied_schedule.observe(slot, key.origin);
             // Local changes every replica ignores, reported as such rather than committed.
             let mut superseded = Vec::new();
             // A batch may carry one change twice (a forward delivered twice); the first copy
             // decides, as dedup keeps only it below.
             let mut seen = Vec::new();
-            for (key, payload) in batch::changes(&value) {
+            let mut apply_change = |key: (NodeId, u64, ProposalId), payload: &Bytes| {
                 if seen.contains(&key) {
-                    continue;
+                    return;
                 }
                 seen.push(key);
                 let (origin, incarnation, id) = key;
-                let Some((base, order)) = crate::schedule::decode_change(&payload) else { continue };
+                let Some((base, order)) = crate::schedule::decode_change(payload) else { return };
                 match self.applied_schedule.reconfigure(slot, base, order.clone()) {
                     Some((epoch, from)) => {
                         self.actions.push(Action::Reconfigured { epoch, from: Slot(from), members: order });
@@ -304,8 +320,18 @@ impl Replica {
                     None if origin == self.me && incarnation == self.incarnation => superseded.push(id),
                     None => {}
                 }
+            };
+            if let Some(changes) = changes {
+                for (k, payload) in changes {
+                    apply_change(k, &payload);
+                }
+            } else {
+                for i in &items {
+                    if i.kind == Kind::Reconfigure {
+                        apply_change(i.key(), &i.entry.payload);
+                    }
+                }
             }
-            let mut items = self.expand_batch(&value);
             items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
             self.entries.dedup_grew();
             self.release_committed_own_data();
@@ -358,29 +384,12 @@ impl Replica {
         }
     }
 
-    fn expand_batch(&mut self, value: &Bytes) -> Vec<batch::Item> {
-        let Ok(pieces) = batch::decode_pieces(value) else {
-            self.metrics.corrupt_batches += 1;
-            return Vec::new();
-        };
-        let mut items = Vec::with_capacity(pieces.len());
-        for piece in pieces {
-            match piece {
-                Piece::Entry(item) => items.push(item),
-                Piece::Ref(r) => {
-                    let Some(bytes) = self.content.get_checked(r) else {
-                        self.metrics.corrupt_batches += 1;
-                        return Vec::new();
-                    };
-                    let Ok(mut inner) = batch::decode_content(bytes) else {
-                        self.metrics.corrupt_batches += 1;
-                        return Vec::new();
-                    };
-                    items.append(&mut inner);
-                }
-            }
-        }
-        items
+    fn expand_batch(content: &crate::content::Store, value: &Bytes) -> Result<Vec<batch::Item>, ()> {
+        batch::decode_expanded(value, |r| {
+            let bytes = content.get_checked(r).ok_or(DecodeError::BadTag)?;
+            batch::decode_content(bytes)
+        })
+        .map_err(|_| ())
     }
 
     fn observe_latency(&mut self, sample: u64) {

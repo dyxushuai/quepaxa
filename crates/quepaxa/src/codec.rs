@@ -228,7 +228,9 @@ pub(crate) fn reply_proposal(p: &Proposal, request_key: ValueKey) -> WireProposa
 
 impl Message {
     pub fn encode(&self) -> Bytes {
-        let mut out = Vec::with_capacity(64 + self.payload_len());
+        // 44-byte header + body framing: 128 covers RecordRequest, RecordReply and Decided
+        // without reallocating.
+        let mut out = Vec::with_capacity(128 + self.payload_len());
         out.put_slice(&MAGIC);
         out.put_u8(WIRE_VERSION);
         out.put_u8(match self.body {

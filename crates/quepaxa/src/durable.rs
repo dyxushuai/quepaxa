@@ -47,43 +47,56 @@ pub(crate) enum Record {
 
 impl Record {
     pub fn encode(&self) -> Bytes {
-        let mut out = Vec::with_capacity(64);
-        out.put_slice(&MAGIC);
-        out.put_u8(FORMAT_VERSION);
         match self {
-            Record::Incarnation(n) => {
+            Record::Recorder { slot, reg } => Self::encode_recorder(*slot, reg),
+            Record::Decided { slot, proposal } => Self::encode_decided(*slot, proposal),
+            Record::Incarnation(n) => Self::finish_encode(16, |out| {
                 out.put_u8(KIND_INCARNATION);
                 out.put_u64_le(*n);
-            }
-            Record::Recorder { slot, reg } => {
-                out.put_u8(KIND_RECORDER);
-                out.put_u64_le(slot.0);
-                out.put_u32_le(reg.step);
-                let (first, agg) = (reg.first.as_ref(), reg.agg.as_ref());
-                put_opt_proposal(&mut out, first);
-                put_shared(&mut out, agg, &[(SAME_AS_FIRST, first)]);
-                put_shared(&mut out, reg.prev_agg.as_ref(), &[(SAME_AS_FIRST, first), (SAME_AS_AGG, agg)]);
-            }
-            Record::Reservation { through } => {
+            }),
+            Record::Reservation { through } => Self::finish_encode(16, |out| {
                 out.put_u8(KIND_RESERVATION);
                 out.put_u64_le(through.0);
-            }
-            Record::Decided { slot, proposal } => {
-                out.put_u8(KIND_DECIDED);
-                out.put_u64_le(slot.0);
-                put_proposal(&mut out, proposal);
-            }
-            Record::Compacted { through, core_state } => {
+            }),
+            Record::Compacted { through, core_state } => Self::finish_encode(32 + core_state.len(), |out| {
                 out.put_u8(KIND_COMPACTED);
                 out.put_u64_le(through.0);
-                put_value(&mut out, core_state);
-            }
-            Record::Data { id, bytes } => {
+                put_value(out, core_state);
+            }),
+            Record::Data { id, bytes } => Self::finish_encode(40 + bytes.len(), |out| {
                 out.put_u8(KIND_DATA);
-                put_data_id(&mut out, *id);
-                put_value(&mut out, bytes);
-            }
+                put_data_id(out, *id);
+                put_value(out, bytes);
+            }),
         }
+    }
+
+    pub fn encode_recorder(slot: Slot, reg: &Register) -> Bytes {
+        let val_hint = reg.first.as_ref().map_or(0, |p| p.value.len());
+        Self::finish_encode(80 + val_hint, |out| {
+            out.put_u8(KIND_RECORDER);
+            out.put_u64_le(slot.0);
+            out.put_u32_le(reg.step);
+            let (first, agg) = (reg.first.as_ref(), reg.agg.as_ref());
+            put_opt_proposal(out, first);
+            put_shared(out, agg, &[(SAME_AS_FIRST, first)]);
+            put_shared(out, reg.prev_agg.as_ref(), &[(SAME_AS_FIRST, first), (SAME_AS_AGG, agg)]);
+        })
+    }
+
+    pub fn encode_decided(slot: Slot, proposal: &Proposal) -> Bytes {
+        Self::finish_encode(64 + proposal.value.len(), |out| {
+            out.put_u8(KIND_DECIDED);
+            out.put_u64_le(slot.0);
+            put_proposal(out, proposal);
+        })
+    }
+
+    fn finish_encode(cap: usize, write: impl FnOnce(&mut Vec<u8>)) -> Bytes {
+        let mut out = Vec::with_capacity(cap);
+        out.put_slice(&MAGIC);
+        out.put_u8(FORMAT_VERSION);
+        write(&mut out);
         let crc = crc32c(&out);
         out.put_u32_le(crc);
         Bytes::from(out)
