@@ -1,0 +1,41 @@
+# Design matrix
+
+Suh's independence axiom, applied to the engine: each functional requirement (FR) should be
+set by its own design parameter (DP). In the matrix {FR} = [A]{DP}, a diagonal is
+uncoupled, a triangle (after reordering rows and columns) is decoupled and must be set in
+that order, anything else is coupled: changing one DP moves several FRs that feed back on
+each other. Loops whose time scales differ by orders of magnitude (hedging in
+milliseconds, placement in minutes) count as decoupled in practice.
+
+## Matrix
+
+`X` marks a DP that affects an FR. Columns are in the order the DPs are set.
+
+| | DP1 persist-before-send gate | DP2 ISR proposers/recorders | DP3 schedule window (LAG) | DP4 dedup | DP5 batch IDs | DP6 hedge delay δ | DP7 rotation, step-aside | DP8 placement | DP9 in-flight slots W |
+|---|---|---|---|---|---|---|---|---|---|
+| FR1 acknowledged data survives crashes | X | | | | | | | | |
+| FR2 agreement | X | X | X | | X | | | | |
+| FR3 safe membership changes | | X | X | | | | | | |
+| FR4 at-most-once | | | | X | | | | | |
+| FR5 liveness without timeouts | | X | | | X | X | X | | |
+| FR6 low latency | | | | | X | X | X | X | X |
+| FR7 bounded memory | | | | | X | | | | X |
+
+**Safety (FR1–FR4) is decoupled.** It depends on DP1–DP5 only, in a triangle, and on no
+timing parameter: timers decide when a replica acts, never whether the result is correct.
+TLAPS, Verus and the model checker hold this; keep it that way.
+
+**Liveness and performance (FR5–FR7) are coupled.** Known loops:
+
+| Loop | Mechanism | Status |
+|---|---|---|
+| δ ↔ commit latency | δ is four times the smoothed commit latency; hedging contention stretches commit latency | cut for hedged commits (#121); #252 checks whether it closes under load |
+| hedging ↔ rotation | a successful hedge decides a slot with a follower's value, which counts toward rotating the leader; rotation changes whom hedging targets | #258 |
+| W ↔ admission, content store | both budgets are derived from W, so W cannot move without them | #251 |
+| rotation ↔ placement | rotation's demotions feed placement; placement's orders can be undone by rotation | bounded by exclusions and the Verus placement proof (#199) |
+
+## Rule for changes
+
+A PR that adds or changes a mechanism says which FRs its DP affects. It may add an `X`
+below or left of the diagonal (a DP set later reading one set earlier); one that adds an
+`X` above it, or makes a DP read its own effect, introduces a loop and needs a reason here.

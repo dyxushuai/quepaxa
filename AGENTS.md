@@ -6,6 +6,11 @@
   deterministic (ADR 0001). Clocks, randomness, network and disk come in as inputs.
 - The QuePaxa paper (SOSP 2023) is the spec: read the section before designing a mechanism;
   every deviation is recorded with its reason in `docs/paper-conformance.md`.
+- Architecture changes keep the design matrix in `docs/design/axiomatic-design.md`
+  decoupled: a PR that adds or changes a mechanism states which FRs its DP affects and
+  updates the matrix. Safety (FR1–FR4) never reads a timing parameter. A new dependency
+  above the diagonal, or a DP that reads its own effect, is a loop: record it with its
+  reason and tracking issue in the doc, or redesign.
 - Pre-1.0: no compatibility layers. Wire, durable and C ABI formats break directly; the
   changelog says so.
 
