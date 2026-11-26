@@ -1,24 +1,23 @@
 diff --git a/crates/quepaxa/src/replica/log.rs b/crates/quepaxa/src/replica/log.rs
 --- a/crates/quepaxa/src/replica/log.rs
 +++ b/crates/quepaxa/src/replica/log.rs
-@@ -46,15 +46,19 @@ impl Replica {
+@@ -46,15 +46,18 @@ impl Replica {
                  self.park_request(slot, from, step, proposal, &missing);
                  return;
              }
--            let _ = self.pin_and_write_refs(&proposal.value, slot);
+-            let _ = self.pin_and_write_ref_list(&refs, slot);
          }
-+        let val = proposal.value.clone();
          let reg = self.registers.entry(slot).or_default();
          let before = reg.step;
 -        if reg.record(step, proposal) {
 +        let changed = reg.record(step, proposal);
 +        if changed {
-             let rec = Record::Recorder { slot, reg: reg.clone() }.encode();
+             let rec = Record::encode_recorder(slot, reg);
              self.gate.write(rec);
          }
          let s = reg.summary();
-+        if changed && would_change {
-+            let _ = self.pin_and_write_refs(&val, slot);
++        if changed && !refs.is_empty() {
++            let _ = self.pin_and_write_ref_list(&refs, slot);
 +        }
          // Progress on this slot postpones hedging it.
          if s.step != before || !self.seen.contains_key(&slot) {

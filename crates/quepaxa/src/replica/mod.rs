@@ -331,12 +331,6 @@ impl Replica {
             decided_steps: BTreeMap::new(),
         };
         r.advance_committed();
-        r.advance_held();
-        // Slots with recovered recorder state were started by someone; make sure they get driven.
-        let started: Vec<Slot> = r.registers.keys().copied().collect();
-        for slot in started {
-            r.seen.entry(slot).or_insert(now);
-        }
         for slot in missing_decided {
             r.note_missing_slot(slot, None);
             if let Some(d) = r.log.get(&slot) {
@@ -348,6 +342,12 @@ impl Replica {
                     r.fetch_refs(slot, origin, &missing);
                 }
             }
+        }
+        r.advance_held();
+        // Slots with recovered recorder state were started by someone; make sure they get driven.
+        let started: Vec<Slot> = r.registers.keys().copied().collect();
+        for slot in started {
+            r.seen.entry(slot).or_insert(now);
         }
         r.emit_commits();
         if r.cfg.placement {

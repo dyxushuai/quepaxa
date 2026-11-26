@@ -41,14 +41,19 @@ impl Replica {
             return;
         }
         let (sent_at, resent) = (active.sent_at, active.prop.was_resent());
-        let Some(request) = active.prop.request_for(from).cloned() else { return };
-        let resolve = |w: Option<WireProposal>| w.map(|w| w.resolve(&request).ok_or(())).transpose();
+        let Some(request) = active.prop.request_for(from) else { return };
+        let req_key = request.key;
+        let resolve = |w: Option<WireProposal>| w.map(|w| w.resolve(request).ok_or(())).transpose();
         let (Ok(first), Ok(prev_agg)) = (resolve(first), resolve(prev_agg)) else {
             self.metrics.messages_rejected += 1;
             return;
         };
         for p in first.iter().chain(prev_agg.iter()) {
-            active.holders.insert(p.key, from);
+            // Only record foreign candidate holders: the proposer already holds its own
+            // working request's content (rule P), so the uncontended path never allocates.
+            if p.key != req_key {
+                active.holders.insert(p.key, from);
+            }
         }
         match active.prop.on_reply(from, Reply { req_step, step, first, prev_agg }, &mut self.rng) {
             Progress::Waiting => {}
@@ -114,27 +119,29 @@ impl Replica {
     /// the floor again. Rule P (#172): holds back record requests until this replica holds
     /// every data batch referenced by the proposer's working value.
     pub(super) fn send_requests(&mut self, slot: Slot, resend: bool) {
-        let Some((value, holder)) = self.proposers.get(&slot).map(|a| {
+        let Some((refs, holder)) = self.proposers.get(&slot).map(|a| {
             let w = a.prop.working();
-            (w.value.clone(), a.holder.unwrap_or(w.key.origin))
+            (batch::refs(&w.value), a.holder.unwrap_or(w.key.origin))
         }) else {
             return;
         };
-        match self.pin_refs_for_proposer(&value, slot) {
-            Err(()) => {
-                if let Some(a) = self.proposers.remove(&slot) {
-                    self.release_value_refs(&a.prop.working().value);
+        if !refs.is_empty() {
+            match self.pin_ref_list_for_proposer(&refs, slot) {
+                Err(()) => {
+                    if let Some(a) = self.proposers.remove(&slot) {
+                        self.release_value_refs(&a.prop.working().value);
+                    }
+                    return;
                 }
-                return;
-            }
-            Ok(missing) if !missing.is_empty() => {
-                if let Some(a) = self.proposers.get_mut(&slot) {
-                    a.waiting_content = true;
+                Ok(missing) if !missing.is_empty() => {
+                    if let Some(a) = self.proposers.get_mut(&slot) {
+                        a.waiting_content = true;
+                    }
+                    self.fetch_refs(slot, holder, &missing);
+                    return;
                 }
-                self.fetch_refs(slot, holder, &missing);
-                return;
+                Ok(_) => {}
             }
-            Ok(_) => {}
         }
         let (me, now) = (self.me, self.now);
         let h_ready = self.reservation.covers(slot);

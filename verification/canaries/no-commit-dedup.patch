@@ -1,10 +1,10 @@
 diff --git a/crates/quepaxa/src/replica/log.rs b/crates/quepaxa/src/replica/log.rs
 --- a/crates/quepaxa/src/replica/log.rs
 +++ b/crates/quepaxa/src/replica/log.rs
-@@ -297,7 +297,7 @@ impl Replica {
+@@ -332,7 +332,7 @@ impl Replica {
+                     }
                  }
              }
-             let mut items = self.expand_batch(&value);
 -            items.retain(|i| self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id));
 +            items.retain(|i| { self.dedup.first_time(i.entry.origin, i.entry.incarnation, i.entry.id); true });
              self.entries.dedup_grew();

@@ -69,6 +69,8 @@ pub(super) struct Fetching {
     fetches: BTreeMap<DataId, InFlightFetch>,
     /// Decided slots in `log` still missing at least one referenced batch, with who reported them.
     missing_log: BTreeMap<Slot, Option<NodeId>>,
+    /// Decided slots in `log` whose referenced batch mismatched held bytes (corrupt cluster).
+    mismatched_log: BTreeSet<Slot>,
 }
 
 impl Replica {
@@ -114,11 +116,11 @@ impl Replica {
         alloc::vec![Piece::Ref(Ref { id, len, crc })]
     }
 
-    /// Checks all references in `value` against the content store without mutating it.
+    /// Checks `refs` against the content store without mutating it.
     /// Returns `Err(())` if any reference mismatches held bytes, else the missing references.
-    pub(super) fn check_refs(&self, value: &Bytes) -> Result<Vec<Ref>, ()> {
+    pub(super) fn check_ref_list(&self, refs: &[Ref]) -> Result<Vec<Ref>, ()> {
         let mut missing = Vec::new();
-        for r in batch::refs(value) {
+        for &r in refs {
             match self.content.check(r) {
                 Ok(()) => {}
                 Err(PinError::Missing) => missing.push(r),
@@ -128,12 +130,25 @@ impl Replica {
         Ok(missing)
     }
 
-    /// Pins every held reference of `value` for `slot` and lazily writes its `Record::Data`
+    /// Checks all references in `value` against the content store without mutating it.
+    /// Returns `Err(())` if any reference mismatches held bytes, else the missing references.
+    pub(super) fn check_refs(&self, value: &Bytes) -> Result<Vec<Ref>, ()> {
+        let refs = batch::refs(value);
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.check_ref_list(&refs)
+    }
+
+    /// Pins every held reference in `refs` for `slot` and lazily writes its `Record::Data`
     /// through the gate if not yet written in this incarnation's durable view. Returns
     /// `Err(())` on mismatch, else any references not yet held.
-    pub(super) fn pin_and_write_refs(&mut self, value: &Bytes, slot: Slot) -> Result<Vec<Ref>, ()> {
-        let missing = self.check_refs(value)?;
-        for r in batch::refs(value) {
+    pub(super) fn pin_and_write_ref_list(&mut self, refs: &[Ref], slot: Slot) -> Result<Vec<Ref>, ()> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let missing = self.check_ref_list(refs)?;
+        for &r in refs {
             if self.content.pin(r, slot).is_ok()
                 && let Some(bytes) = self.content.take_unwritten(&r.id)
             {
@@ -143,16 +158,27 @@ impl Replica {
         Ok(missing)
     }
 
-    /// Pins every held reference of `value` for `slot` (proposer rule P: keeps content in
+    /// Pins every held reference of `value` for `slot` and lazily writes its `Record::Data`
+    /// through the gate if not yet written in this incarnation's durable view. Returns
+    /// `Err(())` on mismatch, else any references not yet held.
+    pub(super) fn pin_and_write_refs(&mut self, value: &Bytes, slot: Slot) -> Result<Vec<Ref>, ()> {
+        let refs = batch::refs(value);
+        self.pin_and_write_ref_list(&refs, slot)
+    }
+
+    /// Pins every held reference in `refs` for `slot` (proposer rule P: keeps content in
     /// memory without forcing a disk write until a recorder or decision needs it).
-    pub(super) fn pin_refs_for_proposer(&mut self, value: &Bytes, slot: Slot) -> Result<Vec<Ref>, ()> {
-        let missing = self.check_refs(value)?;
+    pub(super) fn pin_ref_list_for_proposer(&mut self, refs: &[Ref], slot: Slot) -> Result<Vec<Ref>, ()> {
+        if refs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let missing = self.check_ref_list(refs)?;
         if missing.is_empty() {
-            for r in batch::refs(value) {
+            for &r in refs {
                 let _ = self.content.pin(r, slot);
             }
         } else {
-            for r in batch::refs(value) {
+            for &r in refs {
                 self.content.keep(r.id);
             }
         }
@@ -185,6 +211,9 @@ impl Replica {
 
     /// Drops any parked requests for `slot` (once decided).
     pub(super) fn clear_parked_slot(&mut self, slot: Slot) {
+        if self.fetching.parked.is_empty() {
+            return;
+        }
         let mut released = Vec::new();
         self.fetching.parked.retain(|(s, _), p| {
             if *s == slot {
@@ -207,6 +236,16 @@ impl Replica {
             .range((slot, NodeId(0))..=(slot, NodeId(u32::MAX)))
             .find(|(_, p)| p.proposal.key == key)
             .map(|(_, p)| &p.proposal.value)
+    }
+
+    /// Whether decided `slot` is known to be missing referenced content.
+    pub(super) fn is_missing_slot(&self, slot: Slot) -> bool {
+        !self.fetching.missing_log.is_empty() && self.fetching.missing_log.contains_key(&slot)
+    }
+
+    /// Notes that decided `slot` has a reference mismatching held bytes.
+    pub(super) fn note_mismatched_slot(&mut self, slot: Slot) {
+        self.fetching.mismatched_log.insert(slot);
     }
 
     /// Notes that decided `slot` still lacks some referenced content.
@@ -418,8 +457,12 @@ impl Replica {
             };
             match self.pin_and_write_refs(&value, slot) {
                 Ok(missing) if !missing.is_empty() => {}
-                _ => {
+                Ok(_) => {
                     self.fetching.missing_log.remove(&slot);
+                }
+                Err(()) => {
+                    self.fetching.missing_log.remove(&slot);
+                    self.fetching.mismatched_log.insert(slot);
                 }
             }
         }
@@ -541,6 +584,12 @@ impl Replica {
     /// Extends the held prefix: contiguous decided slots from `floor` whose referenced
     /// content is all present and written to the durable log.
     pub(super) fn advance_held(&mut self) {
+        // Every decided slot without missing or mismatched content has all its references
+        // pinned and written, so `held` tracks `committed` in O(1) without probing `log`.
+        if self.fetching.missing_log.is_empty() && self.fetching.mismatched_log.is_empty() {
+            self.held = self.committed;
+            return;
+        }
         while let Some(d) = self.log.get(&Slot(self.held)) {
             let ready = batch::refs(&d.proposal.value)
                 .into_iter()
@@ -703,6 +752,7 @@ impl Replica {
             }
         });
         self.fetching.missing_log = self.fetching.missing_log.split_off(&floor);
+        self.fetching.mismatched_log = self.fetching.mismatched_log.split_off(&floor);
         self.fetching.fetches.retain(|_, f| f.slot >= floor);
         for id in released {
             self.maybe_release_content(id);
@@ -717,6 +767,7 @@ impl Replica {
         self.fetching.pending_forwards.clear();
         self.fetching.fetches.clear();
         self.fetching.missing_log.clear();
+        self.fetching.mismatched_log.clear();
         self.fetching.own_data.clear();
     }
 }

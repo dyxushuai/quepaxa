@@ -4,9 +4,9 @@ diff --git a/crates/quepaxa/src/replica/log.rs b/crates/quepaxa/src/replica/log.
 @@ -35,7 +35,7 @@ impl Replica {
          }
          let key = proposal.key;
-         let would_change = self.registers.get(&slot).is_none_or(|reg| reg.would_change(step, &proposal));
--        if would_change {
-+        if would_change && false {
+         let refs = batch::refs(&proposal.value);
+-        if !refs.is_empty() && self.registers.get(&slot).is_none_or(|reg| reg.would_change(step, &proposal)) {
++        if false && !refs.is_empty() && self.registers.get(&slot).is_none_or(|reg| reg.would_change(step, &proposal)) {
              // Rule R (#172): apply a changing record only while holding every referenced
              // data batch, writing its `Data` record ahead of `Recorder`.
-             let Ok(missing) = self.check_refs(&proposal.value) else {
+             let Ok(missing) = self.check_ref_list(&refs) else {
