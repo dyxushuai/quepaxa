@@ -50,11 +50,13 @@ Two lanes, so day-to-day changes merge fast and the expensive checks run where t
 - **Every PR and push** (CI, fast lane): fmt, clippy, docs, unit and property tests, the
   model checker, placement, shuttle, `no_std` and `cargo deny`. Rows above marked "every
   PR" outside this list run in the release check instead.
-- **Before a release** (the release check): dispatch both workflows on the release commit
-  and tag only when both pass: `gh workflow run ci.yml --ref main` (adds MSRV, the C ABI,
-  Miri, tier-1 platforms, wasm, Android, iOS, semver and the canaries) and
-  `gh workflow run nightly.yml --ref main` (everything marked "nightly" or "weekly" above,
-  mutation testing included). Neither runs on a schedule.
+- **Before a release** (the release check): push the commit to be tagged as a branch,
+  `git push origin <sha>:refs/heads/release/X.Y.Z`, and dispatch both workflows on it:
+  `gh workflow run ci.yml --ref release/X.Y.Z` (adds MSRV, the C ABI, Miri, tier-1
+  platforms, wasm, Android, iOS, semver and the canaries) and
+  `gh workflow run nightly.yml --ref release/X.Y.Z` (everything marked "nightly" or
+  "weekly" above, mutation testing included). Tag that same commit only when both runs
+  pass and both report it as their `headSha`. Neither workflow runs on a schedule.
 
 ## Running it locally
 
