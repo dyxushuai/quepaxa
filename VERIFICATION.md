@@ -43,6 +43,19 @@ test-only `model` feature):
 Evidence accumulates across steps; a crash forgets only what the crashed replica's
 volatile state showed (its replies wait for durability, so that state never had an effect).
 
+## When it runs
+
+Two lanes, so day-to-day changes merge fast and the expensive checks run where they count:
+
+- **Every PR and push** (CI, fast lane): fmt, clippy, docs, unit and property tests, the
+  model checker, placement, shuttle, `no_std` and `cargo deny`. Rows above marked "every
+  PR" outside this list run in the release check instead.
+- **Before a release** (the release check): dispatch both workflows on the release commit
+  and tag only when both pass: `gh workflow run ci.yml --ref main` (adds MSRV, the C ABI,
+  Miri, tier-1 platforms, wasm, Android, iOS, semver and the canaries) and
+  `gh workflow run nightly.yml --ref main` (everything marked "nightly" or "weekly" above,
+  mutation testing included). Neither runs on a schedule.
+
 ## Running it locally
 
 ```sh
@@ -76,7 +89,7 @@ that matters, and every test stays green. The canaries make that loud.
 - When you fix a correctness bug, add a canary that re-introduces it.
 - When you add protocol logic, add or extend an invariant, then a canary proving the
   invariant catches a broken version.
-- Mutation testing ratchets: a missed mutant fails the weekly run unless
+- Mutation testing ratchets: a missed mutant fails the release check unless
   `verification/mutants-accepted.txt` lists it with the reason it cannot or need not be
   killed (equivalent, liveness or performance only). Prefer a test; shrink the list when
   you can.

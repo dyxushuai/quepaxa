@@ -1,9 +1,13 @@
 name: CI
 
+# Every PR and push runs the fast lane (lint, tests, no_std, licences). The heavy lane
+# (MSRV, C ABI, Miri, tier-1 platforms, wasm, mobile, semver, canaries) runs only when
+# dispatched, as the pre-release check together with the nightly workflow (VERIFICATION.md).
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -81,7 +85,7 @@ jobs:
 
   msrv:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -111,7 +115,7 @@ jobs:
 
   ffi:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -141,7 +145,7 @@ jobs:
 
   miri:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -153,7 +157,7 @@ jobs:
 
   tier1:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -181,7 +185,7 @@ jobs:
 
   wasm:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -193,7 +197,7 @@ jobs:
 
   android:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -237,7 +241,7 @@ jobs:
 
   ios:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
@@ -263,7 +267,7 @@ jobs:
 
   semver:
     needs: changes
-    if: needs.changes.outputs.rust == 'true' && github.event_name == 'pull_request'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -284,7 +288,7 @@ jobs:
 
   canaries:
     needs: changes
-    if: needs.changes.outputs.rust == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
