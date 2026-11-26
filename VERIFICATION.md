@@ -47,21 +47,21 @@ volatile state showed (its replies wait for durability, so that state never had 
 
 Two lanes, so day-to-day changes merge fast and the expensive checks run where they count:
 
-- **Every PR and push** (CI, fast lane): fmt, clippy, docs, unit and property tests, the
-  model checker, placement, shuttle, `no_std` and `cargo deny`. Rows above marked "every
-  PR" outside this list run in the release check instead.
-- **Before a release** (the release check): push the commit to be tagged as a branch,
-  `git push origin <sha>:refs/heads/release/X.Y.Z`, and dispatch both workflows on it:
-  `gh workflow run ci.yml --ref release/X.Y.Z` (adds MSRV, the C ABI, Miri, tier-1
-  platforms, wasm, Android, iOS, semver and the canaries) and
-  `gh workflow run nightly.yml --ref release/X.Y.Z` (everything marked "nightly" or
-  "weekly" above, mutation testing included). Tag that same commit only when both runs
-  pass and both report it as their `headSha`. Neither workflow runs on a schedule.
+- **Every PR and push** (CI, fast lane): `scripts/check.sh`, the same commands CI's fast
+  jobs run: fmt, clippy, docs, unit and property tests, the model checker, placement,
+  shuttle, `no_std` and `cargo deny`. Rows above marked "every PR" outside this list run in
+  the release check instead.
+- **Before a release** (the release check): `scripts/check.sh release X.Y.Z` pushes
+  `origin/main` as `release/X.Y.Z` and dispatches both workflows on it: CI's heavy lane
+  (MSRV, the C ABI, Miri, tier-1 platforms, wasm, Android, iOS, semver, the canaries) and
+  the nightly workflow (everything marked "nightly" or "weekly" above, mutation testing
+  included). `scripts/check.sh tag X.Y.Z` tags that commit only when both runs passed on
+  it. Neither workflow runs on a schedule.
 
 ## Running it locally
 
 ```sh
-cargo nextest run --workspace                                   # everything per-PR
+scripts/check.sh                                                # the fast lane, as CI runs it
 cargo nextest run --release -p quepaxa-sim --test model_check   # model checking (release)
 QPX_SIM_SEEDS=100000 cargo nextest run --release -p quepaxa-sim --test replica_sim   # all cores; QPX_SIM_SHARD=i/n for a slice
 QPX_MODEL_EXTRA_DEVIATIONS=1 cargo nextest run --release -p quepaxa-sim --test model_check
@@ -76,6 +76,7 @@ cargo mutants -p quepaxa -f crates/quepaxa/src/dedup.rs          # mutants of on
 cargo +nightly bolero test -p quepaxa 'codec::tests::decode_never_panics_on_arbitrary_input' --target x86_64-unknown-linux-gnu -T 60s
 ```
 
+Wrap the heavy ones in `scripts/heavy` (one lock per machine) when sessions share it.
 A simulator failure prints its seed; a model-checking failure prints the schedule (set
 `QPX_MODEL_REPLAY=1` to replay it step by step).
 

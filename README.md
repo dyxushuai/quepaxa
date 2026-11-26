@@ -172,7 +172,7 @@ Android (emulator) and iOS (simulator); the core builds for `wasm32-unknown-unkn
 
 Pre-1.0. The wire format, durable format and C ABI may change between minor versions until
 1.0; the [changelog](https://github.com/dyxushuai/quepaxa/blob/main/CHANGELOG.md) has upgrade notes. Not supported: Byzantine faults,
-witnesses (vote-only members), automatic latency-based leader tuning. Design record:
+witnesses (vote-only members). Design record:
 [spec](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa-v1/spec.md), [decisions](https://github.com/dyxushuai/quepaxa/blob/main/.scratch/quepaxa/map.md),
 [ADRs](https://github.com/dyxushuai/quepaxa/tree/main/docs/adr).
 

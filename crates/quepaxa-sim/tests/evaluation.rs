@@ -1,5 +1,4 @@
-//! Leader-policy evaluation: the scenarios every leader policy is compared on (plan
-//! `docs/plans/2026-11-08-1002-feat-paper-leader-tuning-plan.md`, R14). Each test prints
+//! Leader-policy evaluation: the scenarios every leader policy is compared on. Each test prints
 //! markdown table rows, one per seed, for `docs/benchmarks.md`; none asserts a result,
 //! since the point is to compare policies across commits.
 //!
