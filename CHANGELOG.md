@@ -3,7 +3,12 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
-## Unreleased
+## 0.8.0 — 2026-11-26
+
+Explicit protocol state proved in Verus (entries, disk health, placement, retirement,
+recovery), batch IDs instead of batch contents (paper §6.1, on by default), the paper's §7
+evaluation reproduced and compared against openraft, and a reference runtime that applies
+off the core thread with awaited backpressure.
 
 - `examples/kv-tokio/bench/openraft` (#156): add a standalone `openraft 0.10.1` KV benchmark
   server (isolated from the root workspace) serving the etcd v3 KV gRPC subset on a durable
