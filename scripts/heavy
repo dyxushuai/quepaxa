@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Runs a heavy local job (100k-seed simulations, wan.sh, benchmarks, canaries, Verus) under
+# one machine-wide lock, so sessions sharing the machine don't skew each other's numbers or
+# starve each other's runs: scripts/heavy <command> [args...]
+set -euo pipefail
+exec flock "${QPX_HEAVY_LOCK:-${XDG_RUNTIME_DIR:-/tmp}/quepaxa-heavy.lock}" "$@"
