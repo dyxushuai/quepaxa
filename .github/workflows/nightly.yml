@@ -1,9 +1,7 @@
 name: Nightly assurance
 
+# Dispatched by hand as the pre-release check (VERIFICATION.md); no schedule.
 on:
-  schedule:
-    - cron: "17 3 * * *" # nightly
-    - cron: "41 4 * * 0" # weekly (Sunday): adds mutation testing
   workflow_dispatch:
 
 permissions:
@@ -184,7 +182,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      actions: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -193,14 +190,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Both commits are measured in this job, on this machine: comparing against a
       # baseline recorded on another runner mostly measures the hardware difference.
-      - name: Compare with the last successful nightly's commit (fail on a >10% commit-path regression)
+      # The baseline is the last release before this commit: the release check runs on the
+      # candidate, so a regression is measured against what users have now.
+      - name: Compare with the last release (fail on a >10% commit-path regression)
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          prev=$(gh run list -R "$GITHUB_REPOSITORY" --workflow nightly.yml --branch main --status success \
-            -L 1 --json headSha --jq '.[0].headSha // empty')
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^ 2>/dev/null || true)
+          [ -n "$prev" ] && prev=$(git rev-list -n 1 "$prev")
           if [ -z "$prev" ] || [ "$prev" = "$GITHUB_SHA" ] || ! git cat-file -e "$prev:crates/quepaxa/benches/replica.rs" 2>/dev/null; then
             echo "no earlier commit to compare with; measuring this one only"
             cargo bench -p quepaxa --bench replica
@@ -213,7 +210,7 @@ jobs:
           # alone, and was faster locally when CI called it a regression.
           cargo bench -p quepaxa --bench replica -- propose_to_commit --baseline previous --noise-threshold 0.10 | tee bench.txt
           if grep -q "Performance has regressed" bench.txt; then
-            echo "::error::commit-path benchmark regression above 10% against $prev"
+            echo "::error::commit-path benchmark regression above 10% against the last release ($prev)"
             exit 1
           fi
 
@@ -238,7 +235,6 @@ jobs:
           path: lcov.info
 
   mutants:
-    if: github.event.schedule == '41 4 * * 0' || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -274,46 +270,3 @@ jobs:
         with:
           name: mutants-${{ matrix.shard }}
           path: mutants.out/
-
-  report:
-    # One open issue tracks a failing streak: each failed scheduled run comments on it, and
-    # the third in a row raises its priority, so a red nightly cannot go unnoticed for days.
-    needs: [fuzz, simulation, scenarios, deep, tla, tlaps, verus, kani, bench, coverage, mutants]
-    if: failure() && github.event_name == 'schedule'
-    runs-on: ubuntu-24.04
-    permissions:
-      issues: write
-    steps:
-      - name: Open or update the nightly failure issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label nightly-failure --state open --json number --jq '.[0].number // empty')
-          if [ -z "$open" ]; then
-            gh issue create -R "$GITHUB_REPOSITORY" --label needs-triage --label nightly-failure \
-              --title "Nightly assurance failing (since $(date -u +%F))" \
-              --body "Run: $run. Failing seeds, schedules and fuzz inputs are in the job logs and artifacts (simulator and model-checker failures print the seed or schedule that reproduces them). Later failures comment here; a passing scheduled run closes this issue."
-            exit 0
-          fi
-          gh issue comment -R "$GITHUB_REPOSITORY" "$open" --body "Failed again on $(date -u +%F): $run"
-          streak=$(( $(gh issue view -R "$GITHUB_REPOSITORY" "$open" --json comments --jq '[.comments[] | select(.body | startswith("Failed again"))] | length') + 1 ))
-          if [ "$streak" -ge 3 ]; then
-            gh issue edit -R "$GITHUB_REPOSITORY" "$open" --add-label "priority: high"
-          fi
-
-  recover:
-    needs: [fuzz, simulation, scenarios, deep, tla, tlaps, verus, kani, bench, coverage, mutants]
-    if: ${{ !failure() && !cancelled() && github.event_name == 'schedule' }}
-    runs-on: ubuntu-24.04
-    permissions:
-      issues: write
-    steps:
-      - name: Close the nightly failure issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label nightly-failure --state open --json number --jq '.[0].number // empty')
-          if [ -n "$open" ]; then
-            gh issue close -R "$GITHUB_REPOSITORY" "$open" --comment "Passed on $(date -u +%F): $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          fi
