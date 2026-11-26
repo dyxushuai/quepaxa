@@ -261,7 +261,7 @@ impl Replica {
         // Hedging around a target that still talks: one slot at a time, or the hedges contend
         // with its slots and stretch a slowdown they were meant to cover. Entries other
         // followers handed here (as their deputy) are not hedges.
-        let cap = if direct || self.entries.deputy() { self.window() } else { 1 };
+        let cap = if direct || self.entries.deputy() { self.active_window() } else { 1 };
         while (self.proposers.len() as u64) < cap {
             // Nothing to propose: skip the search for a slot, which probes the log per slot
             // and ran on every input.
@@ -419,7 +419,7 @@ impl Replica {
     /// leader and hands the entries on.
     fn free_slot(&self) -> Option<Slot> {
         let as_leader = self.leads_now() && self.proposes_directly();
-        let end = self.committed + self.window();
+        let end = self.committed + self.active_window();
         // Skip slots already decided by a peer: proposing there loses the slot, re-queues the
         // batch, and blasts RecordRequests across the whole handover window during catch-up.
         let mut s = self.next_alloc.max(self.committed).max(self.catch_up.ahead());
@@ -468,7 +468,7 @@ impl Replica {
 
     /// Undecided slots in the window someone else drives, with when to take them over.
     fn stalled(&self) -> impl Iterator<Item = (Slot, Timestamp)> + '_ {
-        let end = Slot(self.committed + self.window());
+        let end = Slot(self.committed + self.active_window());
         self.seen
             .range(..end)
             .filter(|(s, _)| !self.log.contains_key(s) && !self.proposers.contains_key(s))

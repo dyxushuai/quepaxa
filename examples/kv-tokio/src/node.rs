@@ -149,12 +149,18 @@ impl Written {
 /// flushed early past an eighth of it, so one hand-off cannot overshoot it by much.
 const MAX_UNWRITTEN: u64 = 64 << 20;
 
-/// How many bytes of its own writes a replica holds accepted but not yet committed before it
-/// answers `Busy`: twice what its slots can carry at once. Past the link's capacity a deeper
-/// queue only adds latency, and every entry in it may be sent again or hedged (#231); a
-/// client told `Busy` backs off instead.
+/// Default admission budget in full batches: 16 × `max_batch_bytes` (16 MiB at the default
+/// 1 MiB batch), matching the historic default (`W = 8` × 2) without coupling admission to
+/// `max_in_flight_slots` or the active runtime `W` (#251).
+const DEFAULT_ADMISSION_BATCHES: u64 = 16;
+
+/// Default bytes of its own writes a replica holds accepted but not yet committed before it
+/// answers `Busy`. Past the link's capacity a deeper queue only adds latency, and every entry
+/// in it may be sent again or hedged (#231); a client told `Busy` backs off instead. Sized
+/// independently of `max_in_flight_slots` so lowering `W` (statically or at runtime) never
+/// sheds writes that fit the node's admission budget (#251).
 pub fn admission_bytes(cfg: &quepaxa::Config) -> u64 {
-    u64::from(cfg.max_batch_bytes) * u64::from(cfg.max_in_flight_slots) * 2
+    u64::from(cfg.max_batch_bytes).saturating_mul(DEFAULT_ADMISSION_BATCHES)
 }
 
 struct PendingPersist {

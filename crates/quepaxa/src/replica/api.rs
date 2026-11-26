@@ -35,6 +35,32 @@ impl Replica {
         &self.metrics
     }
 
+    /// Number of slots this replica currently drives concurrently (`1..=cfg.max_in_flight_slots`).
+    pub fn in_flight_slots(&self) -> u32 {
+        self.in_flight_slots
+    }
+
+    /// Sets how many slots this replica drives concurrently, within `1..=cfg.max_in_flight_slots`.
+    ///
+    /// Takes effect on the next call that drives slots ([`propose`](Self::propose),
+    /// [`handle`](Self::handle), [`handle_timeout`](Self::handle_timeout)). Slots already in
+    /// flight finish normally; the content store, peer-acceptance windows and reservation
+    /// horizons keep their configured bounds and do not shrink or evict.
+    ///
+    /// # Errors
+    ///
+    /// - [`Error::InvalidConfig`] if `slots` is `0` or exceeds `Config::max_in_flight_slots`.
+    pub fn set_in_flight_slots(&mut self, slots: u32) -> Result<(), Error> {
+        if slots == 0 {
+            return Err(Error::InvalidConfig("in_flight_slots must be positive"));
+        }
+        if slots > self.cfg.max_in_flight_slots {
+            return Err(Error::InvalidConfig("in_flight_slots must not exceed max_in_flight_slots"));
+        }
+        self.in_flight_slots = slots;
+        Ok(())
+    }
+
     /// The members of the epoch in force at the committed prefix, in leader order (the
     /// leader first), with what this replica knows of each.
     pub fn members(&self) -> Vec<MemberView> {
