@@ -182,7 +182,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      actions: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -191,14 +190,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Both commits are measured in this job, on this machine: comparing against a
       # baseline recorded on another runner mostly measures the hardware difference.
-      - name: Compare with the last successful nightly's commit (fail on a >10% commit-path regression)
+      # The baseline is the last release before this commit: the release check runs on the
+      # candidate, so a regression is measured against what users have now.
+      - name: Compare with the last release (fail on a >10% commit-path regression)
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          prev=$(gh run list -R "$GITHUB_REPOSITORY" --workflow nightly.yml --branch main --status success \
-            -L 1 --json headSha --jq '.[0].headSha // empty')
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD^ 2>/dev/null || true)
+          [ -n "$prev" ] && prev=$(git rev-list -n 1 "$prev")
           if [ -z "$prev" ] || [ "$prev" = "$GITHUB_SHA" ] || ! git cat-file -e "$prev:crates/quepaxa/benches/replica.rs" 2>/dev/null; then
             echo "no earlier commit to compare with; measuring this one only"
             cargo bench -p quepaxa --bench replica
@@ -211,7 +210,7 @@ jobs:
           # alone, and was faster locally when CI called it a regression.
           cargo bench -p quepaxa --bench replica -- propose_to_commit --baseline previous --noise-threshold 0.10 | tee bench.txt
           if grep -q "Performance has regressed" bench.txt; then
-            echo "::error::commit-path benchmark regression above 10% against $prev"
+            echo "::error::commit-path benchmark regression above 10% against the last release ($prev)"
             exit 1
           fi
 
