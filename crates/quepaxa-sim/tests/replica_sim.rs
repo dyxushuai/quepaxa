@@ -10,6 +10,15 @@ fn seed_count(default: u64) -> u64 {
     std::env::var("QPX_SIM_SEEDS").ok().and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
+/// A seed's replica count and whether it runs large commands. The nightly shards seeds by
+/// residue (`QPX_SIM_SHARD`), so these come from a hash of the seed, not its low bits:
+/// otherwise every costly variant (five replicas with large commands) lands on the same
+/// shards and runs them past their time limit.
+fn variant(seed: u64) -> (usize, bool) {
+    let bits = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 62;
+    ([3, 5][(bits & 1) as usize], bits >= 2)
+}
+
 /// Runs `run(seed)` for seeds `0..count` on every core and returns how many it ran. With
 /// `QPX_SIM_SHARD=i/n`, runs only the seeds equal to `i` modulo `n` (the nightly splits
 /// the seeds across machines). The first failure stops the other threads and is re-raised.
@@ -71,9 +80,9 @@ fn large_commands_commit_and_converge() {
 #[test]
 fn hostile_runs_stay_safe_and_converge() {
     for_seeds(seed_count(40), |seed| {
-        let n = [3, 5][(seed % 2) as usize];
+        let (n, large) = variant(seed);
         let mut cfg = SimConfig::hostile(n, seed);
-        if seed % 4 >= 2 {
+        if large {
             // Keep large-command arrival rate within 4 KiB batch capacity over a 6 s fault
             // phase so the progress bound measures liveness rather than queue saturation.
             cfg.payload_bytes = Some((256, 2048));
@@ -92,10 +101,10 @@ fn writes_commit_within_the_bound_while_a_majority_is_connected() {
     // leader rescues a stuck write first); minorities are still cut off, links lose and
     // duplicate.
     for_seeds(seed_count(40), |seed| {
-        let n = [3, 5][(seed % 2) as usize];
+        let (n, large) = variant(seed);
         let mut cfg =
             SimConfig { crash: 0, partition: 1, fault_phase_ms: 6_000, ..SimConfig::hostile(n, seed) };
-        if seed % 4 >= 2 {
+        if large {
             // Keep large-command arrival rate within 4 KiB batch capacity over a 6 s fault
             // phase so the progress bound measures liveness rather than queue saturation.
             cfg.payload_bytes = Some((256, 2048));
@@ -125,7 +134,7 @@ fn a_write_cut_off_in_a_minority_is_not_held_to_the_bound() {
 fn crash_heavy_runs_never_lose_acknowledged_state() {
     for_seeds(seed_count(40), |seed| {
         let mut cfg = SimConfig::durability_stress(3, seed);
-        if seed % 2 == 1 {
+        if variant(seed).1 {
             cfg.payload_bytes = Some((256, 2048));
         }
         if let Err(e) = Sim::new(cfg).run() {
@@ -223,9 +232,9 @@ fn membership_changes_under_faults_stay_safe_and_converge() {
         .unwrap_or_else(|| env("QPX_SIM_SEEDS").map_or(120, |s| (s / 50).max(120)));
     let (applied, shrunk, grown) = (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0));
     let ran = for_seeds(seeds, |seed| {
-        let n = [3, 5][(seed % 2) as usize];
+        let (n, large) = variant(seed);
         let mut cfg = SimConfig { spares: 2, reconfigure: 2, ..SimConfig::hostile(n, seed) };
-        if seed % 4 >= 2 {
+        if large {
             // Keep large-command arrival rate within 4 KiB batch capacity over a 6 s fault
             // phase so the progress bound measures liveness rather than queue saturation.
             cfg.payload_bytes = Some((256, 2048));
