@@ -102,6 +102,12 @@ impl Replica {
         let direct = self.proposes_directly();
         self.applied_schedule = state.schedule.clone();
         self.schedule = state.schedule;
+        if self.schedule.knows(self.me) {
+            self.was_member = true;
+            self.follow.stop();
+        } else if self.outside() && self.cfg.follow_interval > 0 {
+            self.follow.arm_if_idle(self.now, self.cfg.follow_interval);
+        }
         self.dedup = state.dedup;
         self.emitted = state.next;
         self.committed = state.next;

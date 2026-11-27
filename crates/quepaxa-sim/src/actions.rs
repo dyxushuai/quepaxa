@@ -175,6 +175,11 @@ impl Sim {
                 }
             }
             Action::Retired { epoch } => {
+                assert!(
+                    !self.is_observer(i),
+                    "{}",
+                    self.fail(&format!("permanent observer n{i} retired from epoch {epoch}"))
+                );
                 let _ = writeln!(self.trace, "{} n{i} retired from epoch {epoch}", self.now);
                 // A replica that has not caught up with a later change adding it back may
                 // still report the older epoch; the operator knows better and keeps it.

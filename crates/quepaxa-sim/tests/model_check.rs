@@ -337,3 +337,25 @@ fn replica_missing_content_whose_holders_compact_installs_snapshot() {
     assert!(report.complete > 0 && report.exhausted, "{report:?}");
     assert!(report.snapshots_installed > 0, "{report:?}");
 }
+
+/// Non-voting observer replica (`n3`, outside `{0, 1, 2}` and never added): serves a
+/// linearizable read covering a write with any deviation or crash, including across a
+/// leader-order reconfiguration (where it must never retire).
+#[test]
+fn observer_serves_linearizable_reads_with_a_partition_or_crash() {
+    for (deviations, crashes, reconfigure) in
+        [(deviations(1), 0, None), (deviations(0), 1, None), (deviations(1), 0, Some((0, vec![1, 2, 0])))]
+    {
+        let cfg = ModelConfig {
+            spares: 1,
+            reads: vec![3],
+            reconfigure,
+            max_depth: depth(200),
+            max_states: budget(2_000_000),
+            ..ModelConfig::new(vec![0], deviations, crashes)
+        };
+        let report = check(&cfg).unwrap_or_else(|e| panic!("{e}"));
+        println!("{report:?}");
+        assert!(report.served > 0 && report.exhausted, "{report:?}");
+    }
+}

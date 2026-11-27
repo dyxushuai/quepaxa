@@ -28,3 +28,24 @@ fn a_member_is_replaced_and_the_removed_replica_exits_by_itself() {
     assert_eq!(c.request(2, "GET after"), "VALUE yes");
     assert_eq!(c.request(3, "GET k5"), "VALUE v5");
 }
+
+#[test]
+fn a_non_voting_observer_follows_and_reads_across_reconfigurations() {
+    // Replicas 0-2 are voting members; replica 3 runs as a non-voting observer.
+    let c = Cluster::with_members(4, 3);
+    for k in 0..10 {
+        assert_eq!(c.request(0, &format!("PUT o{k} val{k}")), "OK");
+    }
+    // Observer 3 serves linearizable reads without voting.
+    assert_eq!(c.request(3, "GET o9"), "VALUE val9");
+    assert_eq!(c.request(3, "GET o0"), "VALUE val0");
+
+    // Reorder the voting leaders: observer 3 was never a voting member, so it must stay
+    // running (never exit on Retired) and continue following and serving reads.
+    assert_eq!(c.request(0, "LEADERS 2,1,0"), "OK");
+    for k in 10..85 {
+        assert_eq!(c.request(k % 3, &format!("PUT o{k} val{k}")), "OK");
+    }
+    assert_eq!(c.request(3, "GET o84"), "VALUE val84");
+    assert_eq!(c.request(3, "STALE o84"), "VALUE val84");
+}

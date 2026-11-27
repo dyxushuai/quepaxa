@@ -143,7 +143,7 @@ impl Sim {
     /// Builds a fresh cluster.
     pub fn new(cfg: SimConfig) -> Self {
         let rng = SplitMix64::new(cfg.seed);
-        let nodes_len = cfg.nodes + cfg.spares;
+        let nodes_len = cfg.nodes + cfg.spares + cfg.observers;
         let initial: Vec<usize> = (0..cfg.nodes).collect();
         let nodes = (0..nodes_len)
             .map(|_| Node {
@@ -319,6 +319,10 @@ impl Sim {
         }
     }
 
+    fn is_observer(&self, i: usize) -> bool {
+        i >= self.cfg.nodes + self.cfg.spares
+    }
+
     fn converged(&self) -> bool {
         let target = self.ledger.slots() as u64;
         self.queue.iter().all(|std::cmp::Reverse((_, _, e))| !matches!(e, Event::Restart { .. }))
@@ -326,6 +330,14 @@ impl Sim {
                 n.replica.as_ref().is_some_and(|r| r.commit_index() == target && r.emitted_index() == target)
                     && n.next_commit == target
                     && n.outstanding.is_empty()
+            })
+            && (self.cfg.nodes + self.cfg.spares..self.nodes.len()).map(|i| &self.nodes[i]).all(|n| {
+                n.replica.as_ref().is_some_and(|r| {
+                    r.commit_index() == target
+                        && r.emitted_index() == target
+                        && !r.is_member()
+                        && r.metrics().live_registers == 0
+                }) && n.next_commit == target
             })
             && self
                 .nodes
@@ -349,6 +361,9 @@ impl Sim {
         cfg.max_batch_bytes = 4096;
         cfg.inline_batch_bytes = config::inline_batch_bytes(self.cfg.seed, i);
         cfg.max_message_bytes = self.cfg.max_message_bytes;
+        if self.is_observer(i) {
+            cfg.follow_interval = self.cfg.retransmit_ms * MS;
+        }
         if let Some((sustain, hold)) = self.cfg.placement {
             cfg.placement = true;
             cfg.placement_sustain = sustain * MS;
@@ -577,7 +592,7 @@ impl Sim {
         if self.rng.below(3) == 0 {
             return self.shuffle_order();
         }
-        let mut pool: Vec<usize> = (0..self.nodes.len()).collect();
+        let mut pool: Vec<usize> = (0..self.cfg.nodes + self.cfg.spares).collect();
         for k in (1..pool.len()).rev() {
             pool.swap(k, self.rng.below(k as u64 + 1) as usize);
         }

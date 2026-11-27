@@ -1,8 +1,10 @@
 ---------------------------- MODULE ReadsProof ----------------------------
 (***************************************************************************)
-(* TLAPS proof of Reads.tla's ReadSafe with fixed membership (no change  *)
-(* and no rotation), for any number of replicas, slots and reads: a ready  *)
-(* read reflects every slot decided before it was requested.               *)
+(* TLAPS proof of Reads.tla's ReadSafe and ObserverNoRegisters with fixed  *)
+(* membership (no change and no rotation), for any number of replicas      *)
+(* (including non-voting observers in Replicas \ InitMembers), slots and   *)
+(* reads: a ready read on any member or observer reflects every slot       *)
+(* decided before it was requested, and observers never hold registers.    *)
 (*                                                                         *)
 (* A decided slot was recorded durably by a majority of the members, and  *)
 (* stays covered there (DCov): a register goes only once the decision is  *)
@@ -120,6 +122,7 @@ OpenOK(i) ==
 
 FInv ==
     /\ RInvTypes
+    /\ ObserverNoRegisters
     /\ \A s \in Slots : decided[s] # None => Covered(s)
     /\ \A i \in ReadIds : rd[i].st = "open" => OpenOK(i)
     /\ ReadSafe
@@ -190,7 +193,8 @@ BY MarkProps
 LEMMA InitFInv == RInit => FInv
 <1> SUFFICES ASSUME RInit PROVE FInv OBVIOUS
 <1>1. RInvTypes BY FixedAssumptions, MAssumptions DEF RInit, Init, RInvTypes, Idle, ReadState, Decided
-<1> QED BY <1>1 DEF RInit, Init, FInv, Idle, ReadSafe, None
+<1>2. ObserverNoRegisters BY DEF RInit, ObserverNoRegisters, Observers
+<1> QED BY <1>1, <1>2 DEF RInit, Init, FInv, Idle, ReadSafe, None
 
 \* Durable coverage that every replica keeps.
 DCovKeep == \A q \in Replicas, u \in Slots : DCov(q, u) => DCov(q, u)'
@@ -229,9 +233,10 @@ LEMMA OpenKept ==
   <2> QED BY <2>1, <2>2, <1>1 DEF DCovKeep
 <1> QED BY <1>1, <1>2 DEF OpenOK
 
-\* A step that leaves decisions and reads alone and keeps durable coverage keeps FInv.
+\* A step that leaves decisions and reads alone and keeps durable coverage and observer
+\* non-recording keeps FInv.
 LEMMA ReadsKept ==
-    ASSUME FInv, RInvTypes', DCovKeep, rd' = rd, decided' = decided
+    ASSUME FInv, RInvTypes', ObserverNoRegisters', DCovKeep, rd' = rd, decided' = decided
     PROVE  FInv'
 <1>1. RInvTypes BY DEF FInv
 <1>2. \A s \in Slots : decided'[s] # None => Covered(s)' BY CoveredKept DEF FInv
@@ -264,6 +269,8 @@ LEMMA FInvNext == FInv /\ [RNext]_allvars => FInv'
   <2>4. v = Write BY <1>0
   <2>q. Q \subseteq Replicas BY <2>2, FixedAssumptions DEF Maj
   <2>5. RInvTypes' BY <1>t, <2>1, <2>3, <2>4, <2>q DEF RInvTypes, Decided, None, Write
+  <2>o. ObserverNoRegisters'
+    BY <1>t, <2>1, <2>2, FixedAssumptions DEF RInvTypes, FInv, ObserverNoRegisters, Observers, Maj
   <2>6. DCovKeep BY <2>1, <2>3, <2>q, DCovGrow
   <2>7. \A q \in Q : DCov(q, s)' BY <2>1, <2>q DEF DCov
   <2>8. \A u \in Slots : decided'[u] # None => Covered(u)'
@@ -277,33 +284,45 @@ LEMMA FInvNext == FInv /\ [RNext]_allvars => FInv'
   <2>9. \A t \in Slots : decided[t] # None => decided'[t] # None BY <2>3, <1>t DEF RInvTypes
   <2>10. \A i \in ReadIds : rd'[i].st = "open" => OpenOK(i)'
     BY <2>1, <2>6, <2>9, <1>t, OpenKept DEF FInv
-  <2> QED BY <2>1, <2>5, <2>8, <2>10 DEF FInv, ReadSafe
+  <2> QED BY <2>1, <2>5, <2>o, <2>8, <2>10 DEF FInv, ReadSafe
 <1>2. ASSUME NEW r \in Replicas, NEW s \in Slots, Learn(r, s) /\ UNCHANGED rvars PROVE FInv'
   <2>1. RInvTypes' BY <1>2, <1>t DEF Learn, RInvTypes, rvars, Decided
+  <2>o. ObserverNoRegisters' BY <1>2 DEF FInv, ObserverNoRegisters, rvars
   <2>2. DCovKeep BY <1>2, DCovGrow DEF Learn, rvars
-  <2> QED BY <1>2, <2>1, <2>2, ReadsKept DEF Learn, rvars
+  <2> QED BY <1>2, <2>1, <2>o, <2>2, ReadsKept DEF Learn, rvars
 <1>3. ASSUME NEW r \in Replicas, NEW s \in Slots, Record(r, s) PROVE FInv'
   <2>1. RInvTypes' BY <1>3, <1>t DEF Record, RInvTypes, Decided
+  <2>m. r \in InitMembers
+    <3>1. NoChange(Truth) BY FixedAssumptions, <1>t DEF RInvTypes, NoChange, Truth, Write, None
+    <3>2. MembersAt(s, Truth) = InitMembers BY <3>1, MembersFixed
+    <3> QED BY <1>3, <3>2 DEF Record
+  <2>o. ObserverNoRegisters'
+    BY <1>3, <1>t, <2>m, FixedAssumptions DEF Record, RInvTypes, FInv, ObserverNoRegisters, Observers
   <2>2. DCovKeep BY <1>3, DCovGrow DEF Record
-  <2> QED BY <1>3, <2>1, <2>2, ReadsKept DEF Record
+  <2> QED BY <1>3, <2>1, <2>o, <2>2, ReadsKept DEF Record
 <1>4. ASSUME NEW r \in Replicas, NEW s \in Slots, DropRegister(r, s) PROVE FInv'
   <2>1. RInvTypes' BY <1>4, <1>t DEF DropRegister, RInvTypes, Decided
+  <2>o. ObserverNoRegisters'
+    BY <1>4, <1>t DEF DropRegister, RInvTypes, FInv, ObserverNoRegisters, Observers
   <2>2. DCovKeep
     <3> SUFFICES ASSUME NEW q \in Replicas, NEW u \in Slots, DCov(q, u) PROVE DCov(q, u)'
       BY DEF DCovKeep
     <3>1. CASE q = r /\ u = s BY <1>4, <3>1 DEF DropRegister, DCov
     <3>2. CASE ~(q = r /\ u = s) BY <1>4, <3>2, <1>t DEF DropRegister, DCov, RInvTypes
     <3> QED BY <3>1, <3>2
-  <2> QED BY <1>4, <2>1, <2>2, ReadsKept DEF DropRegister
+  <2> QED BY <1>4, <2>1, <2>o, <2>2, ReadsKept DEF DropRegister
 <1>5. ASSUME NEW r \in Replicas, Persist(r) /\ UNCHANGED rvars PROVE FInv'
   <2>1. RInvTypes' BY <1>5, <1>t DEF Persist, RInvTypes, rvars, Decided
+  <2>o. ObserverNoRegisters' BY <1>5 DEF FInv, ObserverNoRegisters, rvars
   <2>2. \A q \in Replicas : dlog[q] \subseteq dlog'[q] BY <1>5, <1>t DEF Persist, RInvTypes
   <2>3. DCovKeep BY <1>5, <2>2, DCovGrow DEF Persist, rvars
-  <2> QED BY <1>5, <2>1, <2>3, ReadsKept DEF Persist, rvars
+  <2> QED BY <1>5, <2>1, <2>o, <2>3, ReadsKept DEF Persist, rvars
 <1>6. ASSUME NEW r \in Replicas, RCrash(r) PROVE FInv'
   <2>1. RInvTypes' BY <1>6, <1>t DEF RCrash, RInvTypes, Decided
+  <2>o. ObserverNoRegisters'
+    BY <1>6, <1>t DEF RCrash, RInvTypes, FInv, ObserverNoRegisters, Observers
   <2>2. DCovKeep BY <1>6, DCovGrow DEF RCrash
-  <2> QED BY <1>6, <2>1, <2>2, ReadsKept DEF RCrash
+  <2> QED BY <1>6, <2>1, <2>o, <2>2, ReadsKept DEF RCrash
 <1>7. ASSUME NEW r \in Replicas, Retire(r) /\ UNCHANGED rvars PROVE FInv'
   <2>1. Latest(r).from = 0
     <3>1. Prefix(log[r]) \in 0..N BY <1>t, PrefixProps DEF RInvTypes
@@ -311,12 +330,16 @@ LEMMA FInvNext == FInv /\ [RNext]_allvars => FInv'
   <2> QED BY <1>7, <2>1 DEF Retire
 <1>8. ASSUME NEW r \in Replicas, PersistRegisters(r) PROVE FInv'
   <2>1. RInvTypes' BY <1>8, <1>t DEF PersistRegisters, RInvTypes, Decided
+  <2>o. ObserverNoRegisters'
+    BY <1>8, <1>t DEF PersistRegisters, RInvTypes, FInv, ObserverNoRegisters, Observers
   <2>2. \A q \in Replicas : reg[q] \subseteq reg'[q] BY <1>8, <1>t DEF PersistRegisters, RInvTypes
   <2>3. DCovKeep BY <1>8, <2>2, DCovGrow DEF PersistRegisters
-  <2> QED BY <1>8, <2>1, <2>3, ReadsKept DEF PersistRegisters
+  <2> QED BY <1>8, <2>1, <2>o, <2>3, ReadsKept DEF PersistRegisters
 <1>9. ASSUME NEW r \in Replicas, Compact(r) PROVE FInv'
   <2>1. Prefix(dlog[r]) \in 0..N BY <1>t, PrefixProps DEF RInvTypes
   <2>2. RInvTypes' BY <1>9, <1>t, <2>1 DEF Compact, RInvTypes, Decided
+  <2>o. ObserverNoRegisters'
+    BY <1>9, <1>t DEF Compact, RInvTypes, FInv, ObserverNoRegisters, Observers
   <2>3. DCovKeep
     <3> SUFFICES ASSUME NEW q \in Replicas, NEW u \in Slots, DCov(q, u) PROVE DCov(q, u)'
       BY DEF DCovKeep
@@ -328,7 +351,7 @@ LEMMA FInvNext == FInv /\ [RNext]_allvars => FInv'
       <4>2. u \in Nat /\ floor[r] \in Nat BY <1>t, MAssumptions DEF Slots, RInvTypes
       <4> QED BY <4>1, <4>2, <2>1, <3>2 DEF DCov
     <3> QED BY <3>1, <3>2
-  <2> QED BY <1>9, <2>2, <2>3, ReadsKept DEF Compact
+  <2> QED BY <1>9, <2>2, <2>o, <2>3, ReadsKept DEF Compact
 <1>10. ASSUME NEW i \in ReadIds, NEW r \in Replicas, Request(i, r) PROVE FInv'
   <2> DEFINE new == [st |-> "open", at |-> r, before |-> {t \in Slots : decided[t] # None},
                      who |-> {}, k |-> 1, applied |-> 0]
@@ -351,7 +374,8 @@ LEMMA FInvNext == FInv /\ [RNext]_allvars => FInv'
             \A t \in rd'[j].before : t < rd'[j].applied)
     BY <2>1, <2>2, <2>3, <2>4, OthersKept
   <2>7. \A s \in Slots : decided'[s] # None => Covered(s)' BY <2>1, <2>4, CoveredKept DEF FInv
-  <2> QED BY <2>2, <2>3, <2>5, <2>6, <2>7 DEF FInv, ReadSafe
+  <2>o. ObserverNoRegisters' BY <2>1 DEF FInv, ObserverNoRegisters
+  <2> QED BY <2>2, <2>3, <2>o, <2>5, <2>6, <2>7 DEF FInv, ReadSafe
 <1>11. ASSUME NEW i \in ReadIds, NEW q \in Replicas, Answer(i, q) PROVE FInv'
   <2> DEFINE k2 == Max({rd[i].k, Mark(q)})
   <2>1. rd' = [rd EXCEPT ![i].who = @ \cup {q}, ![i].k = k2] /\ rd[i].st = "open"
@@ -401,7 +425,8 @@ LEMMA FInvNext == FInv /\ [RNext]_allvars => FInv'
             \A t \in rd'[j].before : t < rd'[j].applied)
     BY <2>1, <2>2, <2>6, <2>7, OthersKept
   <2>10. \A s \in Slots : decided'[s] # None => Covered(s)' BY <2>1, <2>7, CoveredKept DEF FInv
-  <2> QED BY <2>5, <2>6, <2>8, <2>9, <2>10 DEF FInv, ReadSafe
+  <2>o. ObserverNoRegisters' BY <2>1 DEF FInv, ObserverNoRegisters
+  <2> QED BY <2>5, <2>6, <2>o, <2>8, <2>9, <2>10 DEF FInv, ReadSafe
 <1>12. ASSUME NEW i \in ReadIds, Ready(i) PROVE FInv'
   <2> DEFINE r == rd[i].at
   <2>1. rd' = [rd EXCEPT ![i].st = "ready", ![i].applied = Prefix(log[r])]
@@ -444,11 +469,13 @@ LEMMA FInvNext == FInv /\ [RNext]_allvars => FInv'
             \A t \in rd'[j].before : t < rd'[j].applied)
     BY <2>u, <2>2, <2>8, <2>9, OthersKept
   <2>11. \A s \in Slots : decided'[s] # None => Covered(s)' BY <2>u, <2>9, CoveredKept DEF FInv
-  <2> QED BY <2>5, <2>7, <2>8, <2>10, <2>11 DEF FInv, ReadSafe
+  <2>o. ObserverNoRegisters' BY <2>u DEF FInv, ObserverNoRegisters
+  <2> QED BY <2>5, <2>7, <2>8, <2>o, <2>10, <2>11 DEF FInv, ReadSafe
 <1>13. CASE UNCHANGED allvars
   <2>1. RInvTypes' BY <1>13, <1>t DEF allvars, RInvTypes, Decided
+  <2>o. ObserverNoRegisters' BY <1>13 DEF FInv, ObserverNoRegisters, allvars
   <2>2. DCovKeep BY <1>13, DCovGrow DEF allvars
-  <2> QED BY <1>13, <2>1, <2>2, ReadsKept DEF allvars
+  <2> QED BY <1>13, <2>1, <2>o, <2>2, ReadsKept DEF allvars
 <1> QED BY <1>1, <1>2, <1>3, <1>4, <1>5, <1>6, <1>7, <1>8, <1>9, <1>10, <1>11, <1>12, <1>13
     DEF RNext
 
@@ -456,5 +483,11 @@ THEOREM ReadsFixedSafe == RSpec => []ReadSafe
 <1>1. RInit => FInv BY InitFInv
 <1>2. FInv /\ [RNext]_allvars => FInv' BY FInvNext
 <1>3. FInv => ReadSafe BY DEF FInv
+<1> QED BY <1>1, <1>2, <1>3, PTL DEF RSpec
+
+THEOREM ObserverFixedSafe == RSpec => [](ReadSafe /\ ObserverNoRegisters)
+<1>1. RInit => FInv BY InitFInv
+<1>2. FInv /\ [RNext]_allvars => FInv' BY FInvNext
+<1>3. FInv => ReadSafe /\ ObserverNoRegisters BY DEF FInv
 <1> QED BY <1>1, <1>2, <1>3, PTL DEF RSpec
 =============================================================================

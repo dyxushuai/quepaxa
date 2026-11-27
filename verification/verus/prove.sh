@@ -107,6 +107,7 @@ bugs=(
   retirement retired-although-added-back        's/None => false,/None => true,/'
   retirement old-barrier-retires-a-later-epoch  's/=> e == confirmed,/=> e >= confirmed,/'
   retirement confirmed-by-another-commit        's/if barrier == id \{/if true {/'
+  retirement observer-retires                   's/if !was_member \{/if false {/'
   entries start-forgets-unslotted        's/^        self\.unslotted_remove\(seq\);$//'
   entries route-skips-forwarded-insert   's/^                self\.fwd_insert\(e, now\);$//'
   entries suspect-drops-the-last-entry   's/^            self\.pending\.insert\(0, e\);$/            if f.len() > 0 { self.pending.insert(0, e); }/'
@@ -127,8 +128,9 @@ bugs=(
   recovery probe-forgets-the-answers           's/Some\(at\) => \*self = Phase::Recovering \{ probe_at: at, answered \},/Some(at) => *self = Phase::Recovering { probe_at: at, answered: Vec::new() },/'
   recovery read-catch-up-stops-below-the-mark  's/if committed < mark \{ Some\(peer\) \} else \{ None \}/if committed < mark \&\& mark - committed > 1 { Some(peer) } else { None }/'
   recovery read-catch-up-asks-a-lower-mark     's/Some\(b\) => answers\[i\]\.1 < answers\[b\]\.1,/Some(b) => true,/'
-  recovery timer-ignores-the-read-mark         's/c\.retry\(committed, now, interval, read_from\)/c.retry(committed, now, interval, None)/'
+  recovery timer-ignores-the-read-mark         's/c\.retry\(committed, outside, now, interval, read_from\)/c.retry(committed, outside, now, interval, None)/'
   recovery page-from-another-peer-moves-it     's/Some\(\(p, _\)\) => p == from,/Some((p, _)) => true,/'
+  recovery outside-skips-single-slot-lag       's/if outside \{ self\.ahead > committed \} else /if false { self.ahead > committed } else /'
 )
 mkdir -p "$work"
 status=0

@@ -75,11 +75,15 @@ pub open spec fn stage(p: Phase, l: u64) -> int {
     }
 }
 
-/// `removal`: the latest epoch and its first slot, if `me` is not one of its members.
+/// `removal`: the latest epoch and its first slot, if this replica was ever a member and
+/// is not in it.
 // DEV: `Removal` carries its members; here they are passed beside it.
-pub fn removal(epoch: u64, from: u64, members: &Vec<u64>, me: u64) -> (r: Option<(u64, u64)>)
-    ensures r == if epoch > 0 && !members@.contains(me) { Some((epoch, from)) } else { None::<(u64, u64)> },
+pub fn removal(epoch: u64, from: u64, members: &Vec<u64>, me: u64, was_member: bool) -> (r: Option<(u64, u64)>)
+    ensures r == if was_member && epoch > 0 && !members@.contains(me) { Some((epoch, from)) } else { None::<(u64, u64)> },
 {
+    if !was_member {
+        return None;
+    }
     if epoch > 0 && !contains(members, me) { Some((epoch, from)) } else { None }
 }
 
@@ -114,6 +118,8 @@ pub struct Retirement {
     /// The latest epoch and its members, as of the last call.
     pub latest: Ghost<u64>,
     pub latest_members: Ghost<Seq<u64>>,
+    /// Whether this replica has ever been a voting member of any epoch (monotonic).
+    pub was_member: Ghost<bool>,
     /// Barriers taken: id to the epoch removed from.
     pub barriers: Ghost<Map<u64, u64>>,
     /// Own proposals committed.
@@ -124,9 +130,9 @@ pub struct Retirement {
 }
 
 impl Retirement {
-    /// The latest epoch excludes this replica.
+    /// The latest epoch excludes this replica (which was previously a voting member).
     pub open spec fn excluded(self) -> bool {
-        self.latest@ > 0 && !self.latest_members@.contains(self.me@)
+        self.was_member@ && self.latest@ > 0 && !self.latest_members@.contains(self.me@)
     }
 
     /// A barrier taken while removed from `epoch` has committed.
@@ -165,15 +171,19 @@ impl Retirement {
         }
     }
 
-    /// Every call that reads the schedule: epochs never go back, nor change their members.
-    pub open spec fn fits(self, epoch: u64, members: Seq<u64>) -> bool {
+    /// Every call that reads the schedule: epochs never go back, nor change their members;
+    /// `was_member` only moves from false to true.
+    pub open spec fn fits(self, epoch: u64, members: Seq<u64>, was_member: bool) -> bool {
         &&& epoch >= self.latest@
         &&& epoch == self.latest@ ==> members == self.latest_members@
         &&& epoch == 0 ==> self.latest@ == 0
+        &&& self.was_member@ ==> was_member
+        &&& members.contains(self.me@) ==> was_member
     }
 
-    pub fn new(me: Ghost<u64>, members: Ghost<Seq<u64>>) -> (s: Retirement)
-        ensures s.inv(), s.me == me, s.latest@ == 0, s.latest_members == members, s.phase is Idle,
+    pub fn new(me: Ghost<u64>, members: Ghost<Seq<u64>>, was_member: Ghost<bool>) -> (s: Retirement)
+        requires members@.contains(me@) ==> was_member@,
+        ensures s.inv(), s.me == me, s.latest@ == 0, s.latest_members == members, s.was_member == was_member, s.phase is Idle,
     {
         Retirement {
             phase: Phase::Idle,
@@ -182,6 +192,7 @@ impl Retirement {
             me,
             latest: Ghost(0),
             latest_members: members,
+            was_member,
             barriers: Ghost(Map::empty()),
             commits: Ghost(Set::empty()),
             reported: Ghost(Seq::empty()),
@@ -190,10 +201,11 @@ impl Retirement {
     }
 
     /// Records the latest epoch the caller read from the schedule.
-    fn observe(&mut self, epoch: u64, members: Ghost<Seq<u64>>)
-        requires old(self).inv(), old(self).fits(epoch, members@),
+    fn observe(&mut self, epoch: u64, members: Ghost<Seq<u64>>, was_member: Ghost<bool>)
+        requires old(self).inv(), old(self).fits(epoch, members@, was_member@),
         ensures
             final(self).inv(), final(self).latest@ == epoch, final(self).latest_members@ == members@,
+            final(self).was_member == was_member,
             final(self).phase == old(self).phase, final(self).reported == old(self).reported,
             final(self).barriers == old(self).barriers, final(self).commits == old(self).commits,
             final(self).fenced == old(self).fenced, final(self).me == old(self).me,
@@ -202,6 +214,7 @@ impl Retirement {
     {
         self.latest = Ghost(epoch);
         self.latest_members = members;
+        self.was_member = was_member;
     }
 
     /// The removal still to retire from: none once retired from that epoch.
@@ -238,34 +251,35 @@ impl Retirement {
     }
 
     /// `note_progress`, with the latest epoch read from the schedule.
-    pub fn note_progress(&mut self, me: u64, epoch: u64, from: u64, members: &Vec<u64>, member: u64, commit_index: u64)
-        requires old(self).inv(), old(self).fits(epoch, members@), me == old(self).me@,
+    pub fn note_progress(&mut self, me: u64, was_member: bool, epoch: u64, from: u64, members: &Vec<u64>, member: u64, commit_index: u64)
+        requires old(self).inv(), old(self).fits(epoch, members@, was_member), me == old(self).me@,
         ensures
-            final(self).inv(), final(self).latest@ == epoch,
+            final(self).inv(), final(self).latest@ == epoch, final(self).was_member@ == was_member,
             final(self).phase == old(self).phase, final(self).reported == old(self).reported,
             final(self).barriers == old(self).barriers, final(self).commits == old(self).commits,
             final(self).fenced == old(self).fenced, final(self).me == old(self).me,
     {
-        self.observe(epoch, Ghost(members@));
-        let removal = removal(epoch, from, members, me);
+        self.observe(epoch, Ghost(members@), Ghost(was_member));
+        let removal = removal(epoch, from, members, me, was_member);
         if self.pending(removal).is_some() {
             raise(&mut self.progress, member, commit_index);
         }
     }
 
     /// `check`, with the latest epoch read from the schedule.
-    pub fn check(&mut self, me: u64, epoch: u64, from: u64, members: &Vec<u64>, now: u64, interval: u64) -> (r: Next)
-        requires old(self).inv(), old(self).fits(epoch, members@), me == old(self).me@,
+    pub fn check(&mut self, me: u64, was_member: bool, epoch: u64, from: u64, members: &Vec<u64>, now: u64, interval: u64) -> (r: Next)
+        requires old(self).inv(), old(self).fits(epoch, members@, was_member), me == old(self).me@,
         ensures
-            final(self).inv(), final(self).latest@ == epoch,
+            final(self).inv(), final(self).latest@ == epoch, final(self).was_member@ == was_member,
             final(self).latest_members@ == members@,
             old(self).phase == (Phase::Retired { epoch }) ==> r is Nothing && final(self).phase == old(self).phase,
             final(self).barriers == old(self).barriers, final(self).commits == old(self).commits,
             final(self).fenced == old(self).fenced, final(self).me == old(self).me,
             stage(final(self).phase, epoch) >= stage(old(self).phase, epoch),
-            // (b) Retired only from the latest epoch, which excludes it, its barrier committed.
+            // (b) Retired only from the latest epoch, which excludes it, its barrier committed,
+            // and only if it was ever a voting member (never-a-member observers never retire).
             r matches Next::Retire { epoch: e } ==> {
-                &&& e == epoch && epoch > 0 && !members@.contains(final(self).me@)
+                &&& was_member && e == epoch && epoch > 0 && !members@.contains(final(self).me@)
                 &&& old(self).unreported(e)
                 &&& final(self).confirmed(e)
                 &&& final(self).reported@ == old(self).reported@.push(e)
@@ -275,12 +289,13 @@ impl Retirement {
             // A barrier is asked for only while removed from the latest epoch, not retired
             // from it, and with none in flight.
             r matches Next::Submit { epoch: e } ==> {
-                &&& e == epoch && epoch > 0 && !members@.contains(final(self).me@)
+                &&& was_member && e == epoch && epoch > 0 && !members@.contains(final(self).me@)
                 &&& (final(self).phase is Idle || (final(self).phase matches Phase::Retired { epoch: x } && x < e))
             },
+            !was_member ==> r is Nothing,
     {
-        self.observe(epoch, Ghost(members@));
-        let removal = removal(epoch, from, members, me);
+        self.observe(epoch, Ghost(members@), Ghost(was_member));
+        let removal = removal(epoch, from, members, me, was_member);
         if let Phase::Confirmed { epoch: confirmed } = self.phase {
             let ghost reported = self.reported@;
             self.phase = Phase::Idle;
@@ -361,6 +376,7 @@ impl Retirement {
             !old(self).barriers@.contains_key(barrier), !old(self).commits@.contains(barrier),
         ensures
             final(self).inv(), final(self).latest == old(self).latest,
+            final(self).was_member == old(self).was_member,
             final(self).reported == old(self).reported, final(self).commits == old(self).commits,
             final(self).fenced == old(self).fenced, final(self).me == old(self).me,
             final(self).latest_members == old(self).latest_members,
@@ -376,6 +392,7 @@ impl Retirement {
         requires old(self).inv(),
         ensures
             final(self).inv(), final(self).latest == old(self).latest,
+            final(self).was_member == old(self).was_member,
             final(self).latest_members == old(self).latest_members,
             final(self).reported == old(self).reported, final(self).barriers == old(self).barriers,
             final(self).fenced == old(self).fenced, final(self).me == old(self).me,
@@ -402,6 +419,7 @@ impl Retirement {
         requires old(self).inv(),
         ensures
             final(self).inv(), final(self).fenced@, final(self).latest == old(self).latest,
+            final(self).was_member == old(self).was_member,
             final(self).latest_members == old(self).latest_members,
             final(self).reported == old(self).reported, final(self).barriers == old(self).barriers,
             final(self).commits == old(self).commits, final(self).me == old(self).me,
@@ -423,6 +441,7 @@ impl Retirement {
 pub fn check_retired(
     r: &mut Retirement,
     me: u64,
+    was_member: bool,
     epoch: u64,
     from: u64,
     members: &Vec<u64>,
@@ -431,11 +450,12 @@ pub fn check_retired(
     taken: Option<u64>,
 ) -> (next: Next)
     requires
-        old(r).inv(), old(r).fits(epoch, members@), me == old(r).me@,
+        old(r).inv(), old(r).fits(epoch, members@, was_member), me == old(r).me@,
         taken matches Some(id) ==> !old(r).barriers@.contains_key(id) && !old(r).commits@.contains(id),
         old(r).fenced@ ==> taken is None,
     ensures
         final(r).inv(), final(r).latest@ == epoch, final(r).me == old(r).me,
+        final(r).was_member@ == was_member,
         stage(final(r).phase, epoch) >= stage(old(r).phase, epoch),
         // (a) Reported once each, for ever larger epochs.
         next matches Next::Retire { epoch: e } ==> final(r).reported@ == old(r).reported@.push(e)
@@ -445,9 +465,10 @@ pub fn check_retired(
         old(r).phase == (Phase::Retired { epoch }) ==> next is Nothing && final(r).phase == old(r).phase,
         // (b)
         next matches Next::Retire { epoch: e } ==>
-            e == epoch && epoch > 0 && !members@.contains(final(r).me@) && final(r).confirmed(e),
+            was_member && e == epoch && epoch > 0 && !members@.contains(final(r).me@) && final(r).confirmed(e),
+        !was_member ==> next is Nothing,
 {
-    let next = r.check(me, epoch, from, members, now, interval);
+    let next = r.check(me, was_member, epoch, from, members, now, interval);
     if let Next::Submit { epoch } = next {
         if let Some(id) = taken {
             r.submitted(epoch, id);

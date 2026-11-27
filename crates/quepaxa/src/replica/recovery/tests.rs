@@ -102,7 +102,8 @@ fn the_most_advanced_peer_is_remembered() {
     c.heard(NodeId(1), 5);
     c.heard(NodeId(2), 3);
     assert!(c.ahead_of(4) && !c.ahead_of(5));
-    assert!(c.behind(3) && !c.behind(4), "one slot ahead comes with the traffic");
+    assert!(c.behind(3, false) && !c.behind(4, false), "one slot ahead comes with the traffic");
+    assert!(c.behind(4, true) && !c.behind(5, true), "outside the membership, even one slot ahead is behind");
     c.heard(NodeId(2), 9);
     assert_eq!(c.installed(0), Some(NodeId(2)));
 }
@@ -121,10 +122,14 @@ fn a_page_from_the_peer_asked_asks_it_for_the_next_while_behind() {
     let mut c = CatchUp::default();
     c.heard(NodeId(1), 100);
     c.requested(NodeId(1), Timestamp(5));
-    assert_eq!(c.page(NodeId(1), false, 50, Timestamp(6)), Some(NodeId(1)));
+    assert_eq!(c.page(NodeId(1), false, 50, false, Timestamp(6)), Some(NodeId(1)));
     c.requested(NodeId(1), Timestamp(6));
-    assert_eq!(c.page(NodeId(1), false, 99, Timestamp(7)), None, "caught up");
+    assert_eq!(c.page(NodeId(1), false, 99, false, Timestamp(7)), None, "caught up");
     assert!(c.due(Timestamp(7), 10), "nothing in flight");
+    c.requested(NodeId(1), Timestamp(7));
+    assert_eq!(c.page(NodeId(1), false, 99, true, Timestamp(8)), Some(NodeId(1)), "outside keeps going");
+    c.requested(NodeId(1), Timestamp(8));
+    assert_eq!(c.page(NodeId(1), false, 100, true, Timestamp(9)), None, "outside caught up");
 }
 
 #[test]
@@ -132,7 +137,7 @@ fn an_empty_page_leaves_the_request_to_the_timer() {
     let mut c = CatchUp::default();
     c.heard(NodeId(1), 100);
     c.requested(NodeId(1), Timestamp(5));
-    assert_eq!(c.page(NodeId(1), true, 50, Timestamp(8)), None);
+    assert_eq!(c.page(NodeId(1), true, 50, false, Timestamp(8)), None);
     assert!(!c.due(Timestamp(17), 10));
     assert!(c.due(Timestamp(18), 10));
 }
@@ -142,7 +147,7 @@ fn a_page_from_another_peer_leaves_the_request_alone() {
     let mut c = CatchUp::default();
     c.heard(NodeId(1), 100);
     c.requested(NodeId(1), Timestamp(5));
-    assert_eq!(c.page(NodeId(2), false, 50, Timestamp(6)), None);
+    assert_eq!(c.page(NodeId(2), false, 50, false, Timestamp(6)), None);
     assert!(!c.due(Timestamp(6), 10));
 }
 
@@ -159,12 +164,14 @@ fn a_snapshot_ends_the_request_and_asks_a_peer_still_ahead() {
 #[test]
 fn the_timer_retries_only_while_behind() {
     let mut c = CatchUp::default();
-    assert_eq!(c.deadline(0, Timestamp(3), 10), None);
+    assert_eq!(c.deadline(0, false, Timestamp(3), 10), None);
     c.heard(NodeId(1), 100);
-    assert_eq!(c.deadline(98, Timestamp(3), 10), Some(Timestamp(3)));
-    assert_eq!(c.deadline(99, Timestamp(3), 10), None);
+    assert_eq!(c.deadline(98, false, Timestamp(3), 10), Some(Timestamp(3)));
+    assert_eq!(c.deadline(99, false, Timestamp(3), 10), None);
+    assert_eq!(c.deadline(99, true, Timestamp(3), 10), Some(Timestamp(3)));
+    assert_eq!(c.deadline(100, true, Timestamp(3), 10), None);
     c.requested(NodeId(1), Timestamp(5));
-    assert_eq!(c.deadline(50, Timestamp(6), 10), Some(Timestamp(15)));
+    assert_eq!(c.deadline(50, false, Timestamp(6), 10), Some(Timestamp(15)));
 }
 
 #[test]
@@ -173,10 +180,11 @@ fn a_retry_prefers_the_most_advanced_peer_and_else_the_read_mark() {
     c.heard(NodeId(1), 100);
     c.requested(NodeId(2), Timestamp(0));
     let read = || Some(NodeId(3));
-    assert_eq!(c.retry(50, Timestamp(5), 10, read), None, "not due");
-    assert_eq!(c.retry(50, Timestamp(10), 10, read), Some(NodeId(1)));
-    assert_eq!(c.retry(99, Timestamp(10), 10, read), Some(NodeId(3)), "caught up with the peers");
-    assert_eq!(c.retry(99, Timestamp(10), 10, || None), None);
+    assert_eq!(c.retry(50, false, Timestamp(5), 10, read), None, "not due");
+    assert_eq!(c.retry(50, false, Timestamp(10), 10, read), Some(NodeId(1)));
+    assert_eq!(c.retry(99, false, Timestamp(10), 10, read), Some(NodeId(3)), "caught up with the peers");
+    assert_eq!(c.retry(99, false, Timestamp(10), 10, || None), None);
+    assert_eq!(c.retry(99, true, Timestamp(10), 10, || None), Some(NodeId(1)), "outside is still behind");
 }
 
 #[test]

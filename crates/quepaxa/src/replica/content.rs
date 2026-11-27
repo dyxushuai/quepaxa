@@ -647,7 +647,7 @@ impl Replica {
             self.on_data(from, id, bytes);
         }
         self.check_probe_answers();
-        if let Some(peer) = self.catch_up.page(from, empty, self.committed, self.now) {
+        if let Some(peer) = self.catch_up.page(from, empty, self.committed, self.outside(), self.now) {
             self.request_catch_up(peer);
         }
     }

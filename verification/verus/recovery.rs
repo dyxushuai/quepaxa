@@ -313,8 +313,12 @@ impl CatchUp {
         self.ahead > 0 ==> self.peer is Some
     }
 
-    pub open spec fn behind_spec(self, committed: u64) -> bool {
-        self.ahead as int > committed as int + 1
+    pub open spec fn behind_spec(self, committed: u64, outside: bool) -> bool {
+        if outside {
+            self.ahead > committed
+        } else {
+            self.ahead as int > committed as int + 1
+        }
     }
 
     pub open spec fn due_spec(self, now: u64, interval: u64) -> bool {
@@ -349,10 +353,10 @@ impl CatchUp {
     }
 
     // DEV: `committed + 1` widened (the original's never overflows: slots are below MAX_SLOT).
-    pub fn behind(&self, committed: u64) -> (r: bool)
-        ensures r == self.behind_spec(committed),
+    pub fn behind(&self, committed: u64, outside: bool) -> (r: bool)
+        ensures r == self.behind_spec(committed, outside),
     {
-        self.ahead as u128 > committed as u128 + 1
+        if outside { self.ahead > committed } else { self.ahead as u128 > committed as u128 + 1 }
     }
 
     pub fn due(&self, now: u64, interval: u64) -> (r: bool)
@@ -374,7 +378,7 @@ impl CatchUp {
         self.request = Some((peer, now));
     }
 
-    pub fn page(&mut self, from: u64, empty: bool, committed: u64, now: u64) -> (r: Option<u64>)
+    pub fn page(&mut self, from: u64, empty: bool, committed: u64, outside: bool, now: u64) -> (r: Option<u64>)
         requires old(self).inv(),
         ensures
             final(self).inv(), final(self).ahead == old(self).ahead, final(self).peer == old(self).peer,
@@ -383,7 +387,7 @@ impl CatchUp {
             (old(self).request matches Some((p, _)) && p == from) && empty ==>
                 r is None && final(self).request == Some((from, now)),
             (old(self).request matches Some((p, _)) && p == from) && !empty ==>
-                final(self).request is None && (r is Some <==> old(self).behind_spec(committed))
+                final(self).request is None && (r is Some <==> old(self).behind_spec(committed, outside))
                     && (r matches Some(q) ==> q == from),
     {
         // DEV: `is_some_and` as a match.
@@ -399,7 +403,7 @@ impl CatchUp {
             return None;
         }
         self.request = None;
-        if self.behind(committed) { Some(from) } else { None }
+        if self.behind(committed, outside) { Some(from) } else { None }
     }
 
     pub fn installed(&mut self, committed: u64) -> (r: Option<u64>)
@@ -414,16 +418,16 @@ impl CatchUp {
         if self.ahead_of(committed) { self.peer } else { None }
     }
 
-    pub fn deadline(&self, committed: u64, now: u64, interval: u64) -> (r: Option<u64>)
+    pub fn deadline(&self, committed: u64, outside: bool, now: u64, interval: u64) -> (r: Option<u64>)
         requires self.inv(),
         ensures
-            r is Some <==> self.behind_spec(committed),
+            r is Some <==> self.behind_spec(committed, outside),
             r matches Some(t) ==> self.due_spec(t, interval),
             r matches Some(t) ==> (self.due_spec(now, interval) ==> t <= now),
     {
         // DEV: `or(map(..)).is_some()` and `map_or` as matches.
         let known = self.request.is_some() || self.peer.is_some();
-        let behind = self.behind(committed) && known;
+        let behind = self.behind(committed, outside) && known;
         if !behind {
             return None;
         }
@@ -434,17 +438,17 @@ impl CatchUp {
     }
 
     // DEV: the closure `read_from` passed evaluated (it has no effects).
-    pub fn retry(&self, committed: u64, now: u64, interval: u64, read_from: Option<u64>) -> (r: Option<u64>)
+    pub fn retry(&self, committed: u64, outside: bool, now: u64, interval: u64, read_from: Option<u64>) -> (r: Option<u64>)
         requires self.inv(),
         ensures
             !self.due_spec(now, interval) ==> r is None,
-            self.due_spec(now, interval) && self.behind_spec(committed) ==> r == self.peer && r is Some,
-            self.due_spec(now, interval) && !self.behind_spec(committed) ==> r == read_from,
+            self.due_spec(now, interval) && self.behind_spec(committed, outside) ==> r == self.peer && r is Some,
+            self.due_spec(now, interval) && !self.behind_spec(committed, outside) ==> r == read_from,
     {
         if !self.due(now, interval) {
             return None;
         }
-        if self.behind(committed) {
+        if self.behind(committed, outside) {
             // DEV: `or(map(..))` as matches.
             match self.peer {
                 Some(p) => Some(p),
@@ -472,13 +476,13 @@ pub fn fire_catch_up(
     ensures
         !c.due_spec(now, interval) ==> r is None,
         // (c): a due retry asks exactly while behind a peer or below the read mark.
-        c.due_spec(now, interval) ==> (r is Some <==> c.behind_spec(committed)
+        c.due_spec(now, interval) ==> (r is Some <==> c.behind_spec(committed, outside)
             || (round is Some && below_mark(outside, round.unwrap()@, committed))),
-        r matches Some(p) ==> (c.behind_spec(committed) && c.peer == Some(p))
+        r matches Some(p) ==> (c.behind_spec(committed, outside) && c.peer == Some(p))
             || exists|i: int| #[trigger] highest(round.unwrap()@, i) && round.unwrap()@[i].0 == p,
 {
     let read_from = read_catch_up_from(outside, round, committed);
-    c.retry(committed, now, interval, read_from)
+    c.retry(committed, outside, now, interval, read_from)
 }
 
 // ---- Reservation ----

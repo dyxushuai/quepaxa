@@ -87,8 +87,12 @@ impl Replica {
             return;
         }
         if let Some(r) = self.reads.round.as_mut().filter(|r| r.number == round) {
+            let first = r.answers.is_empty();
             let mark = r.answers.entry(from).or_default();
             *mark = (*mark).max(high.0);
+            if first && self.outside() && self.schedule.knows(from) {
+                self.follow.prefer(from);
+            }
         }
     }
 

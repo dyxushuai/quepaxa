@@ -119,10 +119,11 @@ impl CatchUp {
         self.ahead > committed
     }
 
-    /// More than the next slot is decided elsewhere: worth a bulk request (the next one
-    /// alone comes with the traffic).
-    pub(super) fn behind(&self, committed: u64) -> bool {
-        self.ahead > committed + 1
+    /// Worth a bulk catch-up request: for a member, more than the next slot is decided
+    /// elsewhere (the next one alone comes with the traffic); for a replica outside the
+    /// membership, nobody broadcasts `Decided` to it, so even one slot ahead is behind.
+    pub(super) fn behind(&self, committed: u64, outside: bool) -> bool {
+        if outside { self.ahead > committed } else { self.ahead > committed + 1 }
     }
 
     /// Whether a request may be (re)sent now.
@@ -142,6 +143,7 @@ impl CatchUp {
         from: NodeId,
         empty: bool,
         committed: u64,
+        outside: bool,
         now: Timestamp,
     ) -> Option<NodeId> {
         if !self.request.is_some_and(|(peer, _)| peer == from) {
@@ -152,7 +154,7 @@ impl CatchUp {
             return None;
         }
         self.request = None;
-        self.behind(committed).then_some(from)
+        self.behind(committed, outside).then_some(from)
     }
 
     /// A snapshot answered any request in flight; whom to ask for what was decided after it.
@@ -162,8 +164,15 @@ impl CatchUp {
     }
 
     /// When to retry a bulk request on the timer, while behind a peer.
-    pub(super) fn deadline(&self, committed: u64, now: Timestamp, interval: u64) -> Option<Timestamp> {
-        let behind = self.behind(committed) && self.request.or(self.peer.map(|p| (p, now))).is_some();
+    pub(super) fn deadline(
+        &self,
+        committed: u64,
+        outside: bool,
+        now: Timestamp,
+        interval: u64,
+    ) -> Option<Timestamp> {
+        let behind =
+            self.behind(committed, outside) && self.request.or(self.peer.map(|p| (p, now))).is_some();
         behind.then(|| self.request.map_or(now, |(_, t)| t.after(interval)))
     }
 
@@ -172,6 +181,7 @@ impl CatchUp {
     pub(super) fn retry(
         &self,
         committed: u64,
+        outside: bool,
         now: Timestamp,
         interval: u64,
         read_from: impl FnOnce() -> Option<NodeId>,
@@ -179,7 +189,7 @@ impl CatchUp {
         if !self.due(now, interval) {
             return None;
         }
-        if self.behind(committed) { self.peer.or(self.request.map(|(p, _)| p)) } else { read_from() }
+        if self.behind(committed, outside) { self.peer.or(self.request.map(|(p, _)| p)) } else { read_from() }
     }
 }
 

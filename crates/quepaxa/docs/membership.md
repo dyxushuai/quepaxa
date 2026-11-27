@@ -55,6 +55,16 @@ takes effect without traffic.
   [`Superseded`](crate::DropReason::Superseded); propose it again against the members in
   force. A replica that learned the slot from a snapshot cannot tell whether the change
   applied and reports [`Unresolved`](crate::DropReason::Unresolved) instead.
+- **Non-voting observers.** Start a replica with the cluster's original [`Config`](crate::Config)
+  (its own id not in `members`) and set [`Config::follow_interval`](crate::Config::follow_interval)
+  (for example to `retransmit_interval`). It pulls decided slots (`CatchUp`) from voting
+  members indefinitely, never holds recorder registers, never votes, and never emits
+  [`Action::Retired`](crate::Action::Retired) when the voting cluster reconfigures or
+  rotates leaders. It serves linearizable reads directly through
+  [`Replica::read_barrier`](crate::Replica::read_barrier) (asking a majority of voting
+  members without going through the leader) and local stale reads from its applied state.
+  A joining replica started the same way catches up before a membership change adds it, and
+  stops background polling automatically once it becomes a member ([`Replica::is_member`](crate::Replica::is_member)).
 - **Adding a replica.** Start it with the cluster's *original* [`Config`](crate::Config) — its
   own id need not be a member. Once the change is decided, members also send it their
   decisions, so it catches up (in bulk, or from a snapshot) during the window and votes

@@ -22,6 +22,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `placement_sustain`, `placement_hold` | 3 min, 10 min | How long a gain must last before a move, and how long any order change is left alone. |
 | `inline_batch_bytes` | `1024` | Largest forwarded chunk (bytes, at least 64) sent inline; larger chunks travel directly to every member as data batches and by reference in consensus. Set to `u32::MAX` to keep every chunk inline. Per replica. |
 | `content_cache_bytes` | `None` (`max_batch_bytes × max_in_flight_slots`) | Per-origin byte budget for unpinned data batches in the content store (at least `max_batch_bytes`). Set explicitly to size the store independently of `max_in_flight_slots`; lowering active concurrency at runtime never shrinks it. |
+| `follow_interval` | `0` (off) | How often a replica outside the latest epoch (a non-voting observer or pre-join replica) polls a voting member (`CatchUp`) while idle to keep following the log indefinitely. Stops automatically once the replica becomes a member. Per replica. |
 
 ## Throughput
 

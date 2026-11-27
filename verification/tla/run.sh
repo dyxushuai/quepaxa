@@ -83,17 +83,19 @@ runs membership && for cfg in Membership MembershipQuorum MembershipOrder; do
 done
 
 if runs reads; then
-  mkdir "$work/ReadsFixed"
-  cp "$here/Membership.tla" "$here/Reads.tla" "$here/ReadsFixed.cfg" "$work/ReadsFixed/"
-  out=$(tlc "$work/ReadsFixed" "$membership_seconds" Reads -config ReadsFixed.cfg 2>&1)
-  status=$?
-  if [[ $status -ne 0 ]] || ! grep -q "0 states left on queue" <<< "$out"; then
-    echo "FAIL    Reads.tla (ReadsFixed.cfg): TLC ended with status $status:"
-    grep -E -A30 "violated|^Error" <<< "$out" | head -60; tail -5 <<< "$out"
-    failed=1
-  else
-    echo "OK      Reads.tla (ReadsFixed.cfg): exhaustive, $(grep -oE '[0-9,]+ distinct states found' <<< "$out" | tail -1)"
-  fi
+  for cfg in ReadsFixed ReadsObserver; do
+    mkdir "$work/$cfg"
+    cp "$here/Membership.tla" "$here/Reads.tla" "$here/$cfg.cfg" "$work/$cfg/"
+    out=$(tlc "$work/$cfg" "$membership_seconds" Reads -config "$cfg.cfg" 2>&1)
+    status=$?
+    if [[ $status -ne 0 ]] || ! grep -q "0 states left on queue" <<< "$out"; then
+      echo "FAIL    Reads.tla ($cfg.cfg): TLC ended with status $status:"
+      grep -E -A30 "violated|^Error" <<< "$out" | head -60; tail -5 <<< "$out"
+      failed=1
+    else
+      echo "OK      Reads.tla ($cfg.cfg): exhaustive, $(grep -oE '[0-9,]+ distinct states found' <<< "$out" | tail -1)"
+    fi
+  done
   for cfg in Reads ReadsTwoChanges; do
     simulate_ok "Reads.tla ($cfg.cfg)" Reads "$cfg" "$here/Membership.tla" "$here/Reads.tla" "$here/$cfg.cfg"
   done

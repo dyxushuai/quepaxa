@@ -61,6 +61,7 @@ impl Replica {
             self.inbox.push_back((from, msg.body));
             return;
         }
+        let outside = self.outside();
         self.heard_from(from);
         self.watch.committed.insert(from, msg.env.commit_index);
         if self.tuner.is_some()
@@ -86,14 +87,22 @@ impl Replica {
                 self.apply_tuned_w(w);
             }
         }
+        self.note_follow_heard(from, matches!(msg.body, Body::Entries { .. }));
         // Control/liveness messages may travel on a separate stream ahead of `Decided`; do not
-        // let their envelope trigger speculative bulk catch-up before in-flight decisions land.
-        if !matches!(msg.body, Body::ForwardAck { .. } | Body::RttProbe { .. } | Body::RttReply { .. }) {
+        // let their envelope trigger speculative bulk catch-up on voting members before
+        // in-flight decisions land.
+        let control =
+            matches!(msg.body, Body::ForwardAck { .. } | Body::RttProbe { .. } | Body::RttReply { .. });
+        if outside || !control {
             self.catch_up.heard(from, msg.env.commit_index);
-            if self.catch_up.ahead_of(self.committed) {
+            if !outside && self.catch_up.ahead_of(self.committed) {
                 self.seen.entry(Slot(self.committed)).or_insert(self.now);
             }
-            if msg.env.commit_index > self.committed + 1 && self.catch_up_due() {
+            let lag = if outside { 0 } else { 1 };
+            if !matches!(msg.body, Body::Compacted { .. })
+                && msg.env.commit_index > self.committed.saturating_add(lag)
+                && self.catch_up_due()
+            {
                 self.request_catch_up(from);
             }
         }

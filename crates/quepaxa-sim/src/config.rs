@@ -38,6 +38,10 @@ pub struct SimConfig {
     pub silent_leader_takeover: bool,
     /// Extra replicas that start outside the cluster and may join it by reconfiguration.
     pub spares: usize,
+    /// Permanent non-voting observer replicas: started outside the cluster with `follow_interval`
+    /// set, never added by reconfiguration, must converge to the full log and serve linearizable
+    /// reads without ever retiring (#157).
+    pub observers: usize,
     /// Probability per tick (per mille) of proposing a new membership drawn from members
     /// and spares, of any size from one replica to all of them, or a new leader order.
     pub reconfigure: u32,
@@ -140,6 +144,7 @@ impl SimConfig {
             hedge_max_ms: 400,
             silent_leader_takeover: true,
             spares: 0,
+            observers: 0,
             reconfigure: 0,
             reorder: None,
             max_persist_ms: 5,

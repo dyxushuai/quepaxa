@@ -65,6 +65,14 @@ impl Replica {
         Ok(())
     }
 
+    /// Whether this replica is a voting member of the epoch in force at the committed prefix.
+    ///
+    /// Replicas outside the membership (non-voting observers and replicas warming up before
+    /// joining) follow the log and serve linearizable reads without voting.
+    pub fn is_member(&self) -> bool {
+        self.schedule.members(Slot(self.committed)).contains(&self.me)
+    }
+
     /// The members of the epoch in force at the committed prefix, in leader order (the
     /// leader first), with what this replica knows of each.
     pub fn members(&self) -> Vec<MemberView> {

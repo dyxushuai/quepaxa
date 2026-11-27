@@ -11,15 +11,15 @@ milliseconds, placement in minutes) count as decoupled in practice.
 
 `X` marks a DP that affects an FR. Columns are in the order the DPs are set.
 
-| | DP1 persist-before-send gate | DP2 ISR proposers/recorders | DP3 schedule window (LAG) | DP4 dedup | DP5 batch IDs | DP6 hedge delay δ | DP7 rotation, step-aside | DP8 placement | DP9 in-flight slots W |
-|---|---|---|---|---|---|---|---|---|---|
-| FR1 acknowledged data survives crashes | X | | | | | | | | |
-| FR2 agreement | X | X | X | | X | | | | |
-| FR3 safe membership changes | | X | X | | | | | | |
-| FR4 at-most-once | | | | X | | | | | |
-| FR5 liveness without timeouts | | X | | | X | X | X | | |
-| FR6 low latency | | | | | X | X | X | X | X |
-| FR7 bounded memory | | | | | X | | | | |
+| | DP1 persist-before-send gate | DP2 ISR proposers/recorders | DP3 schedule window (LAG) | DP4 dedup | DP5 batch IDs | DP6 hedge delay δ | DP7 rotation, step-aside | DP8 placement | DP9 in-flight slots W | DP10 observer follow interval |
+|---|---|---|---|---|---|---|---|---|---|---|
+| FR1 acknowledged data survives crashes | X | | | | | | | | | |
+| FR2 agreement | X | X | X | | X | | | | | |
+| FR3 safe membership changes | | X | X | | | | | | | |
+| FR4 at-most-once | | | | X | | | | | | |
+| FR5 liveness without timeouts | | X | | | X | X | X | | | |
+| FR6 low latency | | | | | X | X | X | X | X | X |
+| FR7 bounded memory | | | | | X | | | | | |
 
 **Safety (FR1–FR4) is decoupled.** It depends on DP1–DP5 only, in a triangle, and on no
 timing parameter: timers decide when a replica acts, never whether the result is correct.
