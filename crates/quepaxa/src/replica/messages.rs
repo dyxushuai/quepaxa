@@ -87,7 +87,12 @@ impl Replica {
                 self.apply_tuned_w(w);
             }
         }
-        self.note_follow_heard(from, matches!(msg.body, Body::Entries { .. }));
+        let (is_entries, non_empty_entries) = match &msg.body {
+            Body::Entries { proposals, .. } => (true, !proposals.is_empty()),
+            _ => (false, false),
+        };
+        let advanced = non_empty_entries || msg.env.commit_index > self.committed;
+        self.note_follow_heard(from, is_entries, advanced);
         // Control/liveness messages may travel on a separate stream ahead of `Decided`; do not
         // let their envelope trigger speculative bulk catch-up on voting members before
         // in-flight decisions land.
@@ -99,7 +104,9 @@ impl Replica {
                 self.seen.entry(Slot(self.committed)).or_insert(self.now);
             }
             let lag = if outside { 0 } else { 1 };
-            if !matches!(msg.body, Body::Compacted { .. })
+            // `Entries` is handled after applying its page in `on_entries`, so an observer's
+            // non-empty follow reply does not echo a stale duplicate `CatchUp` before advancing.
+            if !matches!(msg.body, Body::Compacted { .. } | Body::Entries { .. })
                 && msg.env.commit_index > self.committed.saturating_add(lag)
                 && self.catch_up_due()
             {

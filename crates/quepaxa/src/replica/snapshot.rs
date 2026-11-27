@@ -104,8 +104,10 @@ impl Replica {
         self.schedule = state.schedule;
         if self.schedule.knows(self.me) {
             self.was_member = true;
+        }
+        if !self.outside() {
             self.follow.stop();
-        } else if self.outside() && self.cfg.follow_interval > 0 {
+        } else if self.cfg.follow_interval > 0 {
             self.follow.arm_if_idle(self.now, self.cfg.follow_interval);
         }
         self.dedup = state.dedup;

@@ -46,6 +46,11 @@ fn a_non_voting_observer_follows_and_reads_across_reconfigurations() {
     for k in 10..85 {
         assert_eq!(c.request(k % 3, &format!("PUT o{k} val{k}")), "OK");
     }
+    // Background follow_interval must catch observer 3 up without needing a linearizable GET first.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while c.request(3, "STALE o84") != "VALUE val84" {
+        assert!(std::time::Instant::now() < deadline, "observer 3 did not follow o84 via background polling");
+        std::thread::sleep(Duration::from_millis(25));
+    }
     assert_eq!(c.request(3, "GET o84"), "VALUE val84");
-    assert_eq!(c.request(3, "STALE o84"), "VALUE val84");
 }

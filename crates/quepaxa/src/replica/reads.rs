@@ -90,7 +90,7 @@ impl Replica {
             let first = r.answers.is_empty();
             let mark = r.answers.entry(from).or_default();
             *mark = (*mark).max(high.0);
-            if first && self.outside() && self.schedule.knows(from) {
+            if first && self.outside() && self.is_follow_peer(from) {
                 self.follow.prefer(from);
             }
         }
