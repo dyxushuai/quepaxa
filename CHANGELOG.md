@@ -3,6 +3,31 @@
 All notable changes to this project are documented here. The project follows
 [Semantic Versioning](https://semver.org/); before 1.0 any minor version may be breaking.
 
+## 0.9.0 — 2026-11-28
+
+Non-voting observer replicas, online adaptive `in_flight_slots` tuning, FFI ABI 0.12
+hardening, 4KiB WAN / coalescing / deferred catch-up fixes, full LAN+WAN comparison
+benchmarks against etcd and openraft, and synced Verus recovery proofs.
+
+- `quepaxa` (#157, #265, #269): add non-voting observer replicas (`Config::members` + `peers`,
+  follow-probe `Poll::Alternate(NodeId)`, local log catch-up, and linearizable reads via
+  leader read barriers without voting).
+- `quepaxa` (#175, #264, #270): add online adaptive `in_flight_slots` tuner (`PipelineTuner`,
+  `Config::tune_in_flight_slots`), paired with active-pipeline lag tolerance, `distress_hold`
+  backoff stability, leader slot pacing during upward probes, and propagation `min_rtt` floor
+  tracking.
+- `quepaxa` (#261, #262, #263, #270): decouple admission and content-store budgets from `W`,
+  separate `OutboundClass` (`Control`, `Consensus`, `Bulk`), decouple miss-based leader rotation
+  from hedging (#258), defer speculative `CatchUp` on `Body::Data` (`defer_since`), and preserve
+  adaptive fetch grace on live decisions.
+- `quepaxa-ffi` (#161, #267, #269): audit all `unsafe` C ABI boundaries, catch panics at FFI
+  entry points, harden string/slice `mutate_with` input parsing, and bump ABI to `0.12`.
+- `verification/verus` (#271): sync `verification/verus/recovery.rs` and `prove.sh` mutation
+  checks with `CatchUp` deferral, active-pipeline lag bounds, and `retry_with`.
+- `docs` & `examples/kv-tokio` (#266, #268, #270): add lazy outbound peer dialing, coalesce
+  initial `hello` + buffered frame flushes, publish full interleaved LAN + 5-region WAN
+  benchmarks vs `etcd` and `openraft`, and document zero-RTT read No-Go analysis (#158).
+
 ## 0.8.0 — 2026-11-26
 
 Explicit protocol state proved in Verus (entries, disk health, placement, retirement,
