@@ -562,3 +562,112 @@ fn last_error_is_per_thread() {
         });
     });
 }
+
+#[test]
+fn misaligned_pointers_and_overflowing_lengths_are_rejected_without_ub() {
+    let mut backing = [0u64; 4];
+    let unaligned_u8 = (backing.as_mut_ptr() as *mut u8).wrapping_add(1);
+    let unaligned_u32 = unaligned_u8.cast::<u32>();
+    let unaligned_u64 = unaligned_u8.cast::<u64>();
+    let unaligned_usize = unaligned_u8.cast::<usize>();
+    let unaligned_cfg = unaligned_u8.cast::<qpx_config>();
+    let unaligned_cfg_out = unaligned_u8.cast::<*mut qpx_config>();
+    let unaligned_rep = unaligned_u8.cast::<qpx_replica>();
+    let unaligned_rep_out = unaligned_u8.cast::<*mut qpx_replica>();
+    let unaligned_records = unaligned_u8.cast::<qpx_bytes>();
+    let unaligned_action = unaligned_u8.cast::<qpx_action>();
+
+    let cluster = *b"audit-cluster-01";
+    let seed = [7u8; 32];
+    let mut cfg = ptr::null_mut();
+    assert_eq!(
+        unsafe { qpx_config_new(cluster.as_ptr(), 0, unaligned_u32, 1, seed.as_ptr(), &mut cfg) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        unsafe { qpx_config_new(cluster.as_ptr(), 0, ptr::null(), 0, seed.as_ptr(), unaligned_cfg_out) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        unsafe { qpx_config_new(cluster.as_ptr(), 0, [0u32].as_ptr(), usize::MAX, seed.as_ptr(), &mut cfg) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
+    assert_eq!(unsafe { qpx_config_set(unaligned_cfg, QPX_CONFIG_PLACEMENT, 1) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { qpx_config_set_leader_order(unaligned_cfg, ptr::null(), 0) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
+
+    let cfg = config(0, &[0]);
+    assert_eq!(unsafe { qpx_config_set_leader_order(cfg, unaligned_u32, 1) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(
+        unsafe { qpx_config_set_leader_order(cfg, [0u32].as_ptr(), usize::MAX) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
+
+    let mut h = ptr::null_mut();
+    assert_eq!(
+        unsafe { qpx_replica_new(unaligned_cfg, ptr::null(), 0, 0, &mut h) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
+    assert_eq!(
+        unsafe { qpx_replica_new(cfg, ptr::null(), 0, 0, unaligned_rep_out) },
+        QPX_ERR_INVALID_ARGUMENT
+    );
+    assert_eq!(unsafe { qpx_replica_new(cfg, unaligned_records, 1, 0, &mut h) }, QPX_ERR_INVALID_ARGUMENT);
+    let rec = qpx_bytes { ptr: b"x".as_ptr(), len: usize::MAX };
+    assert_eq!(unsafe { qpx_replica_new(cfg, &rec, 1, 0, &mut h) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_replica_new(cfg, &rec, usize::MAX, 0, &mut h) }, QPX_ERR_INVALID_ARGUMENT);
+
+    assert_eq!(unsafe { qpx_replica_new(cfg, ptr::null(), 0, 0, &mut h) }, QPX_OK);
+    unsafe { qpx_config_free(cfg) };
+    let (mut net, mut commits) = (Vec::new(), Vec::new());
+    unsafe { drain(&[h], 0, &mut net, &mut commits) };
+
+    let mut id = 0;
+    let mut a = empty_action();
+    assert_eq!(unsafe { qpx_poll(unaligned_rep, &mut a) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_poll(h, unaligned_action) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_propose(h, 0, b"a".as_ptr(), 1, unaligned_u64) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_propose(h, 0, b"a".as_ptr(), usize::MAX, &mut id) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_handle_message(h, 0, b"a".as_ptr(), usize::MAX) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_commit_index(h, unaligned_u64) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_next_deadline(h, unaligned_u64) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_core_state(h, ptr::null_mut(), 0, unaligned_usize) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_metric(h, QPX_METRIC_SLOTS_DECIDED, unaligned_u64) }, QPX_ERR_INVALID_ARGUMENT);
+    assert_eq!(unsafe { qpx_last_error(ptr::null_mut(), 0, unaligned_usize) }, QPX_ERR_INVALID_ARGUMENT);
+
+    // Empty committed payload exposes a canonical null pointer (never Rust's dangling 0x1).
+    assert_eq!(unsafe { qpx_propose(h, 0, ptr::null(), 0, &mut id) }, QPX_OK);
+    let mut saw_empty = false;
+    loop {
+        let mut last_persist = None;
+        loop {
+            let rc = unsafe { qpx_poll(h, &mut a) };
+            if rc == QPX_EMPTY {
+                break;
+            }
+            assert_eq!(rc, QPX_OK);
+            if a.kind == QPX_ACTION_PERSIST {
+                last_persist = Some(a.id);
+            } else if a.kind == QPX_ACTION_COMMIT && a.count == 1 {
+                let mut e = qpx_entry { origin: 0, incarnation: 0, id: 0, payload: empty_bytes() };
+                assert_eq!(unsafe { qpx_action_entry(h, 0, &mut e) }, QPX_OK);
+                assert_eq!(e.payload.len, 0);
+                assert!(e.payload.ptr.is_null(), "empty qpx_bytes must expose null ptr, not dangling");
+                saw_empty = true;
+            }
+        }
+        let Some(pid) = last_persist else { break };
+        assert_eq!(unsafe { qpx_persisted(h, 0, pid) }, QPX_OK);
+    }
+    assert!(saw_empty);
+    unsafe { qpx_replica_free(h) };
+}
+
+#[test]
+fn abi_version_reflects_v0_12_additions() {
+    assert_eq!(QPX_ABI_VERSION_MAJOR, 0);
+    assert_eq!(QPX_ABI_VERSION_MINOR, 12);
+    assert_eq!(qpx_abi_version(), 12);
+}

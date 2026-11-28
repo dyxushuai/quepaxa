@@ -44,7 +44,7 @@ pub struct qpx_entry {
 /// `h` must be a live handle; `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_poll(h: *mut qpx_replica, out: *mut qpx_action) -> i32 {
-    if out.is_null() {
+    if !valid_mut(out) {
         return invalid();
     }
     with(h, |h| {
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn qpx_poll(h: *mut qpx_replica, out: *mut qpx_action) -> 
 /// `h` must be a live handle; `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_action_record(h: *mut qpx_replica, i: usize, out: *mut qpx_bytes) -> i32 {
-    if out.is_null() {
+    if !valid_mut(out) {
         return invalid();
     }
     with(h, |h| match &h.current {
@@ -154,7 +154,7 @@ pub unsafe extern "C" fn qpx_action_then(
     to: *mut u32,
     out: *mut qpx_bytes,
 ) -> i32 {
-    if out.is_null() || to.is_null() {
+    if !valid_mut(out) || !valid_mut(to) {
         return invalid();
     }
     with(h, |h| match &h.current {
@@ -176,7 +176,7 @@ pub unsafe extern "C" fn qpx_action_then(
 /// `h` must be a live handle; `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_action_member(h: *mut qpx_replica, i: usize, out: *mut u32) -> i32 {
-    if out.is_null() {
+    if !valid_mut(out) {
         return invalid();
     }
     with(h, |h| match &h.current {
@@ -195,7 +195,7 @@ pub unsafe extern "C" fn qpx_action_member(h: *mut qpx_replica, i: usize, out: *
 /// `h` must be a live handle; `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_action_entry(h: *mut qpx_replica, i: usize, out: *mut qpx_entry) -> i32 {
-    if out.is_null() {
+    if !valid_mut(out) {
         return invalid();
     }
     with(h, |h| match &h.current {

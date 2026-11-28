@@ -1,11 +1,12 @@
 //! The replica configuration: an opaque object built with setters, so no configuration
 //! layout is part of the ABI and a new setting is a new option, not a new struct.
 
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 
 use quepaxa::{Config, NodeId};
 
-use crate::{QPX_ERR_INVALID_ARGUMENT, QPX_OK, ids_from, invalid, set_last_error};
+use crate::{QPX_ERR_INVALID_ARGUMENT, QPX_OK, ffi_guard, ids_from, invalid, set_last_error, valid_mut};
 
 /// Replica configuration: create it with `qpx_config_new`, adjust it with `qpx_config_set`
 /// and `qpx_config_set_leader_order`, pass it to `qpx_replica_new` (which copies it), and
@@ -36,8 +37,9 @@ pub const QPX_CONFIG_PLACEMENT: u32 = 8;
 pub const QPX_CONFIG_PLACEMENT_SUSTAIN_NS: u32 = 9;
 /// How long placement leaves any change of the leader order alone, nanoseconds (ABI 0.10).
 pub const QPX_CONFIG_PLACEMENT_HOLD_NS: u32 = 10;
-/// Largest forwarded chunk that travels inline, bytes (`u32`, at least 64; default `u32::MAX`
-/// off). Larger chunks travel by reference as data batches (ABI 0.11).
+/// Largest forwarded chunk that travels inline, bytes (`u32`, at least 64; default `1024`;
+/// set to `u32::MAX` to keep every chunk inline). Larger chunks travel by reference as data
+/// batches (ABI 0.11).
 pub const QPX_CONFIG_INLINE_BATCH_BYTES: u32 = 11;
 /// Online `in_flight_slots` tuning while leading: 1 on, 0 off (the default) (ABI 0.12).
 pub const QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS: u32 = 12;
@@ -60,22 +62,23 @@ pub unsafe extern "C" fn qpx_config_new(
     seed: *const u8,
     out: *mut *mut qpx_config,
 ) -> i32 {
-    set_last_error("");
-    if cluster_id.is_null() || seed.is_null() || out.is_null() {
-        return invalid();
-    }
-    // SAFETY: guaranteed by the caller.
-    let Some(members) = (unsafe { ids_from(members, members_len) }) else { return invalid() };
-    let (mut c, mut s) = ([0u8; 16], [0u8; 32]);
-    // SAFETY: the caller guarantees 16 and 32 readable bytes.
-    unsafe {
-        ptr::copy_nonoverlapping(cluster_id, c.as_mut_ptr(), c.len());
-        ptr::copy_nonoverlapping(seed, s.as_mut_ptr(), s.len());
-    }
-    let cfg = Box::new(qpx_config { config: Config::new(c, NodeId(id), members, s) });
-    // SAFETY: checked non-null; the caller guarantees it is writable.
-    unsafe { out.write(Box::into_raw(cfg)) };
-    QPX_OK
+    ffi_guard(|| {
+        if cluster_id.is_null() || seed.is_null() || !valid_mut(out) {
+            return invalid();
+        }
+        // SAFETY: guaranteed by the caller.
+        let Some(members) = (unsafe { ids_from(members, members_len) }) else { return invalid() };
+        let (mut c, mut s) = ([0u8; 16], [0u8; 32]);
+        // SAFETY: the caller guarantees 16 and 32 readable bytes.
+        unsafe {
+            ptr::copy_nonoverlapping(cluster_id, c.as_mut_ptr(), c.len());
+            ptr::copy_nonoverlapping(seed, s.as_mut_ptr(), s.len());
+        }
+        let cfg = Box::new(qpx_config { config: Config::new(c, NodeId(id), members, s) });
+        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
+        unsafe { out.write(Box::into_raw(cfg)) };
+        QPX_OK
+    })
 }
 
 fn narrow(field: &mut u32, value: u64) -> bool {
@@ -90,56 +93,60 @@ fn narrow(field: &mut u32, value: u64) -> bool {
 /// `cfg` must come from `qpx_config_new` and not be used concurrently.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_config_set(cfg: *mut qpx_config, option: u32, value: u64) -> i32 {
-    set_last_error("");
-    // SAFETY: guaranteed by the caller.
-    let Some(cfg) = (unsafe { cfg.as_mut() }) else { return invalid() };
-    let c = &mut cfg.config;
-    let fits = match option {
-        QPX_CONFIG_MAX_BATCH_BYTES => narrow(&mut c.max_batch_bytes, value),
-        QPX_CONFIG_MAX_MESSAGE_BYTES => narrow(&mut c.max_message_bytes, value),
-        QPX_CONFIG_MAX_IN_FLIGHT_SLOTS => narrow(&mut c.max_in_flight_slots, value),
-        QPX_CONFIG_MAX_OUTSTANDING_PROPOSALS => narrow(&mut c.max_outstanding_proposals, value),
-        QPX_CONFIG_RETRANSMIT_INTERVAL_NS => {
-            c.retransmit_interval = value;
-            true
+    ffi_guard(|| {
+        if !valid_mut(cfg) {
+            return invalid();
         }
-        QPX_CONFIG_HEDGE_MIN_NS => {
-            c.hedge_min = value;
-            true
-        }
-        QPX_CONFIG_HEDGE_MAX_NS => {
-            c.hedge_max = value;
-            true
-        }
-        QPX_CONFIG_PLACEMENT if value <= 1 => {
-            c.placement = value == 1;
-            true
-        }
-        QPX_CONFIG_PLACEMENT => false,
-        QPX_CONFIG_PLACEMENT_SUSTAIN_NS => {
-            c.placement_sustain = value;
-            true
-        }
-        QPX_CONFIG_PLACEMENT_HOLD_NS => {
-            c.placement_hold = value;
-            true
-        }
-        QPX_CONFIG_INLINE_BATCH_BYTES => narrow(&mut c.inline_batch_bytes, value),
-        QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS if value <= 1 => {
-            c.tune_in_flight_slots = value == 1;
-            true
-        }
-        QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS => false,
-        _ => {
-            set_last_error(&format!("unknown config option {option}"));
+        // SAFETY: checked non-null and aligned; guaranteed live and exclusive by the caller.
+        let Some(cfg) = (unsafe { cfg.as_mut() }) else { return invalid() };
+        let c = &mut cfg.config;
+        let fits = match option {
+            QPX_CONFIG_MAX_BATCH_BYTES => narrow(&mut c.max_batch_bytes, value),
+            QPX_CONFIG_MAX_MESSAGE_BYTES => narrow(&mut c.max_message_bytes, value),
+            QPX_CONFIG_MAX_IN_FLIGHT_SLOTS => narrow(&mut c.max_in_flight_slots, value),
+            QPX_CONFIG_MAX_OUTSTANDING_PROPOSALS => narrow(&mut c.max_outstanding_proposals, value),
+            QPX_CONFIG_RETRANSMIT_INTERVAL_NS => {
+                c.retransmit_interval = value;
+                true
+            }
+            QPX_CONFIG_HEDGE_MIN_NS => {
+                c.hedge_min = value;
+                true
+            }
+            QPX_CONFIG_HEDGE_MAX_NS => {
+                c.hedge_max = value;
+                true
+            }
+            QPX_CONFIG_PLACEMENT if value <= 1 => {
+                c.placement = value == 1;
+                true
+            }
+            QPX_CONFIG_PLACEMENT => false,
+            QPX_CONFIG_PLACEMENT_SUSTAIN_NS => {
+                c.placement_sustain = value;
+                true
+            }
+            QPX_CONFIG_PLACEMENT_HOLD_NS => {
+                c.placement_hold = value;
+                true
+            }
+            QPX_CONFIG_INLINE_BATCH_BYTES => narrow(&mut c.inline_batch_bytes, value),
+            QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS if value <= 1 => {
+                c.tune_in_flight_slots = value == 1;
+                true
+            }
+            QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS => false,
+            _ => {
+                set_last_error(&format!("unknown config option {option}"));
+                return QPX_ERR_INVALID_ARGUMENT;
+            }
+        };
+        if !fits {
+            set_last_error(&format!("value {value} is out of range for config option {option}"));
             return QPX_ERR_INVALID_ARGUMENT;
         }
-    };
-    if !fits {
-        set_last_error(&format!("value {value} is out of range for config option {option}"));
-        return QPX_ERR_INVALID_ARGUMENT;
-    }
-    QPX_OK
+        QPX_OK
+    })
 }
 
 /// Sets the preferred leaders, first to last: every member once, or none (`len` 0) for
@@ -154,13 +161,17 @@ pub unsafe extern "C" fn qpx_config_set_leader_order(
     order: *const u32,
     len: usize,
 ) -> i32 {
-    set_last_error("");
-    // SAFETY: guaranteed by the caller.
-    let (Some(cfg), Some(order)) = (unsafe { cfg.as_mut() }, unsafe { ids_from(order, len) }) else {
-        return invalid();
-    };
-    cfg.config.leader_order = order;
-    QPX_OK
+    ffi_guard(|| {
+        if !valid_mut(cfg) {
+            return invalid();
+        }
+        // SAFETY: checked non-null and aligned; guaranteed by the caller.
+        let (Some(cfg), Some(order)) = (unsafe { cfg.as_mut() }, unsafe { ids_from(order, len) }) else {
+            return invalid();
+        };
+        cfg.config.leader_order = order;
+        QPX_OK
+    })
 }
 
 /// Releases a configuration (null is ignored). Replicas created from it are unaffected.
@@ -169,8 +180,10 @@ pub unsafe extern "C" fn qpx_config_set_leader_order(
 /// `cfg` must come from `qpx_config_new` and not be used afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_config_free(cfg: *mut qpx_config) {
-    if !cfg.is_null() {
-        // SAFETY: the caller hands back ownership of a configuration from `qpx_config_new`.
-        drop(unsafe { Box::from_raw(cfg) });
+    if valid_mut(cfg) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: the caller hands back ownership of a configuration from `qpx_config_new`.
+            drop(unsafe { Box::from_raw(cfg) });
+        }));
     }
 }

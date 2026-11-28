@@ -125,7 +125,9 @@ pub const QPX_ABI_VERSION_MAJOR: u32 = 0;
 /// 0.11: batch references: `QPX_CONFIG_INLINE_BATCH_BYTES`, `QPX_METRIC_DATA_SENT`,
 /// `QPX_METRIC_FETCHES`, `QPX_METRIC_FETCH_RETRIES`, `QPX_METRIC_FETCHES_SERVED`,
 /// `QPX_METRIC_PARKED_REQUESTS`.
-pub const QPX_ABI_VERSION_MINOR: u32 = 11;
+/// 0.12: online pipeline tuner: `QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS`,
+/// `QPX_METRIC_IN_FLIGHT_SLOTS`, `QPX_METRIC_PIPELINE_ADJUSTMENTS`.
+pub const QPX_ABI_VERSION_MINOR: u32 = 12;
 
 /// Success.
 pub const QPX_OK: i32 = 0;
@@ -212,7 +214,7 @@ impl qpx_bytes {
     const EMPTY: Self = Self { ptr: ptr::null(), len: 0 };
 
     fn of(b: &[u8]) -> Self {
-        Self { ptr: b.as_ptr(), len: b.len() }
+        if b.is_empty() { Self::EMPTY } else { Self { ptr: b.as_ptr(), len: b.len() } }
     }
 }
 
@@ -230,16 +232,45 @@ thread_local! {
     static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
+/// Whether `ptr` is non-null and properly aligned for `T`.
+pub(crate) fn valid_mut<T>(ptr: *mut T) -> bool {
+    !ptr.is_null() && ptr.is_aligned()
+}
+
+/// Whether `ptr` is non-null and properly aligned for `T`.
+pub(crate) fn valid_const<T>(ptr: *const T) -> bool {
+    !ptr.is_null() && ptr.is_aligned()
+}
+
+/// Maximum slice length for `T` accepted by `slice::from_raw_parts`.
+fn max_slice_len<T>() -> usize {
+    (isize::MAX as usize).checked_div(std::mem::size_of::<T>()).unwrap_or(isize::MAX as usize)
+}
+
 /// An argument check failed before the call reached the replica.
 fn invalid() -> i32 {
-    set_last_error("invalid argument: null pointer or out-of-range index");
+    set_last_error("invalid argument: null/misaligned pointer or out-of-range value");
     QPX_ERR_INVALID_ARGUMENT
+}
+
+/// Runs `f` across the FFI boundary without unwinding, reporting panics as `QPX_ERR_PANIC`.
+pub(crate) fn ffi_guard(f: impl FnOnce() -> i32) -> i32 {
+    set_last_error("");
+    let rc = catch_unwind(AssertUnwindSafe(f)).unwrap_or(QPX_ERR_PANIC);
+    note(rc)
 }
 
 fn set_last_error(msg: &str) {
     // `try_with`: a call from a TLS destructor after ours ran loses the message, not the
-    // process (a panic here would unwind across the C boundary).
-    let _ = LAST_ERROR.try_with(|e| msg.clone_into(&mut e.borrow_mut()));
+    // process (a panic here would unwind across the C boundary). Strip interior NULs so the
+    // C string length always matches `out_len - 1`.
+    let _ = LAST_ERROR.try_with(|e| {
+        let mut slot = e.borrow_mut();
+        slot.clear();
+        for part in msg.split('\0') {
+            slot.push_str(part);
+        }
+    });
 }
 
 /// Records a failing status's description unless a more specific one was set.
@@ -288,7 +319,11 @@ fn with(h: *mut qpx_replica, f: impl FnOnce(&mut qpx_replica) -> i32) -> i32 {
 }
 
 fn with_inner(h: *mut qpx_replica, f: impl FnOnce(&mut qpx_replica) -> i32) -> i32 {
-    // SAFETY: the caller passes a handle from `qpx_replica_new` that is not used concurrently.
+    if !valid_mut(h) {
+        return invalid();
+    }
+    // SAFETY: checked non-null and aligned; the caller passes a handle from `qpx_replica_new`
+    // that is not used concurrently.
     let Some(h) = (unsafe { h.as_mut() }) else { return invalid() };
     if h.poisoned {
         return QPX_ERR_POISONED;
@@ -326,10 +361,11 @@ unsafe fn bytes_from(ptr: *const u8, len: usize) -> Option<Bytes> {
     if len == 0 {
         return Some(Bytes::new());
     }
-    if ptr.is_null() {
+    if ptr.is_null() || len > max_slice_len::<u8>() {
         return None;
     }
-    // SAFETY: guaranteed by the caller.
+    // SAFETY: `ptr` is non-null (and `u8` has alignment 1), `len <= isize::MAX`, and the
+    // caller guarantees `len` readable bytes.
     Some(Bytes::copy_from_slice(unsafe { slice::from_raw_parts(ptr, len) }))
 }
 
@@ -379,20 +415,20 @@ pub unsafe extern "C" fn qpx_replica_new(
     now_ns: u64,
     out: *mut *mut qpx_replica,
 ) -> i32 {
-    set_last_error("");
-    let result = catch_unwind(|| {
-        if out.is_null() {
+    ffi_guard(|| {
+        if !valid_mut(out) || !valid_const(cfg) {
             return invalid();
         }
-        // SAFETY: guaranteed by the caller.
+        // SAFETY: checked non-null and aligned; guaranteed live by the caller.
         let Some(cfg) = (unsafe { cfg.as_ref() }) else { return invalid() };
         let config = cfg.config.clone();
         let raw: &[qpx_bytes] = if n_records == 0 {
             &[]
-        } else if records.is_null() {
+        } else if !valid_const(records) || n_records > max_slice_len::<qpx_bytes>() {
             return invalid();
         } else {
-            // SAFETY: guaranteed by the caller.
+            // SAFETY: checked non-null, aligned, and within `isize::MAX` bytes; caller
+            // guarantees `n_records` valid `qpx_bytes` elements.
             unsafe { slice::from_raw_parts(records, n_records) }
         };
         let mut durable = Vec::with_capacity(raw.len());
@@ -411,14 +447,14 @@ pub unsafe extern "C" fn qpx_replica_new(
                     poisoned: false,
                 });
                 h.pull();
-                // SAFETY: checked non-null above.
+                h.drained = h.queue.is_empty();
+                // SAFETY: checked non-null and aligned above; caller guarantees it is writable.
                 unsafe { out.write(Box::into_raw(h)) };
                 QPX_OK
             }
             Err(e) => code(e),
         }
-    });
-    note(result.unwrap_or(QPX_ERR_PANIC))
+    })
 }
 
 /// Releases a handle (null is ignored).
@@ -427,9 +463,11 @@ pub unsafe extern "C" fn qpx_replica_new(
 /// `h` must come from `qpx_replica_new` and not be used afterwards.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_replica_free(h: *mut qpx_replica) {
-    if !h.is_null() {
-        // SAFETY: the caller hands back ownership of a handle from `qpx_replica_new`.
-        drop(unsafe { Box::from_raw(h) });
+    if valid_mut(h) {
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: the caller hands back ownership of a handle from `qpx_replica_new`.
+            drop(unsafe { Box::from_raw(h) });
+        }));
     }
 }
 
@@ -445,14 +483,17 @@ pub unsafe extern "C" fn qpx_propose(
     len: usize,
     out_id: *mut u64,
 ) -> i32 {
-    // SAFETY: guaranteed by the caller.
-    let Some(payload) = (unsafe { bytes_from(payload, len) }) else { return invalid() };
-    if out_id.is_null() {
+    if !valid_mut(out_id) {
         return invalid();
     }
+    let payload = match catch_unwind(AssertUnwindSafe(|| unsafe { bytes_from(payload, len) })) {
+        Ok(Some(b)) => b,
+        Ok(None) => return invalid(),
+        Err(_) => return note(QPX_ERR_PANIC),
+    };
     mutate(h, |r| {
         let id = r.propose(Timestamp(now_ns), payload)?;
-        // SAFETY: checked non-null; the caller guarantees it is writable.
+        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
         unsafe { out_id.write(id.0) };
         Ok(())
     })
@@ -480,18 +521,21 @@ pub unsafe extern "C" fn qpx_propose_reconfiguration(
     order_len: usize,
     out_id: *mut u64,
 ) -> i32 {
-    // SAFETY: guaranteed by the caller.
-    let (Some(members), Some(order)) =
-        (unsafe { ids_from(members, members_len) }, unsafe { ids_from(leader_order, order_len) })
-    else {
-        return invalid();
-    };
-    if out_id.is_null() {
+    if !valid_mut(out_id) {
         return invalid();
     }
+    let parsed = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: guaranteed by the caller.
+        (unsafe { ids_from(members, members_len) }, unsafe { ids_from(leader_order, order_len) })
+    }));
+    let (members, order) = match parsed {
+        Ok((Some(m), Some(o))) => (m, o),
+        Ok(_) => return invalid(),
+        Err(_) => return note(QPX_ERR_PANIC),
+    };
     mutate(h, |r| {
         let id = r.propose_reconfiguration(Timestamp(now_ns), members, order)?;
-        // SAFETY: checked non-null; the caller guarantees it is writable.
+        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
         unsafe { out_id.write(id.0) };
         Ok(())
     })
@@ -503,10 +547,11 @@ unsafe fn ids_from(ptr: *const u32, len: usize) -> Option<Vec<NodeId>> {
     if len == 0 {
         return Some(Vec::new());
     }
-    if ptr.is_null() {
+    if !valid_const(ptr) || len > max_slice_len::<u32>() {
         return None;
     }
-    // SAFETY: guaranteed by the caller.
+    // SAFETY: checked non-null, aligned for `u32`, and within `isize::MAX` bytes; caller
+    // guarantees `len` readable `u32` elements.
     Some(unsafe { slice::from_raw_parts(ptr, len) }.iter().copied().map(NodeId).collect())
 }
 
@@ -517,12 +562,12 @@ unsafe fn ids_from(ptr: *const u32, len: usize) -> Option<Vec<NodeId>> {
 /// `h` must be a live handle; `out_id` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_read_barrier(h: *mut qpx_replica, now_ns: u64, out_id: *mut u64) -> i32 {
-    if out_id.is_null() {
+    if !valid_mut(out_id) {
         return invalid();
     }
     mutate(h, |r| {
         let id = r.read_barrier(Timestamp(now_ns))?;
-        // SAFETY: checked non-null; the caller guarantees it is writable.
+        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
         unsafe { out_id.write(id.0) };
         Ok(())
     })
@@ -539,8 +584,11 @@ pub unsafe extern "C" fn qpx_handle_message(
     msg: *const u8,
     len: usize,
 ) -> i32 {
-    // SAFETY: guaranteed by the caller.
-    let Some(msg) = (unsafe { bytes_from(msg, len) }) else { return invalid() };
+    let msg = match catch_unwind(AssertUnwindSafe(|| unsafe { bytes_from(msg, len) })) {
+        Ok(Some(b)) => b,
+        Ok(None) => return invalid(),
+        Err(_) => return note(QPX_ERR_PANIC),
+    };
     mutate(h, |r| r.handle(Timestamp(now_ns), Input::Message(msg)))
 }
 
@@ -577,12 +625,12 @@ pub unsafe extern "C" fn qpx_handle_timeout(h: *mut qpx_replica, now_ns: u64) ->
 /// `h` must be a live handle; `out_ns` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_next_deadline(h: *mut qpx_replica, out_ns: *mut u64) -> i32 {
-    if out_ns.is_null() {
+    if !valid_mut(out_ns) {
         return invalid();
     }
     with(h, |h| match h.replica.next_deadline() {
         Some(Timestamp(t)) => {
-            // SAFETY: checked non-null; the caller guarantees it is writable.
+            // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
             unsafe { out_ns.write(t) };
             QPX_OK
         }
@@ -596,11 +644,11 @@ pub unsafe extern "C" fn qpx_next_deadline(h: *mut qpx_replica, out_ns: *mut u64
 /// `h` must be a live handle; `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_commit_index(h: *mut qpx_replica, out: *mut u64) -> i32 {
-    if out.is_null() {
+    if !valid_mut(out) {
         return invalid();
     }
     with(h, |h| {
-        // SAFETY: checked non-null; the caller guarantees it is writable.
+        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
         unsafe { out.write(h.replica.commit_index()) };
         QPX_OK
     })
@@ -619,18 +667,21 @@ pub unsafe extern "C" fn qpx_core_state(
     cap: usize,
     out_len: *mut usize,
 ) -> i32 {
-    if out_len.is_null() || (buf.is_null() && cap > 0) {
+    if !valid_mut(out_len) || (buf.is_null() && cap > 0) {
         return invalid();
     }
     with(h, |h| {
         let state = h.replica.core_state();
-        // SAFETY: checked non-null; the caller guarantees it is writable.
+        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
         unsafe { out_len.write(state.len()) };
         if cap < state.len() {
             return QPX_BUFFER_TOO_SMALL;
         }
-        // SAFETY: `buf` has room for `cap >= state.len()` bytes.
-        unsafe { ptr::copy_nonoverlapping(state.as_ptr(), buf, state.len()) };
+        if !state.is_empty() {
+            // SAFETY: `state` is non-empty so `cap >= state.len() > 0` implies `buf` is
+            // non-null with room for `state.len()` writable bytes.
+            unsafe { ptr::copy_nonoverlapping(state.as_ptr(), buf, state.len()) };
+        }
         QPX_OK
     })
 }
@@ -647,8 +698,11 @@ pub unsafe extern "C" fn qpx_compact(
     state: *const u8,
     len: usize,
 ) -> i32 {
-    // SAFETY: guaranteed by the caller.
-    let Some(state) = (unsafe { bytes_from(state, len) }) else { return invalid() };
+    let state = match catch_unwind(AssertUnwindSafe(|| unsafe { bytes_from(state, len) })) {
+        Ok(Some(b)) => b,
+        Ok(None) => return invalid(),
+        Err(_) => return note(QPX_ERR_PANIC),
+    };
     mutate(h, |r| r.compact(Timestamp(now_ns), Slot(through), state))
 }
 
@@ -665,8 +719,11 @@ pub unsafe extern "C" fn qpx_install_snapshot(
     state: *const u8,
     len: usize,
 ) -> i32 {
-    // SAFETY: guaranteed by the caller.
-    let Some(state) = (unsafe { bytes_from(state, len) }) else { return invalid() };
+    let state = match catch_unwind(AssertUnwindSafe(|| unsafe { bytes_from(state, len) })) {
+        Ok(Some(b)) => b,
+        Ok(None) => return invalid(),
+        Err(_) => return note(QPX_ERR_PANIC),
+    };
     let mut adopted = true;
     let rc = mutate(h, |r| {
         adopted = r.install_snapshot(Timestamp(now_ns), Slot(through), state)?;
@@ -727,7 +784,7 @@ pub const QPX_METRIC_PIPELINE_ADJUSTMENTS: u32 = 22;
 /// `h` must be a live handle; `out` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_metric(h: *mut qpx_replica, metric: u32, out: *mut u64) -> i32 {
-    if out.is_null() {
+    if !valid_mut(out) {
         return invalid();
     }
     with(h, |h| {
@@ -775,24 +832,27 @@ pub unsafe extern "C" fn qpx_metric(h: *mut qpx_replica, metric: u32, out: *mut 
 /// `buf` must be writable for `cap` bytes (or null with `cap` 0); `out_len` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn qpx_last_error(buf: *mut std::ffi::c_char, cap: usize, out_len: *mut usize) -> i32 {
-    if out_len.is_null() || (buf.is_null() && cap > 0) {
-        return QPX_ERR_INVALID_ARGUMENT;
-    }
-    let copy = |msg: &str| {
-        let need = msg.len() + 1;
-        // SAFETY: checked non-null; the caller guarantees it is writable.
-        unsafe { out_len.write(need) };
-        if cap < need {
-            return QPX_BUFFER_TOO_SMALL;
+    catch_unwind(AssertUnwindSafe(|| {
+        if !valid_mut(out_len) || (buf.is_null() && cap > 0) {
+            return QPX_ERR_INVALID_ARGUMENT;
         }
-        // SAFETY: `buf` has room for `cap >= need` bytes.
-        unsafe {
-            ptr::copy_nonoverlapping(msg.as_ptr(), buf.cast::<u8>(), msg.len());
-            buf.add(msg.len()).write(0);
-        }
-        QPX_OK
-    };
-    LAST_ERROR.try_with(|e| copy(&e.borrow())).unwrap_or_else(|_| copy(""))
+        let copy = |msg: &str| {
+            let need = msg.len() + 1;
+            // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
+            unsafe { out_len.write(need) };
+            if cap < need {
+                return QPX_BUFFER_TOO_SMALL;
+            }
+            // SAFETY: `need >= 1` so `cap >= need` implies `buf` is non-null with room for `need` bytes.
+            unsafe {
+                ptr::copy_nonoverlapping(msg.as_ptr(), buf.cast::<u8>(), msg.len());
+                buf.add(msg.len()).write(0);
+            }
+            QPX_OK
+        };
+        LAST_ERROR.try_with(|e| copy(&e.borrow())).unwrap_or_else(|_| copy(""))
+    }))
+    .unwrap_or(QPX_ERR_PANIC)
 }
 
 #[cfg(test)]
