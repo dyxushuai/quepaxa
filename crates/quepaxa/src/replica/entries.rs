@@ -436,11 +436,14 @@ impl Entries {
     }
 
     /// Cuts the next batch: relayed pieces always, pending ones only when proposing them
-    /// directly (`lead`). Returns the new batch sequence (if any) and the data batch ids of
-    /// any already-committed references skipped from the queues.
+    /// directly (`lead`). `hedge` marks batches proposed while hedging around a talking
+    /// leader so `Schedule::observe` leaves the miss streak unchanged (#258). Returns the new
+    /// batch sequence (if any) and the data batch ids of any already-committed references
+    /// skipped from the queues.
     pub(super) fn cut(
         &mut self,
         lead: bool,
+        hedge: bool,
         max_bytes: usize,
         dedup: &Dedup,
         ref_committed: impl Fn(Ref) -> bool,
@@ -486,7 +489,7 @@ impl Entries {
         }
         let items = pieces.take();
         self.batched(&items, from_relayed, seq);
-        (Some(self.new_batch(items)), skipped_refs)
+        (Some(self.new_batch_with(items, hedge)), skipped_refs)
     }
 
     /// The own entries among `pieces` (the first `from_relayed` taken from `relayed`, the rest
@@ -531,6 +534,10 @@ impl Entries {
 
     /// A new local batch of `pieces`, not yet in a slot.
     pub(super) fn new_batch(&mut self, pieces: Vec<Piece>) -> u64 {
+        self.new_batch_with(pieces, false)
+    }
+
+    fn new_batch_with(&mut self, pieces: Vec<Piece>, hedge: bool) -> u64 {
         let seq = self.next_batch;
         self.next_batch += 1;
         let key = ValueKey { origin: self.me, incarnation: self.incarnation, seq };
@@ -546,7 +553,7 @@ impl Entries {
                 Piece::Ref(r) => refs.push(*r),
             }
         }
-        let value = batch::encode_pieces(&pieces);
+        let value = batch::encode_pieces_flagged(&pieces, hedge);
         let b = LocalBatch { key, value, entries: ids, refs, slot: None, changes, handed: false };
         self.insert_batch(seq, b);
         seq

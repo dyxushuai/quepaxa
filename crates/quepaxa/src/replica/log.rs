@@ -248,7 +248,7 @@ impl Replica {
         let direct = self.proposes_directly();
         while let Some(d) = self.log.get(&Slot(self.committed)) {
             let slot = Slot(self.committed);
-            self.schedule.observe(slot, d.proposal.key.origin);
+            self.schedule.observe(slot, d.proposal.key.origin, batch::is_hedge(&d.proposal.value));
             for (_, payload) in batch::changes(&d.proposal.value) {
                 if let Some((base, order)) = crate::schedule::decode_change(&payload) {
                     self.schedule.reconfigure(slot, base, order);
@@ -300,7 +300,7 @@ impl Replica {
                     Vec::new()
                 }
             };
-            self.applied_schedule.observe(slot, key.origin);
+            self.applied_schedule.observe(slot, key.origin, batch::is_hedge(&d.proposal.value));
             // Local changes every replica ignores, reported as such rather than committed.
             let mut superseded = Vec::new();
             // A batch may carry one change twice (a forward delivered twice); the first copy

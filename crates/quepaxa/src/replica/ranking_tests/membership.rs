@@ -34,7 +34,7 @@ fn a_rotated_out_leader_is_not_placed_first_and_twice_as_long_the_next_time() {
     // Slots 0-7 decided by others count a rotation from slot 7 + LAG: 0 is demoted.
     let mut s = Schedule::with_order(alloc::vec![NodeId(0), NodeId(1), NodeId(2)]);
     for slot in 0..8 {
-        s.observe(Slot(slot), NodeId(1));
+        s.observe(Slot(slot), NodeId(1), false);
     }
     r.applied_schedule = s.clone();
     r.now = Timestamp(PROBE_INTERVAL);
@@ -48,7 +48,7 @@ fn a_rotated_out_leader_is_not_placed_first_and_twice_as_long_the_next_time() {
     s.reconfigure(Slot(back), s.generation(), alloc::vec![NodeId(0), NodeId(1), NodeId(2)]).unwrap();
     let from = back + crate::schedule::LAG;
     for slot in from..from + 8 {
-        s.observe(Slot(slot), NodeId(1));
+        s.observe(Slot(slot), NodeId(1), false);
     }
     r.applied_schedule = s;
     r.now = Timestamp(3 * PROBE_INTERVAL);
@@ -129,7 +129,7 @@ fn a_rotation_not_yet_in_force_holds_placement_back() {
     let mut r = leader(0, &[0, 1, 2]);
     // A rotation is counted but takes effect only after the move would be due.
     for slot in 0..8 {
-        r.schedule.observe(Slot(slot), NodeId(1));
+        r.schedule.observe(Slot(slot), NodeId(1), false);
     }
     rounds(&mut r, PROBE_INTERVAL, 2 * SUSTAIN / PROBE_INTERVAL, &rows(&three(50)), &writes);
     assert_eq!(r.placement.policy.moving(), None);

@@ -83,6 +83,7 @@ bugs=(
   schedule rotation-not-counted         '0,/self\.generation = self\.generation \+ 1;/s///'
   schedule change-not-counted           '/fn reconfigure/,$ s/self\.generation = self\.generation \+ 1;//'
   schedule change-in-a-rotated-slot     's/ \|\| rotated_here//'
+  schedule hedge-rotates-the-leader     's/if hedge \{/if false {/'
   disk_health stuck-counted-from-the-oldest-write 's/max_exec\(oldest, self\.wrote\)/oldest/'
   disk_health shared-stall-despite-a-decision     's/self\.decided_elsewhere <= after_exec\(oldest, usual4\)/self.decided_elsewhere <= now/'
   disk_health hold-on-a-forecast                  's/match disk\.health\(now, d\)/match disk.health(late, d)/'

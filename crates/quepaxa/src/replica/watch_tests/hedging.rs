@@ -320,3 +320,64 @@ fn a_leader_acknowledges_a_forward_before_its_writes_are_durable() {
         "a suppressed ack is eventually sent without another forward or durable write"
     );
 }
+
+#[test]
+fn hedged_slots_around_a_talking_leader_do_not_rotate_it() {
+    let mut r = with_latency(Some(5));
+    let mut out = Vec::new();
+    let mut now = MS;
+    // Eight consecutive hedges around a leader that keeps talking must not rotate it.
+    for slot in 0..8u64 {
+        r.propose(Timestamp(now), Bytes::from_static(b"x")).unwrap();
+        r.poll_actions(&mut out);
+        r.handle(Timestamp(now + 3 * MS), from_peer(0, 1, Body::ReadQuery { incarnation: 1, round: slot }))
+            .unwrap();
+        r.poll_actions(&mut out);
+        now += 80 * MS;
+        r.handle_timeout(Timestamp(now)).unwrap();
+        r.poll_actions(&mut out);
+        let (key, value) = r
+            .entries
+            .batches()
+            .values()
+            .find(|b| b.slot == Some(Slot(slot)))
+            .map(|b| (b.key, b.value.clone()))
+            .expect("hedged batch proposed in slot");
+        assert!(batch::is_hedge(&value), "slot {slot} carries the hedge flag");
+        let decided = Proposal { priority: 1, key, value };
+        r.handle(Timestamp(now + MS), from_peer(2, 1, Body::decided(Slot(slot), decided))).unwrap();
+        r.poll_actions(&mut out);
+        out.clear();
+        now += 2 * MS;
+    }
+    assert_eq!(r.schedule.leader(Slot(7 + crate::schedule::LAG)), NodeId(0));
+    assert_eq!(r.applied_schedule.leader(Slot(7 + crate::schedule::LAG)), NodeId(0));
+
+    // When the leader is silent instead (even with silent_leader_takeover disabled), batches
+    // proposed after δ do not carry the hedge flag and still rotate the leader in 8 slots.
+    let mut silent = with_latency(Some(5));
+    silent.cfg.silent_leader_takeover = false;
+    let mut t = MS;
+    for slot in 0..8u64 {
+        silent.propose(Timestamp(t), Bytes::from_static(b"y")).unwrap();
+        silent.poll_actions(&mut out);
+        t += 80 * MS;
+        silent.handle_timeout(Timestamp(t)).unwrap();
+        silent.poll_actions(&mut out);
+        let (key, value) = silent
+            .entries
+            .batches()
+            .values()
+            .find(|b| b.slot == Some(Slot(slot)))
+            .map(|b| (b.key, b.value.clone()))
+            .expect("takeover batch proposed in slot");
+        assert!(!batch::is_hedge(&value), "silent leader slot {slot} is not flagged as a hedge");
+        let decided = Proposal { priority: 1, key, value };
+        silent.handle(Timestamp(t + MS), from_peer(2, 1, Body::decided(Slot(slot), decided))).unwrap();
+        silent.poll_actions(&mut out);
+        out.clear();
+        t += 2 * MS;
+    }
+    assert_eq!(silent.schedule.leader(Slot(7 + crate::schedule::LAG)), NodeId(1));
+    assert_eq!(silent.applied_schedule.leader(Slot(7 + crate::schedule::LAG)), NodeId(1));
+}

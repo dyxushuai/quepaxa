@@ -268,7 +268,9 @@ impl Replica {
         // Hedging around a target that still talks: one slot at a time, or the hedges contend
         // with its slots and stretch a slowdown they were meant to cover. Entries other
         // followers handed here (as their deputy) are not hedges.
-        let cap = if direct || self.entries.deputy() { self.active_window() } else { 1 };
+        let deputy = self.entries.deputy();
+        let cap = if direct || deputy { self.active_window() } else { 1 };
+        let hedge = !direct && !deputy && self.leader_talking();
         while (self.proposers.len() as u64) < cap {
             // Nothing to propose: skip the search for a slot, which probes the log per slot
             // and ran on every input.
@@ -284,7 +286,8 @@ impl Replica {
                 None => {
                     let (cut_seq, skipped_refs) = {
                         let (content, dedup) = (&self.content, &self.dedup);
-                        self.entries.cut(direct, max, dedup, |r| Self::ref_all_committed(content, dedup, r))
+                        self.entries
+                            .cut(direct, hedge, max, dedup, |r| Self::ref_all_committed(content, dedup, r))
                     };
                     for id in skipped_refs {
                         self.maybe_release_content(id);

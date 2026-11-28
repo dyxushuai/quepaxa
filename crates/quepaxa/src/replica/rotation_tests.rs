@@ -274,7 +274,7 @@ fn routing_order_switches_early_only_for_miss_based_rotation() {
     // lagging peer at slot <= 7 still routes to node 0 while committed >= 8 routes to node 1.
     let mut rot = Schedule::with_order(alloc::vec![NodeId(0), NodeId(1), NodeId(2)]);
     for slot in 0..8 {
-        rot.observe(Slot(slot), NodeId(1));
+        rot.observe(Slot(slot), NodeId(1), false);
     }
     assert_eq!(rot.leader(Slot(8)), NodeId(0), "fast-path leader stays 0 until 7 + LAG");
     assert_eq!(rot.routing_order(Slot(5)), &[NodeId(0), NodeId(1), NodeId(2)], "lagging peer at 5");
