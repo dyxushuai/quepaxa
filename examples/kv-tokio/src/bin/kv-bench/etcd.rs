@@ -2,6 +2,7 @@
 //! etcd. Each arrival is its own task: a stalled server never slows the arrivals, and every
 //! request is timed from when it was due.
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
@@ -61,11 +62,17 @@ pub async fn run(load: &Load) -> (Vec<Sample>, u64) {
     let clients: Vec<KvClient<Channel>> = (0..load.conns)
         .map(|c| {
             let addr = load.targets[c % load.targets.len()];
-            let endpoint = Endpoint::from_shared(format!("http://{addr}")).expect("valid address");
+            let endpoint = Endpoint::from_shared(format!("http://{addr}"))
+                .expect("valid address")
+                .tcp_nodelay(true)
+                .initial_connection_window_size(64 * 1024 * 1024)
+                .initial_stream_window_size(8 * 1024 * 1024)
+                .buffer_size(16_384);
             KvClient::new(endpoint.connect_timeout(GRACE).connect_lazy())
         })
         .collect();
     let samples = Arc::new(Mutex::new(Vec::new()));
+    let error_counts: Arc<Mutex<BTreeMap<String, u64>>> = Arc::new(Mutex::new(BTreeMap::new()));
     // Time zero is `start_at` even when the clients were ready late: arrivals then due are
     // sent at once and their delay counts.
     let start = match load.start_at {
@@ -94,17 +101,30 @@ pub async fn run(load: &Load) -> (Vec<Sample>, u64) {
             value.extend(std::iter::repeat_n('x', load.size - 17));
         }
         let samples = samples.clone();
+        let error_counts = error_counts.clone();
         let task = tokio::spawn(async move {
-            let ok = if get {
-                client.range(RangeRequest { key: key.into(), ..Default::default() }).await.is_ok()
+            let res = if get {
+                client.range(RangeRequest { key: key.into(), ..Default::default() }).await.map(|_| ())
             } else {
                 client
                     .put(PutRequest { key: key.into(), value: value.into(), ..Default::default() })
                     .await
-                    .is_ok()
+                    .map(|_| ())
             };
             let done_us = start.elapsed().as_micros() as u64;
-            let outcome = if ok { Outcome::Ok } else { Outcome::Error };
+            let outcome = match res {
+                Ok(()) => Outcome::Ok,
+                Err(err) => {
+                    let key = format!("{:?}: {}", err.code(), err.message());
+                    let mut counts = error_counts.lock().unwrap();
+                    if let Some(c) = counts.get_mut(&key) {
+                        *c += 1;
+                    } else if counts.len() < 16 {
+                        counts.insert(key, 1);
+                    }
+                    Outcome::Error
+                }
+            };
             samples.lock().unwrap().push(Sample { due_us, done_us, outcome });
         });
         handles.push((due_us, task));
@@ -124,6 +144,13 @@ pub async fn run(load: &Load) -> (Vec<Sample>, u64) {
     }
     let mut samples = std::mem::take(&mut *samples.lock().unwrap());
     samples.extend(unanswered);
+    let counts = error_counts.lock().unwrap();
+    if !counts.is_empty() {
+        let mut sorted: Vec<(&String, &u64)> = counts.iter().collect();
+        sorted.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
+        let summary: Vec<String> = sorted.into_iter().map(|(k, v)| format!("{v}x [{k}]")).collect();
+        eprintln!("kv-bench etcd errors: {}", summary.join(", "));
+    }
     (samples, end_us)
 }
 

@@ -21,18 +21,25 @@ latency), one file per run, request samples (`*.csv`), and `summary.md`.
 
 | Scenario | Load | What happens to the leader |
 |---|---|---|
-| `steady` | etcd's `benchmark`: put (unlimited, and at `RATE`), range (linearizable, serializable), txn-put; 256 clients over 16 connections, all members | nothing |
+| `steady` | etcd's `benchmark`: put (unlimited, and at `RATE`), range (linearizable, serializable), txn-put; 256 clients over `CONNS` connections, all members | nothing |
 | `mixed` | open loop at `MIXED_RATE` (40000/s), 90% linearizable ranges and 10% puts, on all members | nothing |
+| `load` | open loop PUTs across `LOAD_RATES` (`5000 15000 30000 50000 100000`) for `LOAD_SECS` (20 s) each, payload `SIZE` bytes, all members | nothing |
 | `crash` | open loop at `RATE` (5000/s) on the followers | `SIGKILL` at 10 s |
 | `partition` | same | its traffic to and from the followers is dropped from 10 s to 25 s |
 | `slow-disk` | same | writes capped at `SLOW_IOPS` (50) IOPS from 10 s to 25 s (cgroup `io.max`) |
 | `stuck-disk` | same, on every member (the leader's own clients are the point) | writes capped at 1 IOPS from 10 s to 25 s |
 | `far-leader` | same | `FAR_MS` (50 ms) added to everything it sends from 10 s to 25 s |
 
-Each fault runs against QuePaxa, etcd with its default timeouts (heartbeat 100 ms, election
-1000 ms) and etcd tuned for a fast local network (10 ms, 100 ms). QuePaxa's leader is
-replica 0; etcd's is whoever it elects, found from `etcdctl endpoint status`. Clusters
-have three members, or five with `NODES=5` (two cores each, generator on `10-13`).
+`SYSTEMS` selects which servers run (`quepaxa`, `quepaxa-auto`, `openraft`, `openraft-tuned`,
+`etcd`, `etcd-tuned`; default `"quepaxa etcd etcd-tuned"`). Set `REPEATS` and `INTERLEAVE=1`
+to interleave systems within each scenario/repeat, `SNAPSHOT_EVERY` to align compaction
+thresholds (`kv-tokio` and `openraft-kv`), `QUEPAXA_FLAGS` / `OPENRAFT_FLAGS` for extra
+flags, `DATA_TMPFS=1` to place data dirs on tmpfs, and `SIZE` / `CONNS` / `LOAD_RATES` /
+`LOAD_SECS` to sweep payload and rate curves. On LAN, Openraft runs with `openraft`
+(50 ms heartbeat, 150-300 ms election) and `openraft-tuned` (20 ms heartbeat, 60-100 ms
+election); etcd uses 100/1,000 ms and 10/100 ms. QuePaxa's leader is replica 0; etcd's and
+Openraft's are whichever member holds leadership. Clusters have three members, or five with
+`NODES=5` (two cores each, generator on `10-13`).
 
 ## Fairness
 
@@ -90,15 +97,19 @@ generator reaches its local replica in under 1 ms.
 - **Timers.** QuePaxa runs with `--retransmit-ms 400 --hedge-max-ms 3000`, the WAN values
   in `quepaxa::Config`'s docs. etcd runs with its defaults (100 ms, 1000 ms) and tuned per
   its guide: heartbeat at the largest round trip (300 ms), election timeout ten times it.
-  Openraft (`SYSTEMS="quepaxa openraft openraft-tuned" INTERLEAVE=1 wan.sh`, built from
+  Openraft (`SYSTEMS="quepaxa quepaxa-auto openraft openraft-tuned" INTERLEAVE=1 wan.sh`, built from
   the standalone `examples/kv-tokio/bench/openraft/` crate) runs with `openraft` (400 ms
   heartbeat, 1000-1500 ms election timeout; Openraft 0.10 sets each heartbeat's hard RPC
   timeout to `heartbeat_interval`, so heartbeats must exceed the 300 ms max RTT, and sets
   follower `leader_lease = election_timeout_max`, so elections fire after
   `election_timeout_max + [min, max)` = 2.5-3.0 s) and `openraft-tuned` (1000 ms
   heartbeat, 2000-3000 ms election timeout; 5.0-6.0 s failover, matching `etcd-tuned`'s
-  ~5 s failover). Both Openraft profiles enable Pre-Vote, pipelined `StreamAppend`,
-  dedicated heartbeat channels, and an append-only CRC32-framed `sync_data()` WAL.
+  ~5 s failover). `quepaxa-auto` adds `--tune-in-flight-slots on --max-in-flight-slots 16`.
+  Both `load` and `adversary` also support `quepaxa-auto` and `openraft`, and accept
+  `SNAPSHOT_EVERY` / `OPENRAFT_FLAGS`. Both Openraft profiles enable Pre-Vote, pipelined
+  `StreamAppend`, binary framing, 1 MiB replication batch caps, pooled forwarding channels,
+  coalesced leader watches, dedicated heartbeat channels, and an append-only CRC32-framed
+  `sync_data()` WAL.
 - **Load.** `RATE` (1000 writes/s) split evenly over a generator per region, each with its
   own seed, writing only to its region's replica.
 - **Runs.** Each case runs `REPEATS` (3) times on fresh containers; `summary.md` gives the

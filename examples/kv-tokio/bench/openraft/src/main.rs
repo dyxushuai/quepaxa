@@ -12,6 +12,8 @@
 //!   openraft-kv ctl --endpoint 172.31.251.10:7000 leader
 //!   openraft-kv ctl --endpoint 172.31.251.10:7000 transfer <node_id>
 
+mod codec;
+mod etcd_proto;
 mod network;
 mod server;
 mod state_machine;
@@ -106,6 +108,9 @@ async fn run_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut election_min_ms: u64 = 1000;
     let mut election_max_ms: u64 = 1500;
     let mut snapshot_every: u64 = 10_000;
+    let mut max_payload_entries: u64 = 4_096;
+    let mut replication_lag_threshold: Option<u64> = None;
+    let mut purge_batch_size: u64 = 10_000;
 
     let mut i = 0;
     while i < args.len() {
@@ -126,6 +131,9 @@ async fn run_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "--election-min-ms" => election_min_ms = val.parse()?,
             "--election-max-ms" => election_max_ms = val.parse()?,
             "--snapshot-every" => snapshot_every = val.parse()?,
+            "--max-payload-entries" => max_payload_entries = val.parse()?,
+            "--replication-lag-threshold" => replication_lag_threshold = Some(val.parse()?),
+            "--purge-batch-size" => purge_batch_size = val.parse()?,
             other => return Err(format!("unknown flag {other}").into()),
         }
         i += 2;
@@ -136,12 +144,16 @@ async fn run_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("--members is required".into());
     }
 
+    let lag_threshold = replication_lag_threshold.unwrap_or_else(|| snapshot_every.max(100_000));
     let config = Config {
         cluster_name: "quepaxa-openraft-wan".to_owned(),
         heartbeat_interval: heartbeat_ms,
         election_timeout_min: election_min_ms,
         election_timeout_max: election_max_ms,
         install_snapshot_timeout: 5_000,
+        max_payload_entries,
+        replication_lag_threshold: lag_threshold,
+        purge_batch_size,
         snapshot_policy: SnapshotPolicy::LogsSinceLast(snapshot_every),
         enable_pre_vote: Some(true),
         ..Default::default()
@@ -155,6 +167,8 @@ async fn run_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let peer_srv = Server::builder()
         .tcp_nodelay(true)
+        .initial_connection_window_size(Some(64 * 1024 * 1024))
+        .initial_stream_window_size(Some(8 * 1024 * 1024))
         .add_service(
             RaftPeerServer::new(PeerService::new(ctx.clone()))
                 .max_decoding_message_size(MAX_MSG_BYTES)
@@ -164,6 +178,8 @@ async fn run_server(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let etcd_srv = Server::builder()
         .tcp_nodelay(true)
+        .initial_connection_window_size(Some(64 * 1024 * 1024))
+        .initial_stream_window_size(Some(8 * 1024 * 1024))
         .add_service(KvServer::new(EtcdKvService::new(ctx)))
         .serve(etcd_addr);
 
@@ -288,6 +304,43 @@ mod tests {
             assert_eq!(range.kvs[0].mod_revision, 3);
             assert_eq!(range.kvs[0].version, 2);
         }
+
+        use crate::types::pb::etcdserverpb::{
+            Compare, DeleteRangeRequest, RequestOp, TxnRequest, compare, request_op,
+        };
+        // Exercise Txn (CAS put) and DeleteRange through the follower (ForwardKv).
+        let txn_resp = follower_kv
+            .txn(TxnRequest {
+                compare: vec![Compare {
+                    result: compare::CompareResult::Equal as i32,
+                    target: compare::CompareTarget::Version as i32,
+                    key: b"hello".to_vec(),
+                    target_union: Some(compare::TargetUnion::Version(2)),
+                    ..Default::default()
+                }],
+                success: vec![RequestOp {
+                    request: Some(request_op::Request::RequestPut(PutRequest {
+                        key: b"hello".to_vec(),
+                        value: b"txn-val".to_vec(),
+                        prev_kv: true,
+                        ..Default::default()
+                    })),
+                }],
+                failure: Vec::new(),
+            })
+            .await
+            .expect("follower txn")
+            .into_inner();
+        assert!(txn_resp.succeeded);
+        assert_eq!(txn_resp.header.expect("header").revision, 4);
+
+        let del_resp = follower_kv
+            .delete_range(DeleteRangeRequest { key: b"hello".to_vec(), prev_kv: true, ..Default::default() })
+            .await
+            .expect("follower delete")
+            .into_inner();
+        assert_eq!(del_resp.deleted, 1);
+        assert_eq!(del_resp.prev_kvs[0].value, b"txn-val");
 
         // Transfer leadership to follower and verify leader changes.
         let mut ctl_leader = make_peer_client(make_peer_channel(&members[&leader].addr).expect("ch"));

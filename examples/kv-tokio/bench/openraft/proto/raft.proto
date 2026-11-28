@@ -13,6 +13,7 @@ service RaftPeer {
 
   rpc ForwardPut(ForwardPutReq) returns (ForwardPutResp);
   rpc ForwardRange(ForwardRangeReq) returns (ForwardRangeResp);
+  rpc ForwardKv(BytesMsg) returns (ForwardKvResp);
 
   rpc Init(Empty) returns (Empty);
   rpc Status(Empty) returns (StatusResp);
@@ -50,6 +51,12 @@ message ForwardRangeResp {
   uint64 create_revision = 6;
   uint64 mod_revision = 7;
   uint64 version = 8;
+}
+
+message ForwardKvResp {
+  bytes data = 1;
+  bool redirected = 2;
+  uint64 leader_id = 3;
 }
 
 message StatusResp {
