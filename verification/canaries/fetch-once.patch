@@ -1,25 +1,16 @@
 diff --git a/crates/quepaxa/src/replica/content.rs b/crates/quepaxa/src/replica/content.rs
+index 1957474..19779d7 100644
 --- a/crates/quepaxa/src/replica/content.rs
 +++ b/crates/quepaxa/src/replica/content.rs
-@@ -525,18 +525,10 @@ impl Replica {
-             .collect();
-         let mut by_target: BTreeMap<(Slot, NodeId), Vec<DataId>> = BTreeMap::new();
-         for (id, slot, first, attempt) in due {
--            let ring = self.fetch_ring(slot, id.origin, first);
--            if ring.is_empty() {
--                self.fetching.fetches.remove(&id);
--                continue;
--            }
--            let target = ring[attempt as usize % ring.len()];
--            if let Some(f) = self.fetching.fetches.get_mut(&id) {
--                f.attempt = attempt;
--                f.sent_at = now;
--            }
--            by_target.entry((slot, target)).or_default().push(id);
-+            let _ = (slot, first, attempt);
-+            self.fetching.fetches.remove(&id);
-         }
-+        let _ = &mut by_target;
-         for ((slot, target), ids) in by_target {
-             self.metrics.fetch_retries += ids.len() as u64;
-             self.send(target, Body::Fetch { slot, ids });
+@@ -728,6 +728,11 @@ impl Replica {
+         let mut initial_by_target: BTreeMap<(Slot, NodeId), Vec<DataId>> = BTreeMap::new();
+         let mut retry_by_target: BTreeMap<(Slot, NodeId), Vec<DataId>> = BTreeMap::new();
+         for (id, slot, first, sent, prev_attempt) in due {
++            if sent {
++                let _ = (slot, first, prev_attempt, &mut retry_by_target);
++                self.fetching.fetches.remove(&id);
++                continue;
++            }
+             let ring = self.fetch_ring(slot, id.origin, first);
+             if ring.is_empty() {
+                 self.fetching.fetches.remove(&id);
