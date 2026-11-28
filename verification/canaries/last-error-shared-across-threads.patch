@@ -1,8 +1,8 @@
 diff --git a/crates/quepaxa-ffi/src/lib.rs b/crates/quepaxa-ffi/src/lib.rs
-index 927cbe7..05f31a0 100644
+index f44c0bd..a085728 100644
 --- a/crates/quepaxa-ffi/src/lib.rs
 +++ b/crates/quepaxa-ffi/src/lib.rs
-@@ -214,10 +214,16 @@ pub struct qpx_replica {
+@@ -228,10 +228,16 @@ pub struct qpx_replica {
      poisoned: bool,
  }
  
@@ -18,6 +18,6 @@ index 927cbe7..05f31a0 100644
  
 +static LAST_ERROR: Shared = Shared(std::sync::Mutex::new(RefCell::new(String::new())));
 +
- /// An argument check failed before the call reached the replica.
- fn invalid() -> i32 {
-     set_last_error("invalid argument: null pointer or out-of-range index");
+ /// Whether `ptr` is non-null and properly aligned for `T`.
+ pub(crate) fn valid_mut<T>(ptr: *mut T) -> bool {
+     !ptr.is_null() && ptr.is_aligned()
