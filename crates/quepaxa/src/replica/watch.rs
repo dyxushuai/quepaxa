@@ -201,14 +201,17 @@ impl Replica {
     }
 
     /// How long a follower coalesces subsequent forwards to `target` after sending one:
-    /// an eighth of the observed forward-ack/reply delay, capped at half `ack_every`. Uses
-    /// `ack_delay` alongside `reply` so unrelated consensus messages from `target` cannot
-    /// collapse coalescing to zero under steady load; on cold start while multiple forwards
-    /// are already unacknowledged and pending data would disseminate as `Body::Data`,
-    /// coalesces up to half `ack_every` so large writes do not flood one `Data` frame per entry.
+    /// an eighth of the observed network forward-ack/reply delay (discounting the leader's
+    /// `ack_every` coalescing cooldown so low-RTT LAN clusters do not stretch `4δ` past disk
+    /// stalls), capped at half `ack_every`. Uses `ack_delay` alongside `reply` so unrelated
+    /// consensus messages from `target` cannot collapse coalescing to zero under steady WAN
+    /// load; on cold start while multiple forwards are already unacknowledged and pending data
+    /// would disseminate as `Body::Data`, coalesces up to half `ack_every` so large writes do
+    /// not flood one `Data` frame per entry.
     pub(super) fn forward_coalesce(&self, target: NodeId) -> u64 {
         let cap = self.ack_every() / 2;
-        let rtt = self.watch.fwd.ack_delay(target).max(self.watch.reply.get(&target).copied());
+        let ack_net = self.watch.fwd.ack_delay(target).map(|d| d.saturating_sub(self.ack_every()));
+        let rtt = ack_net.max(self.watch.reply.get(&target).copied());
         if let Some(r) = rtt {
             return (r / 8).min(cap);
         }

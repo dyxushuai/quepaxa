@@ -52,6 +52,8 @@ struct Round {
     asked: BTreeSet<NodeId>,
     /// Marks answered, by replica.
     answers: BTreeMap<NodeId, u64>,
+    /// When this round started, to detect an outside reader stalled on retired epoch members.
+    started_at: Timestamp,
     /// When to ask again those that have not answered.
     resend_at: Timestamp,
 }
@@ -63,6 +65,15 @@ impl Reads {
 
     pub(super) fn resend_at(&self) -> Option<Timestamp> {
         self.round.as_ref().map(|r| r.resend_at)
+    }
+
+    /// Whether an active round has received no answer for `interval`, or stayed unresolved past
+    /// four intervals (covering retired members whose earlier answers cannot advance past them).
+    pub(super) fn is_stalled(&self, now: Timestamp, interval: u64) -> bool {
+        self.round.as_ref().is_some_and(|r| {
+            (r.answers.is_empty() && r.started_at.after(interval) <= now)
+                || r.started_at.after(interval.saturating_mul(4)) <= now
+        })
     }
 }
 
@@ -188,8 +199,14 @@ impl Replica {
         let asked: BTreeSet<NodeId> = self.read_member_sets().into_iter().flatten().collect();
         let reads = mem::take(&mut self.reads.queued);
         let resend_at = self.now.after(self.cfg.retransmit_interval);
-        self.reads.round =
-            Some(Round { number, reads, asked: asked.clone(), answers: BTreeMap::new(), resend_at });
+        self.reads.round = Some(Round {
+            number,
+            reads,
+            asked: asked.clone(),
+            answers: BTreeMap::new(),
+            started_at: self.now,
+            resend_at,
+        });
         self.ask(number, asked);
     }
 

@@ -199,3 +199,28 @@ proptest::proptest! {
         }
     }
 }
+
+#[test]
+fn was_evicted_tracks_trimmed_batches_per_origin() {
+    let mut s = Store::new(10);
+    assert!(!s.was_evicted(id(0, 0)));
+    assert!(s.insert(id(0, 0), batch(6, 1)));
+    assert!(!s.was_evicted(id(0, 0)));
+    assert!(s.insert(id(0, 1), batch(6, 2)));
+    assert!(s.get(&id(0, 0)).is_none());
+    assert!(s.was_evicted(id(0, 0)));
+    assert!(!s.was_evicted(id(0, 1)));
+    assert!(!s.was_evicted(id(1, 0)));
+    // Pruning drops departed origins once they hold no loose batches while keeping active ones.
+    assert!(s.insert(id(1, 0), batch(6, 3)));
+    assert!(s.insert(id(1, 1), batch(6, 4)));
+    assert!(s.was_evicted(id(1, 0)));
+    s.raise_floor(10);
+    s.prune_evicted(|o| o == NodeId(0));
+    assert!(s.was_evicted(id(0, 0)));
+    // Origin 1 still has unpinned batch (1, 1), so its mark stays until its loose bytes clear.
+    assert!(s.was_evicted(id(1, 0)));
+    assert!(s.pin(reference(id(1, 1), &batch(6, 4)), Slot(10)).is_ok());
+    s.prune_evicted(|o| o == NodeId(0));
+    assert!(!s.was_evicted(id(1, 0)));
+}

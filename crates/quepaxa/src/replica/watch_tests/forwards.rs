@@ -256,15 +256,28 @@ fn forward_coalesce_stays_anchored_to_ack_delay_and_engages_on_cold_start() {
     r.cfg.max_batch_bytes = 1024;
     let mut out = Vec::new();
 
-    // Observe an 80 ms ForwardAck delay, then shrink `watch.reply` to 1 ms via an unrelated
-    // message: coalescing must stay anchored to ack_delay rather than collapsing to 0.
+    // Observe a 130 ms ForwardAck delay (80 ms network RTT past the 50 ms `ack_every`
+    // cooldown), then shrink `watch.reply` to 1 ms via an unrelated message: coalescing must
+    // stay anchored to `ack_delay - ack_every` rather than collapsing to 0.
     r.propose(Timestamp(MS), Bytes::from_static(b"a")).unwrap();
     r.poll_actions(&mut out);
     let seq = forward_seqs(&out, 0)[0];
-    r.handle(Timestamp(81 * MS), from_peer(0, 1, Body::ForwardAck { seqs: alloc::vec![seq] })).unwrap();
+    r.handle(Timestamp(131 * MS), from_peer(0, 1, Body::ForwardAck { seqs: alloc::vec![seq] })).unwrap();
     r.poll_actions(&mut out);
     r.watch.reply.insert(NodeId(0), MS);
     assert_eq!(r.forward_coalesce(NodeId(0)), 10 * MS, "coalesce stays anchored to ack_delay");
+
+    // LAN case: an ack delay inside `ack_every` (6 ms vs 6.25 ms cooldown) must not inflate
+    // coalescing beyond the true reply RTT.
+    let mut lan = with_latency(None);
+    lan.cfg.retransmit_interval = 50 * MS;
+    lan.propose(Timestamp(MS), Bytes::from_static(b"lan")).unwrap();
+    lan.poll_actions(&mut out);
+    let lan_seq = forward_seqs(&out, 0)[0];
+    lan.handle(Timestamp(7 * MS), from_peer(0, 1, Body::ForwardAck { seqs: alloc::vec![lan_seq] })).unwrap();
+    lan.poll_actions(&mut out);
+    lan.watch.reply.insert(NodeId(0), MS);
+    assert_eq!(lan.forward_coalesce(NodeId(0)), MS / 8, "LAN ack cooldown must not inflate coalesce");
 
     // Cold-start coalescing: with no reply/ack samples yet, once >=2 forwards are unacked and
     // pending exceeds inline_batch_bytes, coalescing engages at ack_every/2.

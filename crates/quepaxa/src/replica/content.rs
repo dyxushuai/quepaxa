@@ -287,8 +287,9 @@ impl Replica {
     }
 
     /// Candidate holders for a fetch: `first` (requester/sender), then `origin`, then the
-    /// slot's members in order, deduplicated and excluding `self.me`.
-    fn fetch_ring(&self, slot: Slot, origin: NodeId, first: NodeId) -> Vec<NodeId> {
+    /// slot's members in order, then current-epoch and known members if old-epoch members
+    /// retired, deduplicated and excluding `self.me`.
+    pub(super) fn fetch_ring(&self, slot: Slot, origin: NodeId, first: NodeId) -> Vec<NodeId> {
         let mut ring = Vec::new();
         let mut push = |n: NodeId| {
             if n != self.me && !ring.contains(&n) {
@@ -298,6 +299,12 @@ impl Replica {
         push(first);
         push(origin);
         for &m in self.schedule.members(slot) {
+            push(m);
+        }
+        for &m in self.schedule.members(Slot(self.committed)) {
+            push(m);
+        }
+        for m in self.schedule.everyone() {
             push(m);
         }
         ring
@@ -313,9 +320,10 @@ impl Replica {
         let mut by_target: BTreeMap<NodeId, Vec<DataId>> = BTreeMap::new();
         let interval = self.cfg.retransmit_interval;
         for &r in missing {
+            let delay = if self.content.was_evicted(r.id) { 0 } else { grace };
             if let Some(in_flight) = self.fetching.fetches.get_mut(&r.id) {
                 in_flight.slot = in_flight.slot.min(slot);
-                let upgrade = (grace == 0 && !in_flight.sent).then_some((in_flight.slot, in_flight.first));
+                let upgrade = (delay == 0 && !in_flight.sent).then_some((in_flight.slot, in_flight.first));
                 if let Some((s, f)) = upgrade {
                     let ring = self.fetch_ring(s, r.id.origin, f);
                     if let Some(&target) = ring.first()
@@ -330,7 +338,6 @@ impl Replica {
             }
             let ring = self.fetch_ring(slot, r.id.origin, first);
             let Some(&target) = ring.first() else { continue };
-            let delay = grace;
             if delay == 0 {
                 self.fetching.fetches.insert(
                     r.id,
@@ -864,6 +871,7 @@ impl Replica {
             self.maybe_release_content(id);
         }
         self.content.raise_floor(next);
+        self.content.prune_evicted(|origin| self.schedule.knows(origin));
         self.release_committed_own_data();
     }
 

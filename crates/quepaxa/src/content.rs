@@ -55,6 +55,9 @@ pub(crate) struct Store {
     batches: BTreeMap<DataId, Held>,
     /// Bytes of unpinned batches per origin; at most `cap` each after every change.
     loose: BTreeMap<NodeId, usize>,
+    /// Highest `(incarnation, seq)` evicted per origin: a missing batch at or below this mark
+    /// already arrived and was trimmed, so waiting out `fetch_grace` cannot help it arrive.
+    evicted: BTreeMap<NodeId, (u64, u64)>,
     cap: usize,
     /// First slot not covered by a snapshot.
     floor: u64,
@@ -63,7 +66,18 @@ pub(crate) struct Store {
 impl Store {
     /// A store keeping at most `cap` bytes of unpinned batches per origin.
     pub fn new(cap: usize) -> Self {
-        Self { batches: BTreeMap::new(), loose: BTreeMap::new(), cap, floor: 0 }
+        Self { batches: BTreeMap::new(), loose: BTreeMap::new(), evicted: BTreeMap::new(), cap, floor: 0 }
+    }
+
+    /// Whether `id` (or a newer batch from the same origin) was already trimmed from the
+    /// unpinned cache, so its original `Data` broadcast is no longer in flight.
+    pub fn was_evicted(&self, id: DataId) -> bool {
+        self.evicted.get(&id.origin).is_some_and(|&(inc, seq)| (id.incarnation, id.seq) <= (inc, seq))
+    }
+
+    /// Drops eviction marks for origins no longer in any active epoch (FR7 bounded memory).
+    pub fn prune_evicted(&mut self, mut keep: impl FnMut(NodeId) -> bool) {
+        self.evicted.retain(|&origin, _| keep(origin) || self.loose.contains_key(&origin));
     }
 
     /// The content of batch `id`, if held.
@@ -261,6 +275,11 @@ impl Store {
         for (id, len) in gone {
             self.batches.remove(&id);
             unloose(&mut self.loose, origin, len);
+            let cur = (id.incarnation, id.seq);
+            let mark = self.evicted.entry(origin).or_insert(cur);
+            if cur > *mark {
+                *mark = cur;
+            }
         }
     }
 }
