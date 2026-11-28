@@ -652,7 +652,7 @@ impl Replica {
                     self.content.insert_untrimmed(r.id, bytes.clone());
                 }
             }
-            self.learn(Slot(slot), p, false, Some(from));
+            self.learn(Slot(slot), p, false, Some(from), false);
         }
         for (id, bytes) in map {
             self.on_data(from, id, bytes);

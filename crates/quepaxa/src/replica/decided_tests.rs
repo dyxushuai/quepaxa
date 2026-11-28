@@ -173,13 +173,13 @@ fn decided_broadcast_advertises_the_advanced_held_prefix() {
     let p0 = with_value(proposal(LEADER_PRIORITY, 0, 0), b"slot0");
     let p1 = with_value(proposal(LEADER_PRIORITY, 2, 1), b"slot1");
     // Replica 0 already learned slot 1 while a peer missed it; held is still 0.
-    r0.learn(Slot(1), p1, false, Some(NodeId(2)));
+    r0.learn(Slot(1), p1, false, Some(NodeId(2)), false);
     sent(&mut r0);
     assert_eq!(r0.held, 0);
 
     // Deciding slot 0 with broadcast advances held to 2 before encoding Decided,
     // so peers hear commit_index = 2 rather than the stale 0.
-    r0.learn(Slot(0), p0.clone(), true, None);
+    r0.learn(Slot(0), p0.clone(), true, None, false);
     let mut out = Vec::new();
     r0.poll_actions(&mut out);
     let decided_to_n1 = out

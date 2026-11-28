@@ -1238,4 +1238,17 @@ fn tuner_paces_non_full_leader_slots_and_bypasses_on_full_batch() {
     r.propose(Timestamp(22_000_000), Bytes::from(alloc::vec![b'z'; 200])).unwrap();
     r.poll_actions(&mut out);
     assert!(r.proposers.len() >= 3, "full batch must bypass leader slot pacing immediately");
+
+    // Relayed/deputy entries also bypass pacing immediately.
+    let relayed = Item {
+        entry: Entry {
+            origin: NodeId(1),
+            incarnation: 1,
+            id: ProposalId(77),
+            payload: Bytes::from_static(b"relayed"),
+        },
+        kind: Kind::App,
+    };
+    assert!(r.entries.received(alloc::vec![Piece::Entry(relayed)], false, 64, Timestamp(22_000_000)));
+    assert_eq!(r.slot_pace_at(), None, "relayed entries must bypass leader slot pacing");
 }

@@ -300,6 +300,11 @@ impl Entries {
         !self.pending.is_empty()
     }
 
+    /// Whether any entry waits in `relayed` (deputy or hedged work).
+    pub(super) fn has_relayed(&self) -> bool {
+        !self.relayed.is_empty()
+    }
+
     /// Whether `pending` holds a control entry or already fills a batch of `limit` bytes.
     pub(super) fn pending_urgent(&self, limit: usize) -> bool {
         let mut bytes = 0usize;

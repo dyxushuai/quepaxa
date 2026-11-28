@@ -107,8 +107,11 @@ impl Replica {
             let lag = self.catch_up_lag();
             // `Entries` is handled after applying its page in `on_entries`, so an observer's
             // non-empty follow reply does not echo a stale duplicate `CatchUp` before advancing.
-            if !matches!(msg.body, Body::Compacted { .. } | Body::Entries { .. })
-                && (outside || !matches!(msg.body, Body::Data { .. }))
+            if !outside && matches!(msg.body, Body::Data { .. }) {
+                if self.catch_up.behind(self.committed, false) {
+                    self.catch_up.defer(self.now);
+                }
+            } else if !matches!(msg.body, Body::Compacted { .. } | Body::Entries { .. })
                 && msg.env.commit_index > self.committed.saturating_add(lag)
                 && self.catch_up_due()
             {

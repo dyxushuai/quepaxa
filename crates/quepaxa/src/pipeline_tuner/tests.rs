@@ -241,9 +241,8 @@ fn overload_rtt_inflation_does_not_lock_w_floor_and_suppresses_saturation() {
     // Under overload, RTT inflates 50x to 100 ms alongside distress (retransmits/lost slots).
     // With 600 KiB every 20 ms (= 30 MiB/s), inflated 100 ms RTT would compute bpr = 3 MiB
     // (w_floor = 16), locking W=16; propagation min_rtt = 2 ms keeps w_floor = 1 so sustained
-    // distress steps W down directly, and on_saturated is suppressed while distressed.
+    // distress steps W down directly.
     let mut stepped_down = false;
-    let mut sat_blocked = false;
     for _ in 0..250 {
         t += 20 * MS;
         let _ = tuner.on_distress(Timestamp(t));
@@ -253,12 +252,42 @@ fn overload_rtt_inflation_does_not_lock_w_floor_and_suppresses_saturation() {
             stepped_down = true;
             break;
         }
-        if tuner.on_saturated(Timestamp(t)).is_none() {
-            sat_blocked = true;
-        }
     }
-    assert!(sat_blocked, "on_saturated must stay suppressed during sustained distress");
-    assert!(stepped_down && tuner.current() < 16, "sustained distress must step W down: {}", tuner.current());
+    assert!(stepped_down && tuner.current() == 8, "sustained distress must step W down: {}", tuner.current());
+
+    // Immediately after stepping down to W=8 (< max_w), on_saturated must remain suppressed
+    // during distress_hold so W cannot bounce straight back to 16 while overload persists.
+    t += 60 * MS;
+    assert_eq!(
+        tuner.on_saturated(Timestamp(t)),
+        None,
+        "on_saturated must stay suppressed after distress backoff"
+    );
+    assert_eq!(tuner.current(), 8);
+
+    // Even a single distress event in the current window suppresses on_saturated at W < max_w.
+    let mut mid = PipelineTuner::new(16, MIB, Timestamp(0));
+    assert_eq!(mid.on_saturated(Timestamp(60 * MS)), Some(2));
+    let _ = mid.on_distress(Timestamp(120 * MS));
+    assert_eq!(
+        mid.on_saturated(Timestamp(180 * MS)),
+        None,
+        "on_saturated must stay suppressed on active distress"
+    );
+    assert_eq!(mid.current(), 2);
+
+    // Once distress_hold clears after clean windows, on_saturated works again.
+    for _ in 0..200 {
+        t += 20 * MS;
+        let _ = tuner.on_slot_committed(50 * 1024, 3 * MS, 2 * MS, Timestamp(t));
+    }
+    let before = tuner.current();
+    assert!(before < 16);
+    t += 60 * MS;
+    assert!(
+        tuner.on_saturated(Timestamp(t)).is_some(),
+        "on_saturated resumes once clean windows clear distress"
+    );
 }
 
 #[test]

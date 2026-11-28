@@ -75,7 +75,7 @@ impl Replica {
                 }
                 #[cfg(feature = "model")]
                 self.decided_steps.insert(slot, (p.clone(), req_step));
-                self.learn(slot, p, true, Some(from));
+                self.learn(slot, p, true, Some(from), true);
             }
         }
     }
@@ -426,7 +426,7 @@ impl Replica {
     /// in flight at `W > 1`, stagger subsequent non-full batches by `request_rtt / W` so slots
     /// spread across the RTT instead of convoying back-to-back and hiding latency gains from
     /// the tuner.
-    fn slot_pace_at(&self) -> Option<Timestamp> {
+    pub(super) fn slot_pace_at(&self) -> Option<Timestamp> {
         if self.tuner.is_none()
             || !self.leads_now()
             || !self.proposes_directly()
@@ -441,6 +441,7 @@ impl Replica {
         let max = self.cfg.max_batch_bytes as usize;
         if !self.entries.proposable(true)
             || self.entries.waiting().is_some()
+            || self.entries.has_relayed()
             || self.entries.pending_urgent(max)
             || self.entries.pending_exceeds(max / 2)
         {
@@ -641,14 +642,20 @@ impl Replica {
         // marks wait for, and the round's resend timer brings this back here until the read
         // is ready.
         let interval = self.cfg.retransmit_interval;
-        let lag = self.catch_up_lag();
+        let outside = self.outside();
         // A voting member's first timer-driven CatchUp after deferring within `catch_up_window()`
-        // is an initial request, not a retry; only timed-out in-flight requests (and timer-driven
-        // outside-reader catch-ups) count as retries.
-        let retrying = self.catch_up.in_flight() || self.outside();
-        if let Some(peer) =
-            self.catch_up.retry_by(self.committed, lag, now, interval, || self.read_catch_up_from())
-        {
+        // or on `Body::Data` is an initial request, not a retry; only timed-out in-flight
+        // requests (and timer-driven outside-reader catch-ups) count as retries.
+        let retrying = self.catch_up.in_flight() || outside;
+        if let Some(peer) = self.catch_up.retry_with(
+            self.committed,
+            outside,
+            self.catch_up_window(),
+            self.last_committed_at,
+            now,
+            interval,
+            || self.read_catch_up_from(),
+        ) {
             if retrying {
                 self.metrics.catch_up_retries += 1;
             }

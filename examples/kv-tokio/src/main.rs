@@ -349,7 +349,7 @@ async fn outbound_with<S, C>(
         if let Ok(Ok(s)) = tokio::time::timeout(STALL, connect()).await {
             // Frames queued while the previous batch was written go out in one syscall.
             let mut w = BufWriter::with_capacity(CHUNK, s);
-            let mut ok = send_frame(&mut w, &me.to_le_bytes(), false).await && within_stall(w.flush()).await;
+            let mut ok = send_frame(&mut w, &me.to_le_bytes(), false).await;
             if ok && let Some(frame) = pending.take() {
                 ok = send_frame(&mut w, &frame, bulk).await;
                 while ok && let Ok(frame) = rx.try_recv() {
@@ -359,6 +359,8 @@ async fn outbound_with<S, C>(
                 if ok {
                     backoff = MIN_BACKOFF;
                 }
+            } else {
+                ok = ok && within_stall(w.flush()).await;
             }
             while ok {
                 let Some(frame) = rx.recv().await else { return };
@@ -371,6 +373,9 @@ async fn outbound_with<S, C>(
                 }
                 backoff = MIN_BACKOFF;
             }
+        }
+        if rx.is_closed() {
+            return;
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
@@ -777,5 +782,24 @@ mod tests {
         assert_eq!(hello.as_ref(), &7u32.to_le_bytes());
         let frame = read_frame(&mut s).await.unwrap();
         assert!(!frame.is_empty());
+
+        // Dropping the channel while a lazy frame is pending against an unreachable peer exits cleanly.
+        let (tx, rx) = tmpsc::channel(4);
+        tx.send(vec![1, 2, 3]).await.unwrap();
+        let task = tokio::spawn(outbound_with(
+            7,
+            || async {
+                Err::<tokio::io::DuplexStream, _>(std::io::Error::from(std::io::ErrorKind::ConnectionRefused))
+            },
+            rx,
+            false,
+            true,
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("outbound_with leaked after receiver closed")
+            .unwrap();
     }
 }

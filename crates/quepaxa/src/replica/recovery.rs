@@ -98,6 +98,9 @@ pub(super) struct CatchUp {
     peer: Option<NodeId>,
     /// The outstanding request: whom it asked, and when.
     request: Option<(NodeId, Timestamp)>,
+    /// When a deferred stream (`Body::Data`) first revealed peer progress ahead of `committed`
+    /// without an in-flight request; cleared once caught up or when a request is sent.
+    defer_since: Option<Timestamp>,
 }
 
 impl CatchUp {
@@ -138,6 +141,22 @@ impl CatchUp {
 
     pub(super) fn requested(&mut self, peer: NodeId, now: Timestamp) {
         self.request = Some((peer, now));
+        self.defer_since = None;
+    }
+
+    /// Defers timer-driven catch-up by `retransmit_interval` from the first deferred notice
+    /// (e.g. `Body::Data` on the bulk stream) while no request is in flight.
+    pub(super) fn defer(&mut self, now: Timestamp) {
+        if self.request.is_none() {
+            self.defer_since.get_or_insert(now);
+        }
+    }
+
+    /// Clears any deferred catch-up timer once `committed` catches up with `ahead`.
+    pub(super) fn advanced(&mut self, committed: u64, outside: bool) {
+        if !self.behind(committed, outside) {
+            self.defer_since = None;
+        }
     }
 
     /// Worth a bulk catch-up request when allowing `lag` in-flight slots to arrive via normal
@@ -168,9 +187,11 @@ impl CatchUp {
         self.behind(committed, outside).then_some(from)
     }
 
-    /// When to retry a bulk request on the timer, while behind a peer. If within the active
-    /// pipeline `window` while committing normally (`last_committed`), waits until `interval`
-    /// after `last_committed` instead of firing immediately on in-flight WAN lag.
+    /// When to retry a bulk request on the timer, while behind a peer. Outside membership,
+    /// fires immediately unless a request is already in flight. For a voting member, respects
+    /// both any in-flight request interval and any deferred bulk-stream grace (`defer_since`),
+    /// and within the active pipeline `window` also waits until `interval` after
+    /// `last_committed`.
     pub(super) fn deadline_with(
         &self,
         committed: u64,
@@ -183,35 +204,44 @@ impl CatchUp {
         if !self.behind(committed, outside) || self.request.or(self.peer.map(|p| (p, now))).is_none() {
             return None;
         }
-        let immediate = outside || self.behind_by(committed, window);
-        let timer = self.request.map_or(now, |(_, t)| t.after(interval));
-        if immediate {
+        if outside {
+            return Some(self.request.map_or(now, |(_, t)| t.after(interval)));
+        }
+        let timer = match (self.request, self.defer_since) {
+            (Some((_, t)), _) | (None, Some(t)) => t.after(interval),
+            (None, None) => now,
+        };
+        if self.behind_by(committed, window) {
             Some(timer)
         } else {
-            let quiet_at = last_committed.map_or(now, |t| t.after(interval));
+            let quiet_at = last_committed.map_or(timer, |t| t.after(interval));
             Some(timer.max(quiet_at))
         }
     }
 
-    /// Whom to ask on the timer: while behind past `lag`, the most advanced peer (the
-    /// previous target may be the one that failed); otherwise the peer `read_from` names.
-    pub(super) fn retry_by(
+    /// Whom to ask on the timer: delegates to `deadline_with` so timer scheduling and firing
+    /// never disagree; when not behind any peer, falls back to `read_from` once due.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn retry_with(
         &self,
         committed: u64,
-        lag: u64,
+        outside: bool,
+        window: u64,
+        last_committed: Option<Timestamp>,
         now: Timestamp,
         interval: u64,
         read_from: impl FnOnce() -> Option<NodeId>,
     ) -> Option<NodeId> {
-        if !self.due(now, interval) {
-            return None;
+        if let Some(due) = self.deadline_with(committed, outside, window, last_committed, now, interval) {
+            return (due <= now).then(|| self.peer.or(self.request.map(|(p, _)| p))).flatten();
         }
-        if self.behind_by(committed, lag) { self.peer.or(self.request.map(|(p, _)| p)) } else { read_from() }
+        self.due(now, interval).then(read_from).flatten()
     }
 
     /// A snapshot answered any request in flight; whom to ask for what was decided after it.
     pub(super) fn installed(&mut self, committed: u64) -> Option<NodeId> {
         self.request = None;
+        self.defer_since = None;
         self.peer.filter(|_| self.ahead_of(committed))
     }
 
@@ -237,7 +267,7 @@ impl CatchUp {
         interval: u64,
         read_from: impl FnOnce() -> Option<NodeId>,
     ) -> Option<NodeId> {
-        self.retry_by(committed, if outside { 0 } else { 1 }, now, interval, read_from)
+        self.retry_with(committed, outside, if outside { 0 } else { 1 }, None, now, interval, read_from)
     }
 }
 

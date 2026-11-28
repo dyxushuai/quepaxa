@@ -253,17 +253,6 @@ pub(super) fn smooth_u64(prev: u64, sample: u64) -> u64 {
     if prev == 0 { sample } else { prev - prev / 4 + sample / 4 }
 }
 
-/// Filters upward spikes from max-tracking `request_rtt` while recovering promptly downward.
-pub(super) fn smooth_rtt_u64(prev: u64, sample: u64) -> u64 {
-    if prev == 0 {
-        sample
-    } else if sample > prev {
-        prev - prev / 4 + sample / 4
-    } else {
-        prev - (prev - sample) / 2
-    }
-}
-
 pub(super) fn smooth_u128(prev: u128, sample: u128) -> u128 {
     if prev == 0 { sample } else { prev - prev / 4 + sample / 4 }
 }
