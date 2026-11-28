@@ -133,7 +133,7 @@ impl Replica {
             self.watch.progressed = self.now;
         }
         if let Some(value) = self.resolve_decided(slot, key) {
-            self.learn(slot, Proposal { priority, key, value }, false, Some(from));
+            self.learn(slot, Proposal { priority, key, value }, false, Some(from), true);
             return;
         }
         if slot.0 > MAX_SLOT || self.unresolved.contains_key(&slot) {
@@ -191,7 +191,14 @@ impl Replica {
         self.unresolved.values().map(|(_, t)| t.after(self.cfg.retransmit_interval)).min()
     }
 
-    pub(super) fn learn(&mut self, slot: Slot, proposal: Proposal, broadcast: bool, hint: Option<NodeId>) {
+    pub(super) fn learn(
+        &mut self,
+        slot: Slot,
+        proposal: Proposal,
+        broadcast: bool,
+        hint: Option<NodeId>,
+        defer_fetch: bool,
+    ) {
         self.unresolved.remove(&slot);
         self.clear_parked_slot(slot);
         if slot.0 < self.emitted || slot.0 > MAX_SLOT || self.log.contains_key(&slot) {
@@ -219,8 +226,10 @@ impl Replica {
         let (priority, key) = (proposal.priority, proposal.key);
         self.log.insert(slot, Decision { proposal });
         if !missing.is_empty() {
+            let target = hint.unwrap_or(origin);
             self.note_missing_slot(slot, hint);
-            self.fetch_refs(slot, hint.unwrap_or(origin), &missing);
+            let grace = if defer_fetch { self.fetch_grace(target) } else { 0 };
+            self.fetch_refs_after(slot, target, &missing, grace);
         }
         self.advance_committed();
         self.advance_held();
@@ -246,6 +255,7 @@ impl Replica {
     /// schedule in order.
     pub(super) fn advance_committed(&mut self) {
         let direct = self.proposes_directly();
+        let before = self.committed;
         while let Some(d) = self.log.get(&Slot(self.committed)) {
             let slot = Slot(self.committed);
             if let Some(t) = &mut self.tuner {
@@ -258,6 +268,10 @@ impl Replica {
                 }
             }
             self.committed += 1;
+        }
+        if self.committed > before {
+            self.last_committed_at = Some(self.now);
+            self.catch_up.advanced(self.committed, self.outside());
         }
         if self.schedule.knows(self.me) {
             self.was_member = true;
@@ -299,7 +313,8 @@ impl Replica {
                 if !missing.is_empty() {
                     let target = self.decided_hint(slot).unwrap_or(d.proposal.key.origin);
                     self.note_missing_slot(slot, Some(target));
-                    self.fetch_refs(slot, target, &missing);
+                    let grace = self.fetch_grace(target);
+                    self.fetch_refs_after(slot, target, &missing, grace);
                     break;
                 }
             }

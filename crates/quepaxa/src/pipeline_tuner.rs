@@ -23,7 +23,7 @@
 
 mod window;
 
-use self::window::{PeerReport, PeerTracker, TailWindow, smooth_rtt_u64, smooth_u64, smooth_u128};
+use self::window::{PeerReport, PeerTracker, TailWindow, smooth_u64, smooth_u128};
 use crate::types::{NodeId, Slot, Timestamp};
 
 const MAX_LADDER: usize = 8;
@@ -43,6 +43,8 @@ const SAT_COOLDOWN_NS: u64 = 50_000_000;
 const FLOOR_JUMP_STREAK: u8 = 2;
 /// Consecutive distressed windows at `W > w_floor` required before stepping `W` down.
 const DISTRESS_BACKOFF_STREAK: u8 = 2;
+/// Clean windows required after a distress step-down before `on_saturated` may step `W` up again.
+const DISTRESS_HOLD_WINDOWS: u32 = 2;
 const EARLY_ABORT_LAG_SLACK_NS: u64 = 60_000_000;
 const PROBE_LAG_SLACK_NS: u64 = 40_000_000;
 /// Minimum absolute leader-residence gain required for an upward latency probe (10 ms),
@@ -77,13 +79,16 @@ pub(crate) struct PipelineTuner {
     baseline_score: u64,
     baseline_lag: u64,
     baseline_bpr: u128,
-    smoothed_rtt: u64,
+    /// Propagation RTT baseline (never inflated by distressed/congested windows) used for
+    /// `w_floor` so queuing delay under overload cannot lock `W` at high rungs.
+    min_rtt: u64,
 
     up_backoff: u32,
     down_backoff: u32,
     up_wait: u32,
     down_wait: u32,
     saturation_hold: u32,
+    distress_hold: u32,
     last_sat_step: Option<Timestamp>,
     shift_streak: u8,
     floor_streak: u8,
@@ -115,12 +120,13 @@ impl PipelineTuner {
             baseline_score: 0,
             baseline_lag: 0,
             baseline_bpr: 0,
-            smoothed_rtt: 0,
+            min_rtt: 0,
             up_backoff: 1,
             down_backoff: 1,
             up_wait: 0,
             down_wait: 0,
             saturation_hold: 0,
+            distress_hold: 0,
             last_sat_step: None,
             shift_streak: 0,
             floor_streak: 0,
@@ -148,12 +154,13 @@ impl PipelineTuner {
         self.baseline_score = 0;
         self.baseline_lag = 0;
         self.baseline_bpr = 0;
-        self.smoothed_rtt = 0;
+        self.min_rtt = 0;
         self.up_backoff = 1;
         self.down_backoff = 1;
         self.up_wait = 0;
         self.down_wait = 0;
         self.saturation_hold = 0;
+        self.distress_hold = 0;
         self.last_sat_step = None;
         self.shift_streak = 0;
         self.floor_streak = 0;
@@ -168,8 +175,12 @@ impl PipelineTuner {
     }
 
     /// Called when `entries.cut` hit `max_batch_bytes` with leftover entries while the active
-    /// slot window was full. Steps up at most one rung per `SAT_COOLDOWN_NS` (50 ms).
+    /// slot window was full. Steps up at most one rung per `SAT_COOLDOWN_NS` (50 ms), never
+    /// while distress is active or cooling down after a distress backoff.
     pub(crate) fn on_saturated(&mut self, now: Timestamp) -> Option<u32> {
+        if self.win_distress || self.distress_streak > 0 || self.distress_hold > 0 {
+            return None;
+        }
         self.saturation_hold = SATURATION_HOLD_WINDOWS;
         if let Some(prev) = self.last_sat_step
             && now.0.saturating_sub(prev.0) < SAT_COOLDOWN_NS
@@ -287,31 +298,31 @@ impl PipelineTuner {
     fn finish_window(&mut self, elapsed: u64, slot_rtt_ns: u64, now: Timestamp) -> Option<u32> {
         let score = self.residences.p90();
         let peer_lag = self.peers.max_lag_ns();
+        let distress = self.win_distress;
         let raw_rtt = if slot_rtt_ns > 0 { slot_rtt_ns } else { score.max(1) };
-        self.smoothed_rtt = smooth_rtt_u64(self.smoothed_rtt, raw_rtt).max(1);
-        let bpr = (u128::from(self.win_bytes).saturating_mul(u128::from(self.smoothed_rtt)))
+        if self.min_rtt == 0 || raw_rtt < self.min_rtt {
+            self.min_rtt = raw_rtt.max(1);
+        } else if !distress {
+            // Drift upward very slowly only on clean windows so genuine route changes track
+            // while overload RTT spikes cannot inflate `w_floor`.
+            self.min_rtt = self.min_rtt.saturating_add((raw_rtt - self.min_rtt) / 32).max(1);
+        }
+        let bpr = (u128::from(self.win_bytes).saturating_mul(u128::from(self.min_rtt)))
             / u128::from(elapsed.max(1));
         let target_fill = ((u128::from(self.max_batch_bytes) * 3) / 8).max(64);
         let needed = bpr.div_ceil(target_fill).max(1).min(u128::from(self.max_w)) as u32;
         let w_floor = self.ceil_rung(needed);
-        let distress = self.win_distress;
 
         self.peers.prune(now);
 
-        if w_floor > self.current {
-            self.floor_streak = self.floor_streak.saturating_add(1);
-            if self.floor_streak >= FLOOR_JUMP_STREAK {
-                self.jump_up(w_floor, now);
-                return Some(w_floor);
-            }
-        } else {
-            self.floor_streak = 0;
+        self.distress_streak = if distress { self.distress_streak.saturating_add(1) } else { 0 };
+        if !distress {
+            self.distress_hold = self.distress_hold.saturating_sub(1);
         }
 
-        self.distress_streak = if distress { self.distress_streak.saturating_add(1) } else { 0 };
-
-        // Sustained retransmits or lost leader slots above the demand floor signal pipeline
-        // overload: step down one rung directly instead of getting trapped at high `W`.
+        // Sustained retransmits or lost leader slots above the propagation-RTT demand floor
+        // signal pipeline overload: step down one rung directly instead of getting trapped at
+        // high `W`.
         if matches!(self.mode, Mode::Warmup | Mode::Exploit)
             && self.distress_streak >= DISTRESS_BACKOFF_STREAK
             && self.current > w_floor
@@ -322,6 +333,7 @@ impl PipelineTuner {
             self.mode = Mode::Warmup;
             self.drain_left = old;
             self.saturation_hold = 0;
+            self.distress_hold = DISTRESS_HOLD_WINDOWS;
             self.distress_streak = 0;
             self.floor_streak = 0;
             self.up_backoff = self.up_backoff.saturating_mul(2).clamp(4, MAX_BACKOFF);
@@ -330,6 +342,16 @@ impl PipelineTuner {
             self.shift_streak = 0;
             self.reset_window(now);
             return Some(prev);
+        }
+
+        if !distress && w_floor > self.current {
+            self.floor_streak = self.floor_streak.saturating_add(1);
+            if self.floor_streak >= FLOOR_JUMP_STREAK {
+                self.jump_up(w_floor, now);
+                return Some(w_floor);
+            }
+        } else {
+            self.floor_streak = 0;
         }
 
         let changed = match self.mode {

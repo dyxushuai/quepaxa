@@ -75,7 +75,7 @@ impl Replica {
                 }
                 #[cfg(feature = "model")]
                 self.decided_steps.insert(slot, (p.clone(), req_step));
-                self.learn(slot, p, true, Some(from));
+                self.learn(slot, p, true, Some(from), true);
             }
         }
     }
@@ -268,13 +268,17 @@ impl Replica {
         // Hedging around a target that still talks: one slot at a time, or the hedges contend
         // with its slots and stretch a slowdown they were meant to cover. Entries other
         // followers handed here (as their deputy) are not hedges.
+        let as_leader = self.leads_now() && direct;
         let deputy = self.entries.deputy();
-        let mut cap = if direct || deputy { self.active_window() } else { 1 };
+        let mut cap = if direct || deputy { self.driving_window(as_leader) } else { 1 };
         let hedge = !direct && !deputy && self.leader_talking();
         while (self.proposers.len() as u64) < cap {
             // Nothing to propose: skip the search for a slot, which probes the log per slot
             // and ran on every input.
             if !self.entries.proposable(direct) {
+                break;
+            }
+            if as_leader && self.slot_pace_at().is_some() {
                 break;
             }
             // A batch is cut only for a slot it can take: one cut and left waiting would be
@@ -284,7 +288,7 @@ impl Replica {
             let (seq, saturated) = match self.entries.waiting() {
                 Some(seq) => (seq, false),
                 None => {
-                    let (cut_seq, saturated, skipped_refs) = {
+                    let (cut, saturated, skipped_refs) = {
                         let (content, dedup) = (&self.content, &self.dedup);
                         self.entries.cut(direct, hedge, max, self.now, dedup, |r| {
                             Self::ref_all_committed(content, dedup, r)
@@ -293,10 +297,8 @@ impl Replica {
                     for id in skipped_refs {
                         self.maybe_release_content(id);
                     }
-                    match cut_seq {
-                        Some(seq) => (seq, saturated),
-                        None => break,
-                    }
+                    let Some(seq) = cut else { break };
+                    (seq, saturated)
                 }
             };
             self.next_alloc = slot.0 + 1;
@@ -308,7 +310,7 @@ impl Replica {
                 && let Some(w) = self.tuner.as_mut().and_then(|t| t.on_saturated(self.now))
             {
                 self.apply_tuned_w(w);
-                cap = self.active_window();
+                cap = self.driving_window(as_leader);
             }
         }
     }
@@ -412,10 +414,52 @@ impl Replica {
         }
     }
 
+    /// Active driving window: the tuned `in_flight_slots` while leading (or whenever tuning is
+    /// off), and up to `min(max_in_flight_slots, 8)` when acting as a deputy taking over for a
+    /// silent, slow, or stepped-aside leader so rotation through `ROTATE_AFTER + LAG` slots is
+    /// never throttled to `W = 1`.
+    fn driving_window(&self, as_leader: bool) -> u64 {
+        if as_leader || self.tuner.is_none() { self.active_window() } else { self.window().min(8) }
+    }
+
+    /// When online tuning is active on a multi-member cluster and the leader already has slots
+    /// in flight at `W > 1`, stagger subsequent non-full batches by `request_rtt / W` so slots
+    /// spread across the RTT instead of convoying back-to-back and hiding latency gains from
+    /// the tuner.
+    pub(super) fn slot_pace_at(&self) -> Option<Timestamp> {
+        if self.tuner.is_none()
+            || !self.leads_now()
+            || !self.proposes_directly()
+            || self.schedule.members(Slot(self.committed)).len() <= 1
+        {
+            return None;
+        }
+        let cap = self.active_window();
+        if cap <= 1 || self.proposers.is_empty() || (self.proposers.len() as u64) >= cap {
+            return None;
+        }
+        let max = self.cfg.max_batch_bytes as usize;
+        if !self.entries.proposable(true)
+            || self.entries.waiting().is_some()
+            || self.entries.has_relayed()
+            || self.entries.pending_urgent(max)
+            || self.entries.pending_exceeds(max / 2)
+        {
+            return None;
+        }
+        let pace = self.request_rtt? / cap;
+        if pace == 0 {
+            return None;
+        }
+        let due = self.last_slot_started?.after(pace);
+        (self.now < due).then_some(due)
+    }
+
     /// No longer the leader (an order change took effect): the entries of batches not yet in
     /// a slot go to the new leader, instead of being proposed later in its slots.
     pub(super) fn hand_on_unstarted(&mut self) {
         self.entries.lost_lead(&self.dedup);
+        self.last_slot_started = None;
         if let Some(t) = &mut self.tuner {
             t.reset(1, self.now);
             self.in_flight_slots = 1;
@@ -454,7 +498,7 @@ impl Replica {
     /// leader and hands the entries on.
     fn free_slot(&self) -> Option<Slot> {
         let as_leader = self.leads_now() && self.proposes_directly();
-        let end = self.committed + self.active_window();
+        let end = self.committed + self.driving_window(as_leader);
         // Skip slots already decided by a peer: proposing there loses the slot, re-queues the
         // batch, and blasts RecordRequests across the whole handover window during catch-up.
         let mut s = self.next_alloc.max(self.committed).max(self.catch_up.ahead());
@@ -498,12 +542,16 @@ impl Replica {
                 holders: BTreeMap::new(),
             },
         );
+        if self.leads_now() && self.proposes_directly() {
+            self.last_slot_started = Some(self.now);
+        }
         self.send_requests(slot, false);
     }
 
     /// Undecided slots in the window someone else drives, with when to take them over.
     fn stalled(&self) -> impl Iterator<Item = (Slot, Timestamp)> + '_ {
-        let end = Slot(self.committed + self.active_window());
+        let limit = if self.tuner.is_some() { self.window() } else { self.active_window() };
+        let end = Slot(self.committed + limit);
         self.seen
             .range(..end)
             .filter(|(s, _)| !self.log.contains_key(s) && !self.proposers.contains_key(s))
@@ -516,8 +564,14 @@ impl Replica {
         let hedge = self.entries.forwarded_since().filter_map(|(id, at)| self.hedge_at(id, at)).min();
         // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
         let outside = self.outside();
-        let catch_up =
-            self.catch_up.deadline(self.committed, outside, self.now, self.cfg.retransmit_interval);
+        let catch_up = self.catch_up.deadline_with(
+            self.committed,
+            outside,
+            self.catch_up_window(),
+            self.last_committed_at,
+            self.now,
+            self.cfg.retransmit_interval,
+        );
         resend
             .chain(stall)
             .chain(hedge)
@@ -528,6 +582,7 @@ impl Replica {
             .chain(self.phase.probe_at())
             .chain(self.watch.ack_due.values().copied())
             .chain(self.forward_flush_at())
+            .chain(self.slot_pace_at())
             .chain(self.watch.fwd.due())
             .chain(self.aside_at().filter(|_| !self.watch.aside))
             .chain(self.placement.next_probe)
@@ -588,10 +643,22 @@ impl Replica {
         // is ready.
         let interval = self.cfg.retransmit_interval;
         let outside = self.outside();
-        if let Some(peer) =
-            self.catch_up.retry(self.committed, outside, now, interval, || self.read_catch_up_from())
-        {
-            self.metrics.catch_up_retries += 1;
+        // A voting member's first timer-driven CatchUp after deferring within `catch_up_window()`
+        // or on `Body::Data` is an initial request, not a retry; only timed-out in-flight
+        // requests (and timer-driven outside-reader catch-ups) count as retries.
+        let retrying = self.catch_up.in_flight() || outside;
+        if let Some(peer) = self.catch_up.retry_with(
+            self.committed,
+            outside,
+            self.catch_up_window(),
+            self.last_committed_at,
+            now,
+            interval,
+            || self.read_catch_up_from(),
+        ) {
+            if retrying {
+                self.metrics.catch_up_retries += 1;
+            }
             self.request_catch_up(peer);
         }
         self.fire_follow();

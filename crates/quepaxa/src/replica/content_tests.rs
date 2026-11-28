@@ -531,7 +531,7 @@ fn kept_refs_are_released_when_proposers_forwards_or_staged_items_drop() {
     r.poll_actions(&mut out);
     assert!(r.proposers[&Slot(0)].waiting_content);
     // Slot 0 decides with an inline value instead, removing the waiting proposer.
-    r.learn(Slot(0), proposal(10, 2, 0), false, None);
+    r.learn(Slot(0), proposal(10, 2, 0), false, None, false);
     flood(&mut r, 200);
     assert!(r.content.get(&id_c).is_none(), "sibling ref released when waiting proposer decided elsewhere");
 
@@ -812,4 +812,166 @@ fn staged_forward_defers_fetch_and_signals_liveness_without_acking_seq() {
         .flatten()
         .collect();
     assert_eq!(acked_seqs, alloc::vec![7]);
+}
+
+#[test]
+fn data_and_active_pipeline_lag_do_not_trigger_speculative_catch_up() {
+    let cfg_with_id_and_w = || {
+        let mut c = cfg();
+        c.id = NodeId(2);
+        c.max_in_flight_slots = 4;
+        c.retransmit_interval = 400_000_000;
+        c
+    };
+    let mut rep = Replica::new(cfg_with_id_and_w(), [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(0));
+
+    // A Body::Data arriving on the bulk stream advertising commit_index far ahead records the
+    // peer's progress for timer-driven recovery without triggering an immediate CatchUp.
+    let data_msg = Message {
+        env: Envelope {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            from: NodeId(0),
+            to: NodeId(2),
+            commit_index: 20,
+        },
+        body: Body::Data { id: data_id(0, 0), bytes: content() },
+    };
+    rep.handle(Timestamp(1_000_000), Input::Message(data_msg.encode())).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(rep.metrics().messages_rejected, 0);
+    assert_eq!(rep.catch_up.ahead(), 20, "Body::Data still records peer commit_index");
+    assert!(
+        !sent(&out).iter().any(|o| matches!(decode_msg(&o.bytes).body, Body::CatchUp { .. })),
+        "Body::Data must not trigger immediate speculative CatchUp"
+    );
+    assert_eq!(
+        rep.next_deadline(),
+        Some(Timestamp(401_000_000)),
+        "Body::Data must defer timer-driven CatchUp by retransmit_interval rather than firing at now"
+    );
+    // An unrelated timer tick before retransmit_interval must not fire CatchUp early.
+    rep.handle_timeout(Timestamp(50_000_000)).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert!(
+        !sent(&out).iter().any(|o| matches!(decode_msg(&o.bytes).body, Body::CatchUp { .. })),
+        "unrelated timer before retransmit_interval must not fire deferred Body::Data CatchUp"
+    );
+    // Once retransmit_interval passes without commits advancing, timer-driven CatchUp fires.
+    rep.handle_timeout(Timestamp(401_000_000)).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert!(
+        sent(&out).iter().any(|o| matches!(decode_msg(&o.bytes).body, Body::CatchUp { from: Slot(0) })),
+        "deferred Body::Data CatchUp must fire once retransmit_interval elapses"
+    );
+
+    // On a fresh replica actively committing slot 0 at t=10 ms, hearing commit_index up to
+    // committed + 2 * W (= 9) via a consensus message stays within the active pipeline window.
+    let mut rep = Replica::new(cfg_with_id_and_w(), [], Timestamp(0)).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(0));
+    let p0 = Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(0), incarnation: 1, seq: 0 },
+        value: Bytes::new(),
+    };
+    rep.handle(
+        Timestamp(10_000_000),
+        from_peer(
+            0,
+            2,
+            Body::Entries { first: Slot(0), proposals: alloc::vec![p0.clone()], content: Vec::new() },
+        ),
+    )
+    .unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(10_000_000));
+    assert_eq!(rep.commit_index(), 1);
+
+    let within = Message {
+        env: Envelope {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            from: NodeId(0),
+            to: NodeId(2),
+            commit_index: 9,
+        },
+        body: Body::Decided { slot: Slot(0), priority: p0.priority, key: p0.key },
+    };
+    rep.handle(Timestamp(20_000_000), Input::Message(within.encode())).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(rep.metrics().messages_rejected, 0);
+    assert!(
+        !sent(&out).iter().any(|o| matches!(decode_msg(&o.bytes).body, Body::CatchUp { .. })),
+        "active commits tolerate up to 2 * max_in_flight_slots of peer commit_index lead"
+    );
+
+    // Once quiet past retransmit_interval, CatchUp fires to recover the missed slots.
+    rep.handle_timeout(Timestamp(420_000_000)).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert!(
+        sent(&out).iter().any(|o| matches!(decode_msg(&o.bytes).body, Body::CatchUp { from: Slot(1) })),
+        "stalled replica must request CatchUp after retransmit_interval"
+    );
+}
+
+#[test]
+fn learn_respects_scaled_fetch_grace_for_missing_refs() {
+    let mut c = cfg();
+    c.id = NodeId(2);
+    c.retransmit_interval = 400_000_000;
+    c.hedge_max = 3_000_000_000;
+    let mut rep = Replica::new(c.clone(), [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(0));
+    rep.commit_latency = Some(300_000_000);
+    rep.watch.reply.insert(NodeId(0), 250_000_000);
+
+    // Live Body::Decided referencing missing Data defers Fetch by max(retransmit, 2 * lat) = 600 ms.
+    let p = referencing();
+    rep.handle(
+        Timestamp(1_000_000),
+        from_peer(0, 2, Body::RecordRequest { slot: Slot(0), step: 4, proposal: p.clone() }),
+    )
+    .unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    rep.handle(
+        Timestamp(1_000_000),
+        from_peer(0, 2, Body::Decided { slot: Slot(0), priority: p.priority, key: p.key }),
+    )
+    .unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(
+        rep.metrics().fetches,
+        0,
+        "live Decided must respect fetch_grace instead of fetching immediately"
+    );
+    assert_eq!(rep.earliest_fetch(), Some(Timestamp(601_000_000)));
+
+    // Historical CatchUp Body::Entries missing content fetches immediately (grace = 0),
+    // because the original Data broadcast is no longer in flight.
+    let mut rec = Replica::new(c, [], Timestamp(0)).unwrap();
+    out.clear();
+    rec.poll_actions(&mut out);
+    drain_persists(&mut rec, &mut out, Timestamp(0));
+    rec.commit_latency = Some(300_000_000);
+    rec.watch.reply.insert(NodeId(0), 250_000_000);
+    let entries = Body::Entries { first: Slot(0), proposals: alloc::vec![p], content: Vec::new() };
+    rec.handle(Timestamp(1_000_000), from_peer(0, 2, entries)).unwrap();
+    out.clear();
+    rec.poll_actions(&mut out);
+    assert_eq!(rec.metrics().fetches, 1, "catch-up Body::Entries must fetch missing content immediately");
 }

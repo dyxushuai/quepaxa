@@ -247,3 +247,47 @@ fn control_messages_do_not_trigger_speculative_catch_up() {
         .count();
     assert_eq!(catch_ups, 0, "ForwardAck on a control stream must not trigger speculative CatchUp");
 }
+
+#[test]
+fn forward_coalesce_stays_anchored_to_ack_delay_and_engages_on_cold_start() {
+    let mut r = with_latency(Some(80));
+    r.cfg.retransmit_interval = 400 * MS;
+    r.cfg.inline_batch_bytes = 64;
+    r.cfg.max_batch_bytes = 1024;
+    let mut out = Vec::new();
+
+    // Observe an 80 ms ForwardAck delay, then shrink `watch.reply` to 1 ms via an unrelated
+    // message: coalescing must stay anchored to ack_delay rather than collapsing to 0.
+    r.propose(Timestamp(MS), Bytes::from_static(b"a")).unwrap();
+    r.poll_actions(&mut out);
+    let seq = forward_seqs(&out, 0)[0];
+    r.handle(Timestamp(81 * MS), from_peer(0, 1, Body::ForwardAck { seqs: alloc::vec![seq] })).unwrap();
+    r.poll_actions(&mut out);
+    r.watch.reply.insert(NodeId(0), MS);
+    assert_eq!(r.forward_coalesce(NodeId(0)), 10 * MS, "coalesce stays anchored to ack_delay");
+
+    // Cold-start coalescing: with no reply/ack samples yet, once >=2 forwards are unacked and
+    // pending exceeds inline_batch_bytes, coalescing engages at ack_every/2.
+    let mut cold = with_latency(None);
+    cold.cfg.retransmit_interval = 400 * MS;
+    cold.cfg.inline_batch_bytes = 64;
+    cold.cfg.max_batch_bytes = 1024;
+    assert_eq!(cold.forward_coalesce(NodeId(0)), 0);
+    cold.propose(Timestamp(MS), Bytes::from_static(b"one")).unwrap();
+    cold.poll_actions(&mut out);
+    cold.propose(Timestamp(2 * MS), Bytes::from_static(b"two")).unwrap();
+    cold.poll_actions(&mut out);
+    cold.entries.submit(
+        Timestamp(3 * MS),
+        crate::batch::Item {
+            entry: crate::batch::Entry {
+                origin: NodeId(1),
+                incarnation: cold.incarnation,
+                id: ProposalId(99),
+                payload: Bytes::from(alloc::vec![b'x'; 128]),
+            },
+            kind: crate::batch::Kind::App,
+        },
+    );
+    assert_eq!(cold.forward_coalesce(NodeId(0)), cold.ack_every() / 2);
+}

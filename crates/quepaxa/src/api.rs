@@ -113,9 +113,10 @@ pub struct Config {
     /// it.
     pub inline_batch_bytes: u32,
     /// Per-origin byte budget for unpinned data batches in the content store. When `None`
-    /// (default), sized once from `max_batch_bytes * max_in_flight_slots` (8 MiB at the
+    /// (default), sized once from `2 * max_batch_bytes * max_in_flight_slots` (16 MiB at the
     /// default limits). Set explicitly to size the content store independently of
-    /// `max_in_flight_slots`; at least `max_batch_bytes`. Never shrinks when
+    /// `max_in_flight_slots` (for example, at least twice an application's per-replica
+    /// admission budget); at least `max_batch_bytes`. Never shrinks when
     /// [`crate::Replica::set_in_flight_slots`] lowers active concurrency at runtime.
     pub content_cache_bytes: Option<u32>,
     /// Whether this replica tunes its active `in_flight_slots` online within
@@ -166,7 +167,10 @@ impl Config {
     /// Unpinned content-store byte budget per origin.
     pub(crate) fn content_cache_cap(&self) -> usize {
         self.content_cache_bytes.map_or_else(
-            || (self.max_batch_bytes as usize).saturating_mul(self.max_in_flight_slots as usize),
+            || {
+                (self.max_batch_bytes as usize)
+                    .saturating_mul((self.max_in_flight_slots as usize).saturating_mul(2))
+            },
             |b| b as usize,
         )
     }

@@ -112,6 +112,9 @@ impl Replica {
         }
         self.dedup = state.dedup;
         self.emitted = state.next;
+        if state.next > self.committed {
+            self.last_committed_at = Some(self.now);
+        }
         self.committed = state.next;
         self.held = state.next;
         if self.cfg.placement {

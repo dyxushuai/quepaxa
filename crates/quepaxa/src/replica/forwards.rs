@@ -121,6 +121,11 @@ impl Forwards {
         self.ack_delay.get(&to).copied()
     }
 
+    /// How many forwards to `to` are still awaiting acknowledgement.
+    pub(super) fn unacked_count(&self, to: NodeId) -> usize {
+        self.unacked.values().filter(|u| u.to == to).count()
+    }
+
     /// Whether the latest forward of own entry `id` was acknowledged.
     pub(super) fn is_acked(&self, id: ProposalId) -> bool {
         self.latest.get(&id).is_some_and(|l| l.1)

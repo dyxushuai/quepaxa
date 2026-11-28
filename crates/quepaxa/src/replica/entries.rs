@@ -300,6 +300,11 @@ impl Entries {
         !self.pending.is_empty()
     }
 
+    /// Whether any entry waits in `relayed` (deputy or hedged work).
+    pub(super) fn has_relayed(&self) -> bool {
+        !self.relayed.is_empty()
+    }
+
     /// Whether `pending` holds a control entry or already fills a batch of `limit` bytes.
     pub(super) fn pending_urgent(&self, limit: usize) -> bool {
         let mut bytes = 0usize;
@@ -309,6 +314,18 @@ impl Entries {
             }
             bytes = bytes.saturating_add(batch::piece_weight(p));
             if bytes >= limit {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether `pending` holds more than `limit` bytes of queued pieces.
+    pub(super) fn pending_exceeds(&self, limit: usize) -> bool {
+        let mut bytes = 0usize;
+        for p in &self.pending {
+            bytes = bytes.saturating_add(batch::piece_weight(p));
+            if bytes > limit {
                 return true;
             }
         }
