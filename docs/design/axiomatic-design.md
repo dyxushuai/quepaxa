@@ -30,7 +30,7 @@ TLAPS, Verus and the model checker hold this; keep it that way.
 | Loop | Mechanism | Status |
 |---|---|---|
 | δ ↔ commit latency | δ is four times the smoothed commit latency; hedging contention stretches commit latency | cut for hedged commits (#121); #252 eliminated the WAN cold-start/congestion trigger by coalescing follower forwards, adding a fetch arrival grace with retry backoff, and separating `OutboundClass` (`Control` / `Consensus` / `Bulk`) streams |
-| hedging ↔ rotation | a successful hedge decides a slot with a follower's value, which counts toward rotating the leader; rotation changes whom hedging targets | #258 |
+| hedging ↔ rotation | a successful hedge decides a slot with a follower's value, which counts toward rotating the leader; rotation changes whom hedging targets | cut (#258): batches proposed while hedging around a talking leader carry a hedge flag and are neutral to `Schedule::observe` |
 | W ↔ admission, content store | both budgets were derived from W, so W could not move without them | decoupled (#251): content store (`content_cache_bytes` / `max_in_flight_slots` ceiling) and `kv-tokio` admission (`16 × max_batch_bytes`, `--admission-bytes`) stay fixed when active `in_flight_slots` moves |
 | rotation ↔ placement | rotation's demotions feed placement; placement's orders can be undone by rotation | bounded by exclusions and the Verus placement proof (#199) |
 

@@ -79,7 +79,7 @@ mod tests {
     fn round_trips_after_rotations_and_dedup_activity() {
         let mut schedule = Schedule::new(&members());
         for slot in 0..20 {
-            schedule.observe(Slot(slot), NodeId(2));
+            schedule.observe(Slot(slot), NodeId(2), false);
         }
         let mut dedup = Dedup::default();
         for id in [0, 1, 5, 9] {
@@ -94,7 +94,7 @@ mod tests {
     fn rejects_a_schedule_ahead_of_its_snapshot() {
         let mut schedule = Schedule::new(&members());
         for slot in 0..20 {
-            schedule.observe(Slot(slot), NodeId(2));
+            schedule.observe(Slot(slot), NodeId(2), false);
         }
         let state = |next| CoreState {
             next,

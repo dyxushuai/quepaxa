@@ -150,6 +150,22 @@ impl Replica {
         self.target() == self.me
     }
 
+    /// Whether the current leader has answered recently enough that a non-direct, non-deputy
+    /// proposal is a hedge around a live leader rather than a takeover of a silent one (#258).
+    pub(super) fn leader_talking(&self) -> bool {
+        let leader = self.schedule.routing_order(Slot(self.committed))[0];
+        if leader == self.me || self.watch.suspects.contains_key(&leader) {
+            return false;
+        }
+        if let Some((to, at)) = self.watch.asked
+            && to == leader
+            && self.now.0.saturating_sub(at.0) >= self.hedge_delay()
+        {
+            return false;
+        }
+        self.watch.heard.get(&leader).is_some_and(|&h| self.now.0.saturating_sub(h.0) <= self.busy_delay())
+    }
+
     /// An entry handed over stayed uncommitted: suspect the target and hand everything still
     /// waiting to the next member (or propose it here, if the target is now this replica).
     /// Keep the unanswered forward's timestamp in `suspects` so that if the target was only

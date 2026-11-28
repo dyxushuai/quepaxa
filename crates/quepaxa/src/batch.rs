@@ -19,6 +19,11 @@ const ENTRY_REF: u8 = 3;
 /// The payload of an `ENTRY_REF` item: the batch's length and CRC-32C.
 const REF_PAYLOAD: usize = 8;
 
+/// High bit of the batch item count header: set when a follower proposed the batch while
+/// hedging around a live leader so `Schedule::observe` leaves the miss streak unchanged (#258).
+/// Valid item counts stay far below 2^31 because each encoded item is at least 25 bytes.
+const HEDGE_FLAG: u32 = 1 << 31;
+
 /// One application payload committed in the log, tagged with where it was proposed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "model", derive(Hash))]
@@ -205,6 +210,11 @@ pub(crate) fn encode(items: &[Item]) -> Bytes {
 }
 
 pub(crate) fn encode_pieces(pieces: &[Piece]) -> Bytes {
+    encode_pieces_flagged(pieces, false)
+}
+
+pub(crate) fn encode_pieces_flagged(pieces: &[Piece], hedge: bool) -> Bytes {
+    debug_assert!(pieces.len() < HEDGE_FLAG as usize);
     let wire_len: usize = pieces
         .iter()
         .map(|p| match p {
@@ -213,7 +223,8 @@ pub(crate) fn encode_pieces(pieces: &[Piece]) -> Bytes {
         })
         .sum();
     let mut out = Vec::with_capacity(HEADER + wire_len);
-    out.put_u32_le(pieces.len() as u32);
+    let count = (pieces.len() as u32) | if hedge { HEDGE_FLAG } else { 0 };
+    out.put_u32_le(count);
     for piece in pieces {
         match piece {
             Piece::Entry(i) => put_item(&mut out, i),
@@ -223,13 +234,27 @@ pub(crate) fn encode_pieces(pieces: &[Piece]) -> Bytes {
     Bytes::from(out)
 }
 
+fn read_count(r: &mut Reader<'_>) -> Result<usize, DecodeError> {
+    Ok((r.u32()? & !HEDGE_FLAG) as usize)
+}
+
+/// Whether an encoded slot value was proposed while hedging around a talking leader.
+/// Returns `false` for non-hedged and malformed batches.
+pub(crate) fn is_hedge(buf: &Bytes) -> bool {
+    if buf.len() < HEADER {
+        return false;
+    }
+    let header = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    (header & HEDGE_FLAG) != 0 && decode_pieces(buf).is_ok()
+}
+
 /// The membership changes in an encoded batch, in order: `(key, payload)`. Allocates only
 /// when there is one, so it is cheap on every decided slot. Control entries are always
 /// inline, so well-formed references are skipped; a batch [`decode_pieces`] rejects has none.
 pub(crate) fn changes(buf: &Bytes) -> Vec<((NodeId, u64, ProposalId), Bytes)> {
     let mut found = Vec::new();
     let mut r = Reader::new(buf);
-    let Ok(n) = r.u32() else { return found };
+    let Ok(n) = read_count(&mut r) else { return found };
     for _ in 0..n {
         let (Ok(origin), Ok(incarnation), Ok(id), Ok(kind), Ok(len)) =
             (r.u32(), r.u64(), r.u64(), r.u8(), r.u32())
@@ -267,7 +292,7 @@ pub(crate) fn changes(buf: &Bytes) -> Vec<((NodeId, u64, ProposalId), Bytes)> {
 pub(crate) fn refs(buf: &Bytes) -> Vec<Ref> {
     let mut found = Vec::new();
     let mut r = Reader::new(buf);
-    let Ok(n) = r.u32() else { return found };
+    let Ok(n) = read_count(&mut r) else { return found };
     for _ in 0..n {
         let Ok(hdr) = r.take(25) else { return Vec::new() };
         let origin = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]);
@@ -303,8 +328,9 @@ fn parse_ref(id: DataId, payload: &[u8]) -> Option<Ref> {
 #[cfg(test)]
 pub(crate) fn push_ref(batch: &Bytes, r: Ref) -> Bytes {
     let mut out = batch.to_vec();
-    let n = u32::from_le_bytes([out[0], out[1], out[2], out[3]]) + 1;
-    out[..4].copy_from_slice(&n.to_le_bytes());
+    let header = u32::from_le_bytes([out[0], out[1], out[2], out[3]]);
+    let updated = (header & HEDGE_FLAG) | ((header & !HEDGE_FLAG) + 1);
+    out[..4].copy_from_slice(&updated.to_le_bytes());
     out.put_u32_le(r.id.origin.0);
     out.put_u64_le(r.id.incarnation);
     out.put_u64_le(r.id.seq);
@@ -318,7 +344,7 @@ pub(crate) fn push_ref(batch: &Bytes, r: Ref) -> Bytes {
 /// The pieces (inline items and data-batch references) of an encoded slot value or forward.
 pub(crate) fn decode_pieces(buf: &Bytes) -> Result<Vec<Piece>, DecodeError> {
     let mut r = Reader::new(buf);
-    let n = r.u32()? as usize;
+    let n = read_count(&mut r)?;
     // Each entry takes at least 25 bytes, which bounds the allocation by the input size.
     let mut pieces = Vec::with_capacity(n.min(buf.len() / 25));
     for _ in 0..n {
@@ -362,7 +388,7 @@ pub(crate) fn decode_expanded(
     mut expand: impl FnMut(Ref) -> Result<Vec<Item>, DecodeError>,
 ) -> Result<Vec<Item>, DecodeError> {
     let mut r = Reader::new(buf);
-    let n = r.u32()? as usize;
+    let n = read_count(&mut r)?;
     let mut items = Vec::with_capacity(n.min(buf.len() / 25));
     for _ in 0..n {
         let origin = NodeId(r.u32()?);
@@ -564,6 +590,32 @@ mod tests {
     }
 
     #[test]
+    fn hedged_batches_round_trip_with_zero_overhead_and_flag_checks_framing() {
+        let pieces = vec![
+            Piece::Entry(entry(1, 2, b"\x01\0\0\0\x05\0\0\0")),
+            Piece::Entry(entry(1, 3, b"put a")),
+            Piece::Ref(reference()),
+        ];
+        let plain = encode_pieces(&pieces);
+        let hedged = encode_pieces_flagged(&pieces, true);
+        assert_eq!(hedged.len(), plain.len(), "hedge flag adds no bytes");
+        assert!(!is_hedge(&plain));
+        assert!(is_hedge(&hedged));
+        assert_eq!(decode_pieces(&hedged), Ok(pieces.clone()));
+        assert_eq!(refs(&hedged), vec![reference()]);
+        assert_eq!(changes(&hedged).len(), 1);
+        assert_eq!(decode_expanded(&hedged, |_| Ok(vec![entry(2, 4, b"data")])).map(|v| v.len()), Ok(3));
+        // Data batch content rejects the hedge flag.
+        let app = vec![Piece::Entry(Item { kind: Kind::App, ..entry(1, 1, b"a") })];
+        assert!(decode_content(&encode_pieces_flagged(&app, true)).is_err());
+        // A corrupt batch with bit 31 set is not treated as a hedge.
+        let mut corrupt = hedged.to_vec();
+        corrupt.push(0);
+        assert!(!is_hedge(&Bytes::from(corrupt)));
+        assert!(!is_hedge(&Bytes::from_static(&[0xFF, 0xFF, 0xFF, 0xFF])));
+    }
+
+    #[test]
     fn decode_never_panics() {
         bolero::check!().for_each(|input: &[u8]| {
             let buf = Bytes::copy_from_slice(input);
@@ -580,6 +632,7 @@ mod tests {
                 assert_eq!(found, expected);
             } else {
                 assert!(found.is_empty());
+                assert!(!is_hedge(&buf));
             }
             let _ = decode_content(&buf);
             let _ = changes(&buf);

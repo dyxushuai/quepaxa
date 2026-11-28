@@ -161,8 +161,9 @@ impl Schedule {
         self.history[i].1[0]
     }
 
-    /// Feeds each decided slot exactly once, in slot order, with its value's origin.
-    pub fn observe(&mut self, slot: u64, origin: u32)
+    /// Feeds each decided slot exactly once, in slot order, with its value's origin and
+    /// whether the slot's batch was proposed while hedging around a talking leader.
+    pub fn observe(&mut self, slot: u64, origin: u32, hedge: bool)
         requires
             old(self).inv(), slot <= MAX_SLOT,
             match old(self).fed@ { Some(f) => f < slot, None => true },
@@ -171,6 +172,7 @@ impl Schedule {
             window_kept(old(self).view(), final(self).view(), slot),
             final(self).generation >= old(self).generation,
             final(self).generation == old(self).generation ==> final(self).view() == old(self).view(),
+            hedge ==> final(self).generation == old(self).generation,
     {
         let ghost h0 = self.view();
         proof { self.lemma_fed(slot); }
@@ -181,6 +183,11 @@ impl Schedule {
         }
         if origin == self.leader(slot) {
             self.streak = 0;
+            self.fed = Ghost(Some(slot));
+            proof { lemma_same(h0, slot); }
+            return;
+        }
+        if hedge {
             self.fed = Ghost(Some(slot));
             proof { lemma_same(h0, slot); }
             return;

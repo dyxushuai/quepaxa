@@ -283,13 +283,18 @@ impl Schedule {
         }
     }
 
-    /// Feeds each decided slot exactly once, in slot order, with its value's origin.
-    pub fn observe(&mut self, slot: Slot, origin: NodeId) {
+    /// Feeds each decided slot exactly once, in slot order, with its value's origin and
+    /// whether the batch was proposed while hedging around a talking leader. Hedged slots are
+    /// neutral: they neither advance the miss streak nor reset it (#258).
+    pub fn observe(&mut self, slot: Slot, origin: NodeId, hedge: bool) {
         if slot.0 < self.quiet_until {
             return;
         }
         if origin == self.leader(slot) {
             self.streak = 0;
+            return;
+        }
+        if hedge {
             return;
         }
         self.streak += 1;
@@ -324,7 +329,7 @@ mod tests {
     fn eight_missed_slots_rotate_the_leader_after_the_lag() {
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
         for slot in 0..8 {
-            s.observe(Slot(slot), NodeId(1));
+            s.observe(Slot(slot), NodeId(1), false);
         }
         assert_eq!(s.leader(Slot(7 + LAG - 1)), NodeId(0));
         assert_eq!(s.leader(Slot(7 + LAG)), NodeId(1));
@@ -335,20 +340,40 @@ mod tests {
     fn a_slot_led_by_its_leader_resets_the_streak() {
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
         for slot in 0..7 {
-            s.observe(Slot(slot), NodeId(2));
+            s.observe(Slot(slot), NodeId(2), false);
         }
-        s.observe(Slot(7), NodeId(0));
+        s.observe(Slot(7), NodeId(0), false);
         for slot in 8..15 {
-            s.observe(Slot(slot), NodeId(2));
+            s.observe(Slot(slot), NodeId(2), false);
         }
         assert_eq!(s.leader(Slot(200)), NodeId(0));
+    }
+
+    #[test]
+    fn hedged_slots_do_not_rotate_or_reset_streak() {
+        let mut s = Schedule::new(&ids(&[0, 1, 2]));
+        // Even many consecutive hedged slots leave the leader unchanged.
+        for slot in 0..20 {
+            s.observe(Slot(slot), NodeId(1), true);
+        }
+        assert_eq!(s.leader(Slot(20 + LAG)), NodeId(0));
+        // Interleaved hedges do not reset a real miss streak either.
+        for slot in 20..27 {
+            s.observe(Slot(slot), NodeId(1), false);
+        }
+        for slot in 27..35 {
+            s.observe(Slot(slot), NodeId(2), true);
+        }
+        assert_eq!(s.leader(Slot(35 + LAG)), NodeId(0), "still 7 real misses");
+        s.observe(Slot(35), NodeId(1), false);
+        assert_eq!(s.leader(Slot(35 + LAG)), NodeId(1), "8th real miss rotates");
     }
 
     #[test]
     fn misses_before_a_rotation_takes_effect_do_not_rotate_again() {
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
         for slot in 0..(8 + LAG) {
-            s.observe(Slot(slot), NodeId(2));
+            s.observe(Slot(slot), NodeId(2), false);
         }
         assert_eq!(s.leader(Slot(8 + LAG)), NodeId(1));
     }
@@ -414,7 +439,7 @@ mod tests {
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
         let base = s.generation();
         for slot in 0..8 {
-            s.observe(Slot(slot), NodeId(1));
+            s.observe(Slot(slot), NodeId(1), false);
         }
         assert_eq!(s.generation(), base + 1, "the rotation counts");
         assert_eq!(s.reconfigure(Slot(8 + LAG), base, ids(&[0, 1, 2])), None);
@@ -427,7 +452,7 @@ mod tests {
         // Its proposer computed it before learning that slot, so before the rotation.
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
         for slot in 0..8 {
-            s.observe(Slot(slot), NodeId(1));
+            s.observe(Slot(slot), NodeId(1), false);
         }
         assert_eq!(s.reconfigure(Slot(7), 0, ids(&[2, 0])), None);
         // Not even one carrying the new generation, which no proposer could have known.
@@ -436,7 +461,7 @@ mod tests {
         // Rotations resume once the change after it takes effect, counted from its leader.
         s.reconfigure(Slot(8 + LAG), 1, ids(&[2, 0])).unwrap();
         for slot in (8 + 2 * LAG)..(8 + 2 * LAG + 8) {
-            s.observe(Slot(slot), NodeId(0));
+            s.observe(Slot(slot), NodeId(0), false);
         }
         assert_eq!(s.leader(Slot(8 + 3 * LAG + 7)), NodeId(0));
     }
@@ -477,7 +502,7 @@ mod tests {
     fn old_schedules_are_pruned() {
         let mut s = Schedule::new(&ids(&[0, 1, 2]));
         for slot in 0..10_000 {
-            s.observe(Slot(slot), NodeId(9));
+            s.observe(Slot(slot), NodeId(9), false);
         }
         assert!(s.history.len() <= 2, "{} orders kept", s.history.len());
     }
@@ -522,13 +547,13 @@ mod tests {
     proptest::proptest! {
         // Replicas that observe the same decided prefix agree on every slot's leader.
         #[test]
-        fn same_log_same_leaders(origins in proptest::collection::vec(0u32..3, 0..400)) {
+        fn same_log_same_leaders(slots in proptest::collection::vec((0u32..3, proptest::bool::ANY), 0..400)) {
             let (mut a, mut b) = (Schedule::new(&ids(&[0, 1, 2])), Schedule::new(&ids(&[2, 1, 0])));
-            for (slot, o) in origins.iter().enumerate() {
-                a.observe(Slot(slot as u64), NodeId(*o));
-                b.observe(Slot(slot as u64), NodeId(*o));
+            for (slot, (o, hedge)) in slots.iter().enumerate() {
+                a.observe(Slot(slot as u64), NodeId(*o), *hedge);
+                b.observe(Slot(slot as u64), NodeId(*o), *hedge);
             }
-            for k in 0..(origins.len() as u64 + LAG) {
+            for k in 0..(slots.len() as u64 + LAG) {
                 proptest::prop_assert_eq!(a.leader(Slot(k)), b.leader(Slot(k)));
             }
         }
