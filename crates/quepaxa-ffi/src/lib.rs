@@ -339,12 +339,26 @@ fn with_inner(h: *mut qpx_replica, f: impl FnOnce(&mut qpx_replica) -> i32) -> i
 
 /// A mutating call: refuses while actions are undrained, then queues new actions.
 fn mutate(h: *mut qpx_replica, f: impl FnOnce(&mut Replica) -> Result<(), Error>) -> i32 {
+    mutate_with(h, || Some(()), |r, ()| f(r))
+}
+
+/// Like [`mutate`], but parses caller-supplied slices inside [`with`] so `LAST_ERROR` is
+/// cleared first, invalid/poisoned/undrained handles reject before copying, and a panic during
+/// parsing poisons `h` consistently with `QPX_ERR_PANIC`.
+fn mutate_with<T>(
+    h: *mut qpx_replica,
+    parse: impl FnOnce() -> Option<T>,
+    f: impl FnOnce(&mut Replica, T) -> Result<(), Error>,
+) -> i32 {
     with(h, |h| {
         if !h.drained {
             return QPX_ERR_NOT_DRAINED;
         }
+        let Some(input) = parse() else {
+            return invalid();
+        };
         h.current = None;
-        let rc = match f(&mut h.replica) {
+        let rc = match f(&mut h.replica, input) {
             Ok(()) => QPX_OK,
             Err(e) => code(e),
         };
@@ -486,17 +500,17 @@ pub unsafe extern "C" fn qpx_propose(
     if !valid_mut(out_id) {
         return invalid();
     }
-    let payload = match catch_unwind(AssertUnwindSafe(|| unsafe { bytes_from(payload, len) })) {
-        Ok(Some(b)) => b,
-        Ok(None) => return invalid(),
-        Err(_) => return note(QPX_ERR_PANIC),
-    };
-    mutate(h, |r| {
-        let id = r.propose(Timestamp(now_ns), payload)?;
-        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
-        unsafe { out_id.write(id.0) };
-        Ok(())
-    })
+    mutate_with(
+        h,
+        // SAFETY: guaranteed by the caller.
+        || unsafe { bytes_from(payload, len) },
+        |r, payload| {
+            let id = r.propose(Timestamp(now_ns), payload)?;
+            // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
+            unsafe { out_id.write(id.0) };
+            Ok(())
+        },
+    )
 }
 
 /// Proposes new membership: `members_len` ids at `members`, with `order_len` ids at
@@ -524,21 +538,17 @@ pub unsafe extern "C" fn qpx_propose_reconfiguration(
     if !valid_mut(out_id) {
         return invalid();
     }
-    let parsed = catch_unwind(AssertUnwindSafe(|| {
+    mutate_with(
+        h,
         // SAFETY: guaranteed by the caller.
-        (unsafe { ids_from(members, members_len) }, unsafe { ids_from(leader_order, order_len) })
-    }));
-    let (members, order) = match parsed {
-        Ok((Some(m), Some(o))) => (m, o),
-        Ok(_) => return invalid(),
-        Err(_) => return note(QPX_ERR_PANIC),
-    };
-    mutate(h, |r| {
-        let id = r.propose_reconfiguration(Timestamp(now_ns), members, order)?;
-        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
-        unsafe { out_id.write(id.0) };
-        Ok(())
-    })
+        || Some((unsafe { ids_from(members, members_len) }?, unsafe { ids_from(leader_order, order_len) }?)),
+        |r, (members, order)| {
+            let id = r.propose_reconfiguration(Timestamp(now_ns), members, order)?;
+            // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
+            unsafe { out_id.write(id.0) };
+            Ok(())
+        },
+    )
 }
 
 /// # Safety
@@ -584,12 +594,12 @@ pub unsafe extern "C" fn qpx_handle_message(
     msg: *const u8,
     len: usize,
 ) -> i32 {
-    let msg = match catch_unwind(AssertUnwindSafe(|| unsafe { bytes_from(msg, len) })) {
-        Ok(Some(b)) => b,
-        Ok(None) => return invalid(),
-        Err(_) => return note(QPX_ERR_PANIC),
-    };
-    mutate(h, |r| r.handle(Timestamp(now_ns), Input::Message(msg)))
+    mutate_with(
+        h,
+        // SAFETY: guaranteed by the caller.
+        || unsafe { bytes_from(msg, len) },
+        |r, msg| r.handle(Timestamp(now_ns), Input::Message(msg)),
+    )
 }
 
 /// Reports that every persist up to and including `id` is durable.
@@ -698,12 +708,12 @@ pub unsafe extern "C" fn qpx_compact(
     state: *const u8,
     len: usize,
 ) -> i32 {
-    let state = match catch_unwind(AssertUnwindSafe(|| unsafe { bytes_from(state, len) })) {
-        Ok(Some(b)) => b,
-        Ok(None) => return invalid(),
-        Err(_) => return note(QPX_ERR_PANIC),
-    };
-    mutate(h, |r| r.compact(Timestamp(now_ns), Slot(through), state))
+    mutate_with(
+        h,
+        // SAFETY: guaranteed by the caller.
+        || unsafe { bytes_from(state, len) },
+        |r, state| r.compact(Timestamp(now_ns), Slot(through), state),
+    )
 }
 
 /// Adopts a snapshot covering slots up to `through`; `QPX_IGNORED` if the replica already
@@ -719,16 +729,16 @@ pub unsafe extern "C" fn qpx_install_snapshot(
     state: *const u8,
     len: usize,
 ) -> i32 {
-    let state = match catch_unwind(AssertUnwindSafe(|| unsafe { bytes_from(state, len) })) {
-        Ok(Some(b)) => b,
-        Ok(None) => return invalid(),
-        Err(_) => return note(QPX_ERR_PANIC),
-    };
     let mut adopted = true;
-    let rc = mutate(h, |r| {
-        adopted = r.install_snapshot(Timestamp(now_ns), Slot(through), state)?;
-        Ok(())
-    });
+    let rc = mutate_with(
+        h,
+        // SAFETY: guaranteed by the caller.
+        || unsafe { bytes_from(state, len) },
+        |r, state| {
+            adopted = r.install_snapshot(Timestamp(now_ns), Slot(through), state)?;
+            Ok(())
+        },
+    );
     if rc == QPX_OK && !adopted { QPX_IGNORED } else { rc }
 }
 
@@ -817,7 +827,7 @@ pub unsafe extern "C" fn qpx_metric(h: *mut qpx_replica, metric: u32, out: *mut 
                 return QPX_ERR_INVALID_ARGUMENT;
             }
         };
-        // SAFETY: checked non-null; the caller guarantees it is writable.
+        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
         unsafe { out.write(v) };
         QPX_OK
     })
@@ -881,6 +891,34 @@ mod tests {
         }));
         assert_eq!(with(h, |_| panic!("boom")), QPX_ERR_PANIC);
         assert_eq!(with(h, |_| QPX_OK), QPX_ERR_POISONED);
+        // SAFETY: `h` came from `Box::into_raw` above.
+        unsafe { qpx_replica_free(h) };
+    }
+
+    #[test]
+    fn parse_panic_in_mutate_with_clears_stale_error_and_poisons_handle() {
+        let cfg = Config::new([1; 16], NodeId(0), vec![NodeId(0)], [1; 32]);
+        let mut replica = Replica::new(cfg, [], Timestamp(0)).unwrap();
+        replica.poll_actions(&mut Vec::new());
+        let h = Box::into_raw(Box::new(qpx_replica {
+            replica,
+            queue: VecDeque::new(),
+            current: None,
+            drained: true,
+            poisoned: false,
+        }));
+        // Seed a stale error from an earlier call on this thread.
+        set_last_error("stale error from earlier call");
+        // Invalid input returns invalid argument without poisoning or clearing `drained`.
+        assert_eq!(mutate_with::<()>(h, || None, |_, _| Ok(())), QPX_ERR_INVALID_ARGUMENT);
+        assert_eq!(mutate_with(h, || Some(()), |_, _| Ok(())), QPX_OK);
+
+        // A panic during input parsing must replace stale LAST_ERROR and poison the handle.
+        set_last_error("stale error from earlier call");
+        assert_eq!(mutate_with::<()>(h, || panic!("parse boom"), |_, _| Ok(())), QPX_ERR_PANIC);
+        let msg = LAST_ERROR.with(|e| e.borrow().clone());
+        assert_eq!(msg, "internal panic; handle poisoned");
+        assert_eq!(mutate_with(h, || Some(()), |_, _| Ok(())), QPX_ERR_POISONED);
         // SAFETY: `h` came from `Box::into_raw` above.
         unsafe { qpx_replica_free(h) };
     }

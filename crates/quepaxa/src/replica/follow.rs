@@ -30,9 +30,10 @@ enum Poll {
     Idle,
     /// Waiting on the preferred peer (or the initial startup broadcast).
     Primary,
-    /// Waiting on a periodic alternate-peer health probe; silence or an empty reply leaves
-    /// the preferred peer intact, while actual progress switches to the responder.
-    Alternate,
+    /// Waiting on a periodic alternate-peer health probe; silence or an empty reply from
+    /// that peer leaves the preferred peer intact, while actual progress switches to the
+    /// responder.
+    Alternate(NodeId),
 }
 
 /// Log-following state of an outside replica (observer or pre-join replica).
@@ -97,28 +98,36 @@ impl Follow {
             }
             self.poll = Poll::Idle;
             self.idle_polls = 0;
-        } else {
-            match self.poll {
-                Poll::Primary => {
-                    if self.peer.is_none() {
-                        self.peer = Some(from);
-                    }
-                    self.poll = Poll::Idle;
-                    self.idle_polls = self.idle_polls.saturating_add(1).min(IDLE_PROBE_EVERY);
+            self.next_at = Some(now.after(interval));
+            return;
+        }
+        match self.poll {
+            Poll::Primary if self.peer.is_none() || self.peer == Some(from) => {
+                if self.peer.is_none() {
+                    self.peer = Some(from);
                 }
-                Poll::Alternate => {
-                    // Alternate peer had nothing new either: keep the fastest preferred peer.
-                    self.poll = Poll::Idle;
-                    self.idle_polls = 0;
+                self.poll = Poll::Idle;
+                self.idle_polls = self.idle_polls.saturating_add(1).min(IDLE_PROBE_EVERY);
+                self.next_at = Some(now.after(interval));
+            }
+            Poll::Alternate(target) if from == target => {
+                // Alternate peer had nothing new either: keep the fastest preferred peer.
+                self.poll = Poll::Idle;
+                self.idle_polls = 0;
+                self.next_at = Some(now.after(interval));
+            }
+            Poll::Idle => {
+                if self.peer.is_none() {
+                    self.peer = Some(from);
                 }
-                Poll::Idle => {
-                    if self.peer.is_none() {
-                        self.peer = Some(from);
-                    }
-                }
+                self.next_at = Some(now.after(interval));
+            }
+            Poll::Primary | Poll::Alternate(_) => {
+                // Non-advancing message from an unpolled peer: leave the in-flight poll and its
+                // timeout intact so a silent preferred peer still rotates and a stalled peer
+                // cannot cancel an alternate health probe.
             }
         }
-        self.next_at = Some(now.after(interval));
     }
 
     /// Next poll deadline while outside with a non-zero interval.
@@ -156,14 +165,15 @@ impl Follow {
                         idx = (idx + 1) % peers.len();
                     }
                     self.cursor = (idx + 1) % peers.len();
-                    self.poll = Poll::Alternate;
+                    let target = peers[idx];
+                    self.poll = Poll::Alternate(target);
                     self.idle_polls = 0;
-                    return Some(peers[idx]);
+                    return Some(target);
                 }
                 self.poll = Poll::Primary;
                 Some(p)
             }
-            (Some(p), Poll::Alternate) if peers.contains(&p) => {
+            (Some(p), Poll::Alternate(_)) if peers.contains(&p) => {
                 // Alternate probe timed out; fall back to the preferred peer.
                 self.poll = Poll::Primary;
                 self.idle_polls = 0;
@@ -354,5 +364,42 @@ mod tests {
         assert_eq!(f.deadline(false, 50), None);
         assert_eq!(f.fire(Timestamp(50), 50, false, &PEERS), None);
         assert_eq!(f.deadline(true, 50), None, "stopped once no longer outside");
+    }
+
+    #[test]
+    fn unrelated_empty_message_does_not_cancel_alternate_probe() {
+        let mut f = Follow::default();
+        f.arm(Timestamp(0), 50);
+        f.on_heard(NodeId(0), true, Timestamp(10), 50);
+        let mut now = Timestamp(60);
+        for _ in 0..IDLE_PROBE_EVERY {
+            assert_eq!(f.fire(now, 50, true, &PEERS), Some(NodeId(0)));
+            now = now.after(10);
+            f.on_heard(NodeId(0), false, now, 50);
+            now = now.after(50);
+        }
+        let alt = f.fire(now, 50, true, &PEERS).unwrap();
+        assert_ne!(alt, NodeId(0));
+        // Stalled preferred peer 0 sends a non-advancing message before `alt` responds.
+        now = now.after(5);
+        f.on_heard(NodeId(0), false, now, 50);
+        // `alt` responds with new progress and must still take over as preferred peer.
+        now = now.after(5);
+        f.on_heard(alt, true, now, 50);
+        now = now.after(50);
+        assert_eq!(f.fire(now, 50, true, &PEERS), Some(alt));
+    }
+
+    #[test]
+    fn unrelated_empty_message_does_not_prevent_rotating_off_silent_peer() {
+        let mut f = Follow::default();
+        f.arm(Timestamp(0), 50);
+        f.on_heard(NodeId(0), true, Timestamp(10), 50);
+        assert_eq!(f.fire(Timestamp(60), 50, true, &PEERS), Some(NodeId(0)));
+        // Peer 1 speaks without progress while preferred peer 0 stays silent.
+        f.on_heard(NodeId(1), false, Timestamp(80), 50);
+        // Primary poll deadline stays at 110 and rotates off silent peer 0.
+        assert_eq!(f.deadline(true, 50), Some(Timestamp(110)));
+        assert_eq!(f.fire(Timestamp(110), 50, true, &PEERS), Some(NodeId(1)));
     }
 }

@@ -118,7 +118,7 @@ pub unsafe extern "C" fn qpx_poll(h: *mut qpx_replica, out: *mut qpx_action) -> 
             }
             _ => {}
         }
-        // SAFETY: checked non-null; the caller guarantees it is writable.
+        // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
         unsafe { out.write(v) };
         QPX_OK
     })
@@ -135,7 +135,7 @@ pub unsafe extern "C" fn qpx_action_record(h: *mut qpx_replica, i: usize, out: *
     }
     with(h, |h| match &h.current {
         Some(Action::Persist { records, .. }) if i < records.len() => {
-            // SAFETY: checked non-null; the caller guarantees it is writable.
+            // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
             unsafe { out.write(qpx_bytes::of(&records[i])) };
             QPX_OK
         }
@@ -159,7 +159,7 @@ pub unsafe extern "C" fn qpx_action_then(
     }
     with(h, |h| match &h.current {
         Some(Action::Persist { then, .. }) if i < then.len() => {
-            // SAFETY: checked non-null; the caller guarantees both are writable.
+            // SAFETY: checked non-null and aligned; the caller guarantees both are writable.
             unsafe {
                 to.write(then[i].to.0);
                 out.write(qpx_bytes::of(&then[i].bytes));
@@ -181,7 +181,7 @@ pub unsafe extern "C" fn qpx_action_member(h: *mut qpx_replica, i: usize, out: *
     }
     with(h, |h| match &h.current {
         Some(Action::Reconfigured { members, .. }) if i < members.len() => {
-            // SAFETY: checked non-null; the caller guarantees it is writable.
+            // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
             unsafe { out.write(members[i].0) };
             QPX_OK
         }
@@ -207,7 +207,7 @@ pub unsafe extern "C" fn qpx_action_entry(h: *mut qpx_replica, i: usize, out: *m
                 id: e.id.0,
                 payload: qpx_bytes::of(&e.payload),
             };
-            // SAFETY: checked non-null; the caller guarantees it is writable.
+            // SAFETY: checked non-null and aligned; the caller guarantees it is writable.
             unsafe { out.write(v) };
             QPX_OK
         }
