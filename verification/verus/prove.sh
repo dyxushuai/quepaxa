@@ -128,9 +128,14 @@ bugs=(
   recovery probe-forgets-the-answers           's/Some\(at\) => \*self = Phase::Recovering \{ probe_at: at, answered \},/Some(at) => *self = Phase::Recovering { probe_at: at, answered: Vec::new() },/'
   recovery read-catch-up-stops-below-the-mark  's/if committed < mark \{ Some\(peer\) \} else \{ None \}/if committed < mark \&\& mark - committed > 1 { Some(peer) } else { None }/'
   recovery read-catch-up-asks-a-lower-mark     's/Some\(b\) => answers\[i\]\.1 < answers\[b\]\.1,/Some(b) => true,/'
-  recovery timer-ignores-the-read-mark         's/c\.retry\(committed, outside, now, interval, read_from\)/c.retry(committed, outside, now, interval, None)/'
+  recovery timer-ignores-the-read-mark         's/c\.retry_with\(committed, outside, window, last_committed, now, interval, read_from\)/c.retry_with(committed, outside, window, last_committed, now, interval, None)/'
   recovery page-from-another-peer-moves-it     's/Some\(\(p, _\)\) => p == from,/Some((p, _)) => true,/'
   recovery outside-skips-single-slot-lag       's/if outside \{ self\.ahead > committed \} else /if false { self.ahead > committed } else /'
+  recovery defer-fires-before-interval         '/pub fn deadline_with/,/^    \}/ s/\(None, Some\(t\)\) => after_exec\(t, interval\),/(None, Some(_)) => now,/'
+  recovery data-fires-speculative-catch-up     's/if !outside && is_data \{/if false {/'
+  recovery requested-forgets-to-clear-defer    '/pub fn requested/,/^    \}/ s/^        self\.defer_since = None;$//'
+  recovery advanced-forgets-to-clear-defer     '/pub fn advanced/,/^    \}/ s/^            self\.defer_since = None;$//'
+  recovery outside-delayed-by-defer            '/pub fn deadline_with/,/^    \}/ s/if outside \{/if false {/'
 )
 mkdir -p "$work"
 status=0
