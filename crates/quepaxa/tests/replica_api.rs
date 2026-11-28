@@ -192,11 +192,12 @@ fn drain_and_ack(r: &mut Replica, durable: &mut Vec<Bytes>) -> Vec<Action> {
 
 #[test]
 fn configs_that_would_misbehave_at_runtime_are_rejected() {
-    let bad: [fn(&mut Config); 8] = [
+    let bad: [fn(&mut Config); 9] = [
         |c| (c.hedge_min, c.hedge_max) = (10, 5),
         |c| (c.hedge_min, c.hedge_max) = (0, 0),
         |c| c.max_in_flight_slots = 65,
         |c| c.max_in_flight_slots = 0,
+        |c| c.content_cache_bytes = Some(c.max_batch_bytes - 1),
         |c| c.max_message_bytes = 2 * c.max_batch_bytes,
         |c| c.max_batch_bytes = 63,
         |c| c.max_outstanding_proposals = 0,
@@ -327,4 +328,19 @@ fn a_leader_order_must_list_every_member_once() {
         cfg.leader_order = order.iter().copied().map(NodeId).collect();
         assert!(matches!(Replica::new(cfg, [], T0), Err(Error::InvalidConfig(_))), "{order:?}");
     }
+}
+
+#[test]
+fn set_in_flight_slots_checks_bounds() {
+    let mut cfg = config(&[0, 1, 2]);
+    cfg.max_in_flight_slots = 8;
+    let mut r = Replica::new(cfg, [], T0).unwrap();
+    assert_eq!(r.in_flight_slots(), 8);
+    assert!(matches!(r.set_in_flight_slots(0), Err(Error::InvalidConfig(_))));
+    assert!(matches!(r.set_in_flight_slots(9), Err(Error::InvalidConfig(_))));
+    assert_eq!(r.in_flight_slots(), 8);
+    r.set_in_flight_slots(1).unwrap();
+    assert_eq!(r.in_flight_slots(), 1);
+    r.set_in_flight_slots(8).unwrap();
+    assert_eq!(r.in_flight_slots(), 8);
 }

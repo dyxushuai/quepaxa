@@ -12,7 +12,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `leader_order` | by id | Preferred leaders ([membership](crate::guide::membership)). |
 | `max_batch_bytes` | 1 MiB | Largest encoded batch (one slot). Must be the same on every member. |
 | `max_message_bytes` | 16 MiB | Largest accepted message; at least `2 * max_batch_bytes + 1024`. |
-| `max_in_flight_slots` | 8 | Slots one replica drives at once (pipelining), at most 64. |
+| `max_in_flight_slots` | 8 | Maximum slots one replica drives at once (pipelining), at most 64; active concurrency can be adjusted within `1..=max_in_flight_slots` via [`Replica::set_in_flight_slots`](crate::Replica::set_in_flight_slots). |
 | `max_outstanding_proposals` | 4096 | Local proposals not yet committed before [`Busy`](crate::Error::Busy). |
 | `retransmit_interval` | 50 ms | The shortest wait before an unanswered request is sent again; resends back off from there. |
 | `hedge_min`, `hedge_max` | 20 ms, 1 s | Bounds of the adaptive hedge delay. |
@@ -20,6 +20,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `placement` | off | Move the leader to the member that gives writers the lowest commit latency. Enable it on every member or on none. |
 | `placement_sustain`, `placement_hold` | 3 min, 10 min | How long a gain must last before a move, and how long any order change is left alone. |
 | `inline_batch_bytes` | `1024` | Largest forwarded chunk (bytes, at least 64) sent inline; larger chunks travel directly to every member as data batches and by reference in consensus. Set to `u32::MAX` to keep every chunk inline. Per replica. |
+| `content_cache_bytes` | `None` (`max_batch_bytes × max_in_flight_slots`) | Per-origin byte budget for unpinned data batches in the content store (at least `max_batch_bytes`). Set explicitly to size the store independently of `max_in_flight_slots`; lowering active concurrency at runtime never shrinks it. |
 
 ## Throughput
 

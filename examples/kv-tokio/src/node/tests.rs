@@ -206,8 +206,51 @@ fn writes_past_the_admission_bound_are_refused_busy_until_earlier_ones_commit() 
 }
 
 #[test]
-fn the_admission_bound_is_twice_what_the_slots_carry() {
-    let cfg = quepaxa::Config::new([1; 16], quepaxa::NodeId(0), vec![quepaxa::NodeId(0)], [2; 32]);
-    let carried = u64::from(cfg.max_batch_bytes) * u64::from(cfg.max_in_flight_slots);
-    assert_eq!(admission_bytes(&cfg), 2 * carried);
+fn the_admission_bound_is_independent_of_in_flight_slots() {
+    let default_cfg = quepaxa::Config::new([1; 16], quepaxa::NodeId(0), vec![quepaxa::NodeId(0)], [2; 32]);
+    let expected = 16 * u64::from(default_cfg.max_batch_bytes);
+    assert_eq!(admission_bytes(&default_cfg), expected);
+
+    let mut narrow = default_cfg.clone();
+    narrow.max_in_flight_slots = 1;
+    assert_eq!(admission_bytes(&narrow), expected, "lowering static W must not shrink admission");
+}
+
+#[test]
+fn lowering_in_flight_slots_at_runtime_does_not_shed_admitted_writes() {
+    let dir = std::env::temp_dir().join(format!("kv-tokio-node-lower-w-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let (disk, records) = Disk::open(&dir).unwrap();
+    let mut cfg = quepaxa::Config::new([1; 16], quepaxa::NodeId(0), vec![quepaxa::NodeId(0)], [2; 32]);
+    cfg.max_batch_bytes = 1024;
+    cfg.max_in_flight_slots = 8;
+    let admit = admission_bytes(&cfg);
+    assert_eq!(admit, 16 * 1024);
+    let replica = Replica::new(cfg, records, Timestamp(0)).unwrap();
+    let (events, _) = tmpsc::channel(16);
+    let mut n = Node::new(replica, disk, HashMap::new(), u64::MAX, events);
+    n.admit_up_to(admit);
+    n.drain();
+
+    // Lower W from 8 to 1 at runtime: admitted bytes stay under the independent 16 KiB bound
+    // even past the old W=1 bound (2 * 1024 = 2048 bytes), with zero Busy refusals.
+    n.replica.set_in_flight_slots(1).unwrap();
+    assert_eq!(n.replica.in_flight_slots(), 1);
+    let mut replies = Vec::new();
+    for i in 0..5u8 {
+        let req = Request::Put { key: vec![i], value: vec![b'x'; 600], prev_kv: false };
+        let mut rx = ask(&mut n, Cmd::Write(req));
+        assert!(
+            rx.try_recv().is_err(),
+            "write {i} must be admitted without Busy shedding after lowering W to 1"
+        );
+        replies.push(rx);
+    }
+    assert!(n.admitted_bytes > 2 * 1024, "admitted bytes exceed old W=1 bound without shedding");
+    settle(&mut n);
+    n.apply_now();
+    assert_eq!(n.admitted_bytes, 0);
+    for (i, mut rx) in replies.into_iter().enumerate() {
+        assert!(matches!(rx.try_recv(), Ok(Reply::Done(_))), "write {i} committed cleanly");
+    }
 }

@@ -129,6 +129,9 @@ pub struct Replica {
     fetching: content::Fetching,
 
     // Proposer side.
+    /// Active in-flight slot limit (`1..=cfg.max_in_flight_slots`), movable at runtime
+    /// without shrinking the content store or peer-acceptance windows (#251).
+    in_flight_slots: u32,
     proposers: BTreeMap<Slot, Active>,
     /// Own entries awaiting commit and those handed here, queued, forwarded or batched
     /// (`entries.rs`).
@@ -210,8 +213,7 @@ impl Replica {
         // The largest reservation, and the index of its record.
         let mut reservation: Option<(u64, usize)> = None;
         let mut snapshot: Option<(CoreState, Bytes)> = None;
-        let cap = (cfg.max_batch_bytes as usize).saturating_mul(cfg.max_in_flight_slots as usize);
-        let mut content = Store::new(cap);
+        let mut content = Store::new(cfg.content_cache_cap());
         for (index, bytes) in durable.into_iter().enumerate() {
             match Record::decode(&bytes).map_err(|_| Error::CorruptRecord { index })? {
                 Record::Incarnation(n) => {
@@ -288,6 +290,7 @@ impl Replica {
             .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone());
         let leader = schedule.leader(Slot(floor));
         let entries = entries::Entries::new(cfg.id, incarnation);
+        let in_flight_slots = cfg.max_in_flight_slots;
         let mut r = Self {
             me: cfg.id,
             wire,
@@ -313,6 +316,7 @@ impl Replica {
             dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
             content,
             fetching: content::Fetching::default(),
+            in_flight_slots,
             proposers: BTreeMap::new(),
             entries,
             watch: watch::Watch::default(),
@@ -369,8 +373,15 @@ impl Replica {
         !self.schedule.members(Slot(self.schedule.epoch().1)).contains(&self.me)
     }
 
+    /// Configured maximum window (`cfg.max_in_flight_slots`): bounds peer acceptance,
+    /// reservation horizons and catch-up.
     fn window(&self) -> u64 {
         u64::from(self.cfg.max_in_flight_slots)
+    }
+
+    /// Active driving window (`in_flight_slots`): how many slots this replica drives at once.
+    fn active_window(&self) -> u64 {
+        u64::from(self.in_flight_slots)
     }
 
     // ---- durability gate ----

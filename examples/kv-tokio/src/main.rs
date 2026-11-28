@@ -5,7 +5,7 @@
 //!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
 //!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379] [--retransmit-ms 400] [--hedge-max-ms 3000]
 //!          [--placement on] [--placement-periods 30000,120000] [--max-in-flight-slots 10]
-//!          [--hedge-min-ms 3000] [--inline-batch-bytes 1024]
+//!          [--hedge-min-ms 3000] [--inline-batch-bytes 1024] [--admission-bytes 16777216]
 //! ```
 //!
 //! `--retransmit-ms`, `--hedge-min-ms` and `--hedge-max-ms` set the replica's
@@ -91,6 +91,7 @@ struct Args {
     placement_periods: Option<(u64, u64)>,
     max_in_flight_slots: Option<u32>,
     inline_batch_bytes: Option<u32>,
+    admission_bytes: Option<u64>,
 }
 
 const MILLI: u64 = 1_000_000;
@@ -100,7 +101,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
     let (mut retransmit_ms, mut hedge_max_ms, mut placement) = (None, None, false);
     let (mut placement_periods, mut max_in_flight_slots, mut hedge_min_ms) = (None, None, None);
-    let mut inline_batch_bytes = None;
+    let (mut inline_batch_bytes, mut admission_bytes) = (None, None);
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -156,6 +157,9 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--inline-batch-bytes" => {
                 inline_batch_bytes = Some(value.parse().map_err(|e| format!("--inline-batch-bytes: {e}"))?)
             }
+            "--admission-bytes" => {
+                admission_bytes = Some(value.parse().map_err(|e| format!("--admission-bytes: {e}"))?)
+            }
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -180,6 +184,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         placement_periods,
         max_in_flight_slots,
         inline_batch_bytes,
+        admission_bytes,
     })
 }
 
@@ -470,7 +475,7 @@ async fn main() {
         }
     };
     let cfg = config(&args);
-    let admit = node::admission_bytes(&cfg);
+    let admit = args.admission_bytes.unwrap_or_else(|| node::admission_bytes(&cfg));
     let cluster_id = cfg.cluster_id;
     let (disk, records) = Disk::open(&args.data).expect("open data directory");
     let replica = Replica::new(cfg, records, Timestamp(0)).expect("recover replica");

@@ -673,3 +673,51 @@ fn waking_missing_log_broadcasts_the_newly_held_tip() {
         .collect();
     assert_eq!(decided, [(NodeId(0), 2, Slot(1)), (NodeId(2), 2, Slot(1))]);
 }
+
+#[test]
+fn lowering_in_flight_slots_at_runtime_does_not_evict_content_or_shrink_cap() {
+    let mut c = cfg();
+    c.max_batch_bytes = 256;
+    c.max_in_flight_slots = 4;
+    let mut r = Replica::new(c, [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    drain_persists(&mut r, &mut out, Timestamp(1));
+
+    // Three 200-byte unpinned batches (600 B) fit in the 1024 B store cap, past a W=1 cap (256 B).
+    for seq in 0..3 {
+        assert!(r.content.insert(data_id(1, seq), Bytes::from(alloc::vec![seq as u8; 200])));
+    }
+    r.set_in_flight_slots(1).unwrap();
+    assert_eq!(r.in_flight_slots(), 1);
+    // A fourth 200-byte batch (800 B total <= 1024 B) still triggers zero evictions.
+    assert!(r.content.insert(data_id(1, 3), Bytes::from(alloc::vec![3u8; 200])));
+    for seq in 0..4 {
+        assert!(r.content.get(&data_id(1, seq)).is_some(), "batch {seq} must not be evicted at W=1");
+    }
+
+    // Active driving respects the lowered W=1 even though the store cap stayed 1024 B.
+    r.propose(Timestamp(2), Bytes::from(alloc::vec![b'a'; 180])).unwrap();
+    out.clear();
+    r.poll_actions(&mut out);
+    r.propose(Timestamp(3), Bytes::from(alloc::vec![b'b'; 180])).unwrap();
+    out.clear();
+    r.poll_actions(&mut out);
+    assert_eq!(r.proposers.len(), 1, "active driving must stay within W=1");
+
+    // Sizing content_cache_bytes explicitly also decouples the store when max_in_flight_slots = 1.
+    let mut c_static = cfg();
+    c_static.max_batch_bytes = 256;
+    c_static.max_in_flight_slots = 1;
+    c_static.content_cache_bytes = Some(1024);
+    let mut r_static = Replica::new(c_static, [], Timestamp(0)).unwrap();
+    for seq in 0..4 {
+        assert!(r_static.content.insert(data_id(1, seq), Bytes::from(alloc::vec![seq as u8; 200])));
+    }
+    for seq in 0..4 {
+        assert!(
+            r_static.content.get(&data_id(1, seq)).is_some(),
+            "explicit content_cache_bytes holds batch {seq}"
+        );
+    }
+}

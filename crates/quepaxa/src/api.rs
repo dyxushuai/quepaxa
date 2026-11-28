@@ -51,7 +51,9 @@ pub struct Config {
     /// Upper bound on one encoded network message; larger inputs are dropped unread. Must be
     /// at least `2 * max_batch_bytes + 1024` (a reply can carry two full values).
     pub max_message_bytes: u32,
-    /// How many slots this replica may drive concurrently.
+    /// Maximum number of slots this replica may drive concurrently (at most 64). Active
+    /// concurrency starts here and may be lowered or raised within `1..=max_in_flight_slots`
+    /// at runtime via [`crate::Replica::set_in_flight_slots`].
     pub max_in_flight_slots: u32,
     /// How many local proposals may be pending before [`Error::Busy`].
     pub max_outstanding_proposals: u32,
@@ -110,6 +112,12 @@ pub struct Config {
     /// `1024`; see [`guide::tuning`](crate::guide::tuning) for raising or disabling (`u32::MAX`)
     /// it.
     pub inline_batch_bytes: u32,
+    /// Per-origin byte budget for unpinned data batches in the content store. When `None`
+    /// (default), sized once from `max_batch_bytes * max_in_flight_slots` (8 MiB at the
+    /// default limits). Set explicitly to size the content store independently of
+    /// `max_in_flight_slots`; at least `max_batch_bytes`. Never shrinks when
+    /// [`crate::Replica::set_in_flight_slots`] lowers active concurrency at runtime.
+    pub content_cache_bytes: Option<u32>,
 }
 
 impl Config {
@@ -136,7 +144,16 @@ impl Config {
             placement_sustain: 180_000 * MILLI,
             placement_hold: 600_000 * MILLI,
             inline_batch_bytes: 1024,
+            content_cache_bytes: None,
         }
+    }
+
+    /// Unpinned content-store byte budget per origin.
+    pub(crate) fn content_cache_cap(&self) -> usize {
+        self.content_cache_bytes.map_or_else(
+            || (self.max_batch_bytes as usize).saturating_mul(self.max_in_flight_slots as usize),
+            |b| b as usize,
+        )
     }
 
     /// The leader order in effect: `leader_order`, or the members by id.
@@ -184,6 +201,10 @@ impl Config {
                 "max_message_bytes must hold two full batches plus 1 KiB of framing",
             ),
             (self.inline_batch_bytes >= 64, "inline_batch_bytes must be at least 64"),
+            (
+                self.content_cache_bytes.is_none_or(|b| b >= self.max_batch_bytes),
+                "content_cache_bytes must be at least max_batch_bytes",
+            ),
             (self.max_in_flight_slots > 0, "max_in_flight_slots must be positive"),
             (
                 u64::from(self.max_in_flight_slots) <= crate::schedule::LAG,
