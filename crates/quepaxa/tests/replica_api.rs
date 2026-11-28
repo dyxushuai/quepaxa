@@ -344,3 +344,112 @@ fn set_in_flight_slots_checks_bounds() {
     r.set_in_flight_slots(8).unwrap();
     assert_eq!(r.in_flight_slots(), 8);
 }
+
+#[test]
+fn online_tuner_starts_at_one_and_scales_on_saturation() {
+    let mut cfg = config(&[0]);
+    cfg.max_batch_bytes = 512;
+    cfg.max_message_bytes = 4096;
+    cfg.max_in_flight_slots = 8;
+    cfg.tune_in_flight_slots = true;
+    let mut r = Replica::new(cfg, [], T0).unwrap();
+    assert_eq!(r.in_flight_slots(), 1);
+    assert_eq!(r.metrics().in_flight_slots, 1);
+    assert_eq!(r.metrics().pipeline_adjustments, 0);
+
+    // Drain startup Persist and acknowledge it so the leader can drive slots.
+    let mut actions = Vec::new();
+    r.poll_actions(&mut actions);
+    for a in actions.drain(..) {
+        if let Action::Persist { id, .. } = a {
+            r.handle(T0, Input::Persisted(id)).unwrap();
+        }
+    }
+    r.poll_actions(&mut actions);
+    actions.clear();
+
+    // First proposal fills one batch (~400 bytes), leaving W=1 while slot 0 is in flight.
+    r.propose(T0, Bytes::from(vec![b'a'; 400])).unwrap();
+    r.poll_actions(&mut actions);
+    assert_eq!(r.in_flight_slots(), 1);
+
+    // Queue three more 400-byte proposals while slot 0 is still awaiting Persist, then
+    // acknowledge Persist so slot 0 commits and `drive` cuts full batches with leftover
+    // entries — saturation immediately bumps W above 1.
+    r.propose(T0, Bytes::from(vec![b'b'; 400])).unwrap();
+    r.poll_actions(&mut actions);
+    r.propose(T0, Bytes::from(vec![b'c'; 400])).unwrap();
+    r.poll_actions(&mut actions);
+    r.propose(T0, Bytes::from(vec![b'd'; 400])).unwrap();
+    r.poll_actions(&mut actions);
+    for a in actions.drain(..) {
+        if let Action::Persist { id, .. } = a {
+            r.handle(quepaxa::Timestamp(1_000_000), Input::Persisted(id)).unwrap();
+        }
+    }
+    r.poll_actions(&mut actions);
+    assert!(r.in_flight_slots() >= 2, "saturation should raise W, got {}", r.in_flight_slots());
+    assert_eq!(r.metrics().in_flight_slots, u64::from(r.in_flight_slots()));
+    assert!(r.metrics().pipeline_adjustments >= 1);
+
+    // Manual override updates the metric and anchors the tuner cleanly.
+    r.set_in_flight_slots(4).unwrap();
+    assert_eq!(r.in_flight_slots(), 4);
+    assert_eq!(r.metrics().in_flight_slots, 4);
+}
+
+#[test]
+fn online_tuner_reclaims_down_to_one_after_burst_ends() {
+    let mut cfg = config(&[0]);
+    cfg.max_batch_bytes = 512;
+    cfg.max_message_bytes = 4096;
+    cfg.max_in_flight_slots = 8;
+    cfg.tune_in_flight_slots = true;
+    let mut r = Replica::new(cfg, [], T0).unwrap();
+    let mut actions = Vec::new();
+    let mut now = 0u64;
+    let ms = 1_000_000u64;
+
+    let flush_persist = |r: &mut Replica, actions: &mut Vec<Action>, ts: u64| {
+        r.poll_actions(actions);
+        let pending: Vec<_> = actions
+            .drain(..)
+            .filter_map(|a| match a {
+                Action::Persist { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        for id in pending {
+            r.handle(quepaxa::Timestamp(ts), Input::Persisted(id)).unwrap();
+        }
+        r.poll_actions(actions);
+    };
+
+    // Drain initial startup persist.
+    flush_persist(&mut r, &mut actions, now);
+
+    // Phase 1: three saturated bursts spaced past the 50 ms saturation cooldown raise W >= 4.
+    for _ in 0..3 {
+        now += 60 * ms;
+        for _ in 0..4 {
+            r.propose(quepaxa::Timestamp(now), Bytes::from(vec![b'x'; 400])).unwrap();
+            r.poll_actions(&mut actions);
+        }
+        now += 10 * ms;
+        flush_persist(&mut r, &mut actions, now);
+    }
+    flush_persist(&mut r, &mut actions, now + 10 * ms);
+    assert!(r.in_flight_slots() >= 4, "burst should ramp W >= 4, got {}", r.in_flight_slots());
+
+    // Phase 2: quiet 16-byte load with flat commit latency reclaims W all the way back to 1.
+    for _ in 0..250 {
+        now += 60 * ms;
+        r.propose(quepaxa::Timestamp(now), Bytes::from_static(b"quiet-payload-16")).unwrap();
+        flush_persist(&mut r, &mut actions, now + 10 * ms);
+        if r.in_flight_slots() == 1 {
+            break;
+        }
+    }
+    assert_eq!(r.in_flight_slots(), 1, "tuner must reclaim W to 1 after burst ends");
+    assert_eq!(r.metrics().in_flight_slots, 1);
+}

@@ -171,6 +171,10 @@ impl PieceBuilder {
         self.pieces.is_empty()
     }
 
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
     pub fn take(&mut self) -> Vec<Piece> {
         self.size = HEADER;
         core::mem::take(&mut self.pieces)

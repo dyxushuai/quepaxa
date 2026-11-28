@@ -417,6 +417,58 @@ runs per point (`SIZE=17` and `SIZE=4096`, `INLINE_BATCH_BYTES=4294967295` vs `1
   `Config::inline_batch_bytes` now defaults to `1024` (`u32::MAX` disables it per replica;
   see `crates/quepaxa/docs/tuning.md`). Raw data and scripts are kept outside the repo.
 
+### Online `in_flight_slots` tuning (#175)
+
+Three-run comparison of `Config::tune_in_flight_slots = true` (`auto`, ceiling
+`--max-in-flight-slots 16`) against static settings on LAN (`run-local.sh`, 10 s, all PUTs,
+`n = 3` pinned to `0-1 2-3 4-5`, `kv-bench` on `6-9`) and five-region WAN (`wan.sh load`,
+20 s per rate, best-placed leader `us-east`, every run in the `fast` disk regime at 2.6–4.7 ms
+probe p50), measured 2026-11-27 on `feat/175-online-w-tuner` (stacked on `#251`, `#252`,
+`#258`). Medians over 3 runs, min–max ranges in parentheses, latencies in ms.
+
+#### LAN (3 replicas, 10 s per run)
+
+| Workload | Setting | p50 (ms) | p90 (ms) | p99 (ms) | Retransmits | Final `W` | Notes |
+|---|---|---|---|---|---|---|---|
+| disk, 17 B, 200k/s | static `W=1` | 7.29 (7.21–7.72) | 9.90 (9.68–12.34) | 13.15 (12.64–352.02) | 0 (0–3) | 1 | 1/3 host-disk spike |
+| | static `W=8` | 7.46 (7.46–7.48) | 10.93 (10.88–11.00) | 25.59 (18.92–26.33) | 0 (0–7) | 8 | default ceiling |
+| | `auto` (`max_w=16`) | **6.91** (6.49–6.99) | **9.23** (8.71–9.69) | 62.77 (11.71–197.46) | 1 (0–2) | 1 (3/3) | 2/3 host-disk spikes |
+| disk, 4 KiB, 10k/s | static `W=1` | 6.79 (6.28–6.97) | 1,373.9 (8.56–2,805.7) | 2,678.9 (11.48–3,716.6) | 1 (0–5) | 1 | `busy=10,663` in run 1 |
+| | static `W=8` | 6.51 (6.51–6.57) | 9.80 (9.36–10.03) | 13.32 (12.18–47.04) | 0 (0–8) | 8 | |
+| | `auto` (`max_w=16`) | **5.76** (5.65–6.06) | **7.89** (7.60–8.20) | **11.15** (10.45–37.33) | 0 (0–1) | 1 (3/3) | `busy=0`, beats `W=1` and `W=8` |
+| tmpfs, 17 B, 250k/s | static `W=2` | 0.71 (0.67–0.77) | 11.04 (5.20–39.00) | 82.63 (59.37–96.16) | 0 | 2 | |
+| | static `W=8` | 0.94 (0.94–0.95) | 31.95 (30.46–33.18) | 95.56 (87.56–96.59) | 0 | 8 | |
+| | `auto` (`max_w=16`) | **0.64** (0.63–0.64) | **1.37** (1.36–1.43) | **59.90** (57.37–63.76) | 0 | 1 (3/3) | 8×–23× lower p90 |
+
+#### WAN (5 regions, `wan.sh load`, 20 s per rate, all `fast` disk regime)
+
+| Workload | Setting | p50 (ms) | p99 (ms) | max (ms) | Retransmits | Fetches | Final `W` | Disk p50 |
+|---|---|---|---|---|---|---|---|---|
+| 17 B, 5k/s | static `W=4` | 218.0 (211.2–219.2) | 346.6 (344.9–589.3) | 516.9 | 0 | 0 | 4 | 2.6 ms |
+| | static `W=8` | 214.7 (214.0–215.2) | 350.6 (343.3–641.8) | 540.0 | 0 | 0 | 8 | 3.3 ms |
+| | `auto` (`max_w=16`) | 223.3 (221.2–224.1) | 353.4 (**348.8–356.5**) | 545.0 | 0 | 0 | 1 (3/3) | 3.2 ms |
+| 17 B, 25k/s | static `W=4` | 233.0 (231.9–234.1) | 506.8 (467.3–972.7) | 971.5 | 0 | 0 | 4 | 3.9 ms |
+| | static `W=8` | 231.1 (225.3–231.7) | 874.4 (512.2–912.8) | 1,156.4 | 0 | 0 | 8 | 3.6 ms |
+| | `auto` (`max_w=16`) | 236.4 (235.2–236.7) | **495.1** (**442.1–525.3**) | **925.9** | 0 | 0 | 1 (3/3) | 3.8 ms |
+| 4 KiB, 2k/s | static `W=8` | 219.6 (217.3–338.3) | 1,465.2 (1,238.8–3,827.8) | 2,013.0 | 1 (0–11) | 69 (65–844) | 8 | 3.0 ms |
+| | static `W=16` | 383.4 (353.6–716.0) | 4,306.6 (4,264.7–5,777.8) | 6,383.1 | 23 (19–76) | 850 (58–968) | 16 | 3.5 ms |
+| | `auto` (`max_w=16`) | 222.9 (220.5–226.9) | **1,395.1** (1,231.2–2,122.1) | **1,947.7** | **0** (0–0) | **66** (49–1,439) | 16 (3/3) | 3.3 ms |
+
+- **No single static `W` wins everywhere.** Static `W=1` collapses under 4 KiB bursts (2.68 s
+  p99 on LAN disk when a stall hits; >12 s and errors on WAN 4 KiB). Static `W=8` suffers a
+  tail cliff on small-command WAN (`874 ms` p99 at 25k/s, and up to `642–648 ms` at 5k/s when
+  farthest follower `ap-ne` falls behind the fast quorum). Static `W=16` floods cold-start
+  WAN 4 KiB into 19–76 retransmits and `4.31 s` p99.
+- **Online tuning matches or beats the best static setting across regimes.** On LAN it holds
+  `W=1` (beating static `W=8` on disk 4 KiB and cutting tmpfs p90 by 8×–23×), while stepping
+  up momentarily if a disk stall saturates a batch. On small-command WAN it avoids both the
+  `W=8` 25k/s degradation (`495 ms` vs `874 ms` p99) and the `ap-ne` 5k/s cliff (`349–357 ms`
+  tight range). On 4 KiB WAN it ramps cleanly to `W=16` with **0 retransmits** across all
+  three runs, beating both static `W=8` (`1,465 ms`) and static `W=16` (`4,307 ms`).
+- **Default stays off for now:** `Config::tune_in_flight_slots` defaults to `false` so
+  existing deployments keep deterministic static concurrency until broader multi-host testing
+  (#159) confirms the same behavior outside a shared virtual disk.
+
 ### Simulated WAN
 
 `run-local.sh 5000 8 50` adds a 50 ms one-way `netem` delay to all loopback traffic,

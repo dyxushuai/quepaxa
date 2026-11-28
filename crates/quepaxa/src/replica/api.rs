@@ -58,6 +58,10 @@ impl Replica {
             return Err(Error::InvalidConfig("in_flight_slots must not exceed max_in_flight_slots"));
         }
         self.in_flight_slots = slots;
+        self.metrics.in_flight_slots = u64::from(slots);
+        if let Some(t) = &mut self.tuner {
+            t.reset(slots, self.now);
+        }
         Ok(())
     }
 

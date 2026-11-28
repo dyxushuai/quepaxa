@@ -46,6 +46,12 @@ pub(super) struct LocalBatch {
     /// Its entries were handed on when the replica stepped aside: a lost slot hands back
     /// none of the other members' (#187 D2).
     handed: bool,
+    /// Expanded byte weight of the pieces in this batch (for online `in_flight_slots` tuning).
+    pub(super) weight: u32,
+    /// Earliest arrival timestamp among the pieces cut into this batch.
+    pub(super) enqueued_at: Timestamp,
+    /// Whether this batch was cut while hedging around a talking leader.
+    pub(super) hedge: bool,
 }
 
 /// The place that holds an own entry.
@@ -110,6 +116,8 @@ pub(super) struct Entries {
     incarnation: u64,
     pending: VecDeque<Piece>,
     relayed: VecDeque<Piece>,
+    oldest_pending: Option<Timestamp>,
+    oldest_relayed: Option<Timestamp>,
     forwarded: BTreeMap<ProposalId, (Item, Timestamp)>,
     batches: BTreeMap<u64, LocalBatch>,
     own: BTreeMap<ProposalId, Own>,
@@ -162,6 +170,8 @@ impl Entries {
             incarnation,
             pending: VecDeque::new(),
             relayed: VecDeque::new(),
+            oldest_pending: None,
+            oldest_relayed: None,
             forwarded: BTreeMap::new(),
             batches: BTreeMap::new(),
             own: BTreeMap::new(),
@@ -223,6 +233,13 @@ impl Entries {
         let p = if relayed { self.relayed.pop_front() } else { self.pending.pop_front() }?;
         self.changes -= usize::from(piece_is_change(&p));
         self.foreign -= usize::from(relayed && piece_origin(&p) != self.me);
+        if relayed {
+            if self.relayed.is_empty() {
+                self.oldest_relayed = None;
+            }
+        } else if self.pending.is_empty() {
+            self.oldest_pending = None;
+        }
         Some(p)
     }
 
@@ -342,13 +359,22 @@ impl Entries {
         if is_change(&item) {
             self.changes += 1;
         }
+        if self.pending.is_empty() {
+            self.oldest_pending = Some(now);
+        }
         self.push_pending(Piece::Entry(item));
     }
 
     /// A follower handed pieces (inline entries and references) to this replica: into
     /// `pending` (to hand on, or as the leader) or `relayed` (as a deputy), unless that
     /// queue would exceed `cap`. An own entry among them is a copy.
-    pub(super) fn received(&mut self, pieces: Vec<Piece>, to_pending: bool, cap: usize) -> bool {
+    pub(super) fn received(
+        &mut self,
+        pieces: Vec<Piece>,
+        to_pending: bool,
+        cap: usize,
+        now: Timestamp,
+    ) -> bool {
         #[cfg(feature = "model")]
         {
             let own = pieces.iter().filter(|p| matches!(p, Piece::Entry(i) if self.mine(i)));
@@ -368,8 +394,14 @@ impl Entries {
         }
         self.changes += pieces.iter().filter(|p| piece_is_change(p)).count();
         if to_pending {
+            if self.pending.is_empty() && !pieces.is_empty() {
+                self.oldest_pending = Some(now);
+            }
             self.pending.extend(pieces);
         } else {
+            if self.relayed.is_empty() && !pieces.is_empty() {
+                self.oldest_relayed = Some(now);
+            }
             self.foreign += pieces.iter().filter(|p| piece_origin(p) != self.me).count();
             self.relayed.extend(pieces);
         }
@@ -384,6 +416,7 @@ impl Entries {
             return Vec::new();
         }
         let pieces: Vec<Piece> = self.pending.drain(..).collect();
+        self.oldest_pending = None;
         self.changes -= pieces.iter().filter(|p| piece_is_change(p)).count();
         let (me, inc) = (self.me, self.incarnation);
         for p in &pieces {
@@ -438,21 +471,24 @@ impl Entries {
     /// Cuts the next batch: relayed pieces always, pending ones only when proposing them
     /// directly (`lead`). `hedge` marks batches proposed while hedging around a talking
     /// leader so `Schedule::observe` leaves the miss streak unchanged (#258). Returns the new
-    /// batch sequence (if any) and the data batch ids of any already-committed references
-    /// skipped from the queues.
+    /// batch sequence (if any), whether cutting stopped at `max_bytes` with more pieces
+    /// queued, and the data batch ids of any already-committed references skipped.
     pub(super) fn cut(
         &mut self,
         lead: bool,
         hedge: bool,
         max_bytes: usize,
+        now: Timestamp,
         dedup: &Dedup,
         ref_committed: impl Fn(Ref) -> bool,
-    ) -> (Option<u64>, Vec<DataId>) {
+    ) -> (Option<u64>, bool, Vec<DataId>) {
         let seq = self.next_batch;
         let mut pieces = batch::PieceBuilder::new(max_bytes);
         let mut skipped_refs = Vec::new();
         // `relayed` drains before `pending`: the first `from_relayed` pieces taken came from it.
         let mut from_relayed = 0;
+        let mut saturated = false;
+        let mut enqueued_at: Option<Timestamp> = None;
         loop {
             let relayed = if !self.relayed.is_empty() {
                 true
@@ -464,7 +500,12 @@ impl Entries {
             let queue = if relayed { &self.relayed } else { &self.pending };
             let Some(p) = queue.front() else { break };
             if !pieces.fits(p) {
+                saturated = true;
                 break;
+            }
+            let ts = if relayed { self.oldest_relayed } else { self.oldest_pending };
+            if let Some(ts) = ts {
+                enqueued_at = Some(enqueued_at.map_or(ts, |prev| prev.min(ts)));
             }
             let Some(p) = self.pop(relayed) else { break };
             match &p {
@@ -485,11 +526,13 @@ impl Entries {
             pieces.push(p);
         }
         if pieces.is_empty() {
-            return (None, skipped_refs);
+            return (None, false, skipped_refs);
         }
+        let weight = pieces.size().min(u32::MAX as usize) as u32;
         let items = pieces.take();
         self.batched(&items, from_relayed, seq);
-        (Some(self.new_batch_with(items, hedge)), skipped_refs)
+        let seq = self.new_batch_with(items, hedge, weight, enqueued_at.unwrap_or(now));
+        (Some(seq), saturated, skipped_refs)
     }
 
     /// The own entries among `pieces` (the first `from_relayed` taken from `relayed`, the rest
@@ -534,10 +577,16 @@ impl Entries {
 
     /// A new local batch of `pieces`, not yet in a slot.
     pub(super) fn new_batch(&mut self, pieces: Vec<Piece>) -> u64 {
-        self.new_batch_with(pieces, false)
+        self.new_batch_with(pieces, false, 0, Timestamp(0))
     }
 
-    fn new_batch_with(&mut self, pieces: Vec<Piece>, hedge: bool) -> u64 {
+    fn new_batch_with(
+        &mut self,
+        pieces: Vec<Piece>,
+        hedge: bool,
+        weight: u32,
+        enqueued_at: Timestamp,
+    ) -> u64 {
         let seq = self.next_batch;
         self.next_batch += 1;
         let key = ValueKey { origin: self.me, incarnation: self.incarnation, seq };
@@ -554,7 +603,18 @@ impl Entries {
             }
         }
         let value = batch::encode_pieces_flagged(&pieces, hedge);
-        let b = LocalBatch { key, value, entries: ids, refs, slot: None, changes, handed: false };
+        let b = LocalBatch {
+            key,
+            value,
+            entries: ids,
+            refs,
+            slot: None,
+            changes,
+            handed: false,
+            weight,
+            enqueued_at,
+            hedge,
+        };
         self.insert_batch(seq, b);
         seq
     }
@@ -574,9 +634,13 @@ impl Entries {
         self.leave(id)
     }
 
-    /// Own batch `seq` was decided and applied; returns the references it held.
-    pub(super) fn applied(&mut self, seq: u64) -> Vec<Ref> {
-        self.remove_batch(seq).map_or_else(Vec::new, |b| b.refs)
+    /// Own batch `seq` was decided and applied; returns its references and `(weight,
+    /// enqueued_at, hedge)` metadata if the batch was still tracked.
+    pub(super) fn applied(&mut self, seq: u64) -> (Vec<Ref>, Option<(u32, Timestamp, bool)>) {
+        match self.remove_batch(seq) {
+            Some(b) => (b.refs, Some((b.weight, b.enqueued_at, b.hedge))),
+            None => (Vec::new(), None),
+        }
     }
 
     /// Entries committed: a batch waiting for a slot may hold nothing else.

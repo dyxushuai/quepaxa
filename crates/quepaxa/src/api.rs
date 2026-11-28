@@ -118,6 +118,12 @@ pub struct Config {
     /// `max_in_flight_slots`; at least `max_batch_bytes`. Never shrinks when
     /// [`crate::Replica::set_in_flight_slots`] lowers active concurrency at runtime.
     pub content_cache_bytes: Option<u32>,
+    /// Whether this replica tunes its active `in_flight_slots` online within
+    /// `1..=max_in_flight_slots` while leading (#175). Starts at `1` and adjusts across a
+    /// power-of-two ladder using batch-cap saturation, demand floor, and cluster tail
+    /// latency (leader residence plus live follower lag). Local to the leader: members may
+    /// differ. Off by default.
+    pub tune_in_flight_slots: bool,
 }
 
 impl Config {
@@ -145,6 +151,7 @@ impl Config {
             placement_hold: 600_000 * MILLI,
             inline_batch_bytes: 1024,
             content_cache_bytes: None,
+            tune_in_flight_slots: false,
         }
     }
 
@@ -441,6 +448,10 @@ pub struct Metrics {
     pub fetches_served: u64,
     /// Record requests held back until the content they reference arrived.
     pub parked_requests: u64,
+    /// Gauge: active in-flight slot limit (`1..=Config::max_in_flight_slots`).
+    pub in_flight_slots: u64,
+    /// Times the online pipeline tuner changed `in_flight_slots`.
+    pub pipeline_adjustments: u64,
 }
 
 /// One member of the epoch in force as this replica sees it, from

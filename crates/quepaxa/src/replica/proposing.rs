@@ -238,7 +238,7 @@ impl Replica {
         }
         let cap =
             self.cfg.max_outstanding_proposals as usize * self.schedule.members(Slot(self.committed)).len();
-        if self.entries.received(pieces, to_pending, cap) {
+        if self.entries.received(pieces, to_pending, cap, self.now) {
             for id in refs {
                 self.content.keep(id);
             }
@@ -269,7 +269,7 @@ impl Replica {
         // with its slots and stretch a slowdown they were meant to cover. Entries other
         // followers handed here (as their deputy) are not hedges.
         let deputy = self.entries.deputy();
-        let cap = if direct || deputy { self.active_window() } else { 1 };
+        let mut cap = if direct || deputy { self.active_window() } else { 1 };
         let hedge = !direct && !deputy && self.leader_talking();
         while (self.proposers.len() as u64) < cap {
             // Nothing to propose: skip the search for a slot, which probes the log per slot
@@ -281,25 +281,35 @@ impl Replica {
             // proposed later in someone else's slots.
             let Some(slot) = self.free_slot() else { break };
             let max = self.cfg.max_batch_bytes as usize;
-            let seq = match self.entries.waiting() {
-                Some(seq) => seq,
+            let (seq, saturated) = match self.entries.waiting() {
+                Some(seq) => (seq, false),
                 None => {
-                    let (cut_seq, skipped_refs) = {
+                    let (cut_seq, saturated, skipped_refs) = {
                         let (content, dedup) = (&self.content, &self.dedup);
-                        self.entries
-                            .cut(direct, hedge, max, dedup, |r| Self::ref_all_committed(content, dedup, r))
+                        self.entries.cut(direct, hedge, max, self.now, dedup, |r| {
+                            Self::ref_all_committed(content, dedup, r)
+                        })
                     };
                     for id in skipped_refs {
                         self.maybe_release_content(id);
                     }
                     match cut_seq {
-                        Some(seq) => seq,
+                        Some(seq) => (seq, saturated),
                         None => break,
                     }
                 }
             };
             self.next_alloc = slot.0 + 1;
             self.start(slot, seq);
+            if saturated
+                && direct
+                && !hedge
+                && (self.proposers.len() as u64) >= cap
+                && let Some(w) = self.tuner.as_mut().and_then(|t| t.on_saturated(self.now))
+            {
+                self.apply_tuned_w(w);
+                cap = self.active_window();
+            }
         }
     }
 
@@ -406,6 +416,11 @@ impl Replica {
     /// a slot go to the new leader, instead of being proposed later in its slots.
     pub(super) fn hand_on_unstarted(&mut self) {
         self.entries.lost_lead(&self.dedup);
+        if let Some(t) = &mut self.tuner {
+            t.reset(1, self.now);
+            self.in_flight_slots = 1;
+            self.metrics.in_flight_slots = 1;
+        }
     }
 
     /// A local batch lost its slot. The leader, or a follower that suspects it (`watch.rs`),
@@ -420,6 +435,9 @@ impl Replica {
     pub(super) fn lost_slot(&mut self, seq: u64, winner: NodeId, started: Timestamp) {
         if self.proposes_directly() {
             self.entries.lost_slot_kept(seq);
+            if let Some(w) = self.tuner.as_mut().and_then(|t| t.on_distress(self.now)) {
+                self.apply_tuned_w(w);
+            }
             return;
         }
         let deciding = winner == self.target() && self.watch.progressed > started;
@@ -538,6 +556,11 @@ impl Replica {
             .collect();
         for slot in due {
             self.metrics.retransmits += 1;
+            if self.leads_now()
+                && let Some(w) = self.tuner.as_mut().and_then(|t| t.on_distress(now))
+            {
+                self.apply_tuned_w(w);
+            }
             self.send_requests(slot, true);
         }
         self.resend_forwards();

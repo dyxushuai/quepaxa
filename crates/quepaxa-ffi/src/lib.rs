@@ -715,6 +715,10 @@ pub const QPX_METRIC_FETCH_RETRIES: u32 = 18;
 pub const QPX_METRIC_FETCHES_SERVED: u32 = 19;
 /// Record requests held back until referenced content arrived (ABI 0.11).
 pub const QPX_METRIC_PARKED_REQUESTS: u32 = 20;
+/// Gauge: active in-flight slot limit (ABI 0.12).
+pub const QPX_METRIC_IN_FLIGHT_SLOTS: u32 = 21;
+/// Times the online pipeline tuner adjusted `in_flight_slots` (ABI 0.12).
+pub const QPX_METRIC_PIPELINE_ADJUSTMENTS: u32 = 22;
 
 /// Reads counter or gauge `metric` (`QPX_METRIC_*`, see the Rust `Metrics`) into `out`; an
 /// unknown metric is `QPX_ERR_INVALID_ARGUMENT`.
@@ -749,6 +753,8 @@ pub unsafe extern "C" fn qpx_metric(h: *mut qpx_replica, metric: u32, out: *mut 
             QPX_METRIC_FETCH_RETRIES => m.fetch_retries,
             QPX_METRIC_FETCHES_SERVED => m.fetches_served,
             QPX_METRIC_PARKED_REQUESTS => m.parked_requests,
+            QPX_METRIC_IN_FLIGHT_SLOTS => m.in_flight_slots,
+            QPX_METRIC_PIPELINE_ADJUSTMENTS => m.pipeline_adjustments,
             _ => {
                 set_last_error(&format!("unknown metric {metric}"));
                 return QPX_ERR_INVALID_ARGUMENT;

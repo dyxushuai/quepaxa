@@ -39,6 +39,8 @@ pub const QPX_CONFIG_PLACEMENT_HOLD_NS: u32 = 10;
 /// Largest forwarded chunk that travels inline, bytes (`u32`, at least 64; default `u32::MAX`
 /// off). Larger chunks travel by reference as data batches (ABI 0.11).
 pub const QPX_CONFIG_INLINE_BATCH_BYTES: u32 = 11;
+/// Online `in_flight_slots` tuning while leading: 1 on, 0 off (the default) (ABI 0.12).
+pub const QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS: u32 = 12;
 
 /// Creates a configuration with default settings: `cluster_id` (16 bytes; messages from
 /// other clusters are dropped), this replica's `id`, the `members_len` configured members at
@@ -123,6 +125,11 @@ pub unsafe extern "C" fn qpx_config_set(cfg: *mut qpx_config, option: u32, value
             true
         }
         QPX_CONFIG_INLINE_BATCH_BYTES => narrow(&mut c.inline_batch_bytes, value),
+        QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS if value <= 1 => {
+            c.tune_in_flight_slots = value == 1;
+            true
+        }
+        QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS => false,
         _ => {
             set_last_error(&format!("unknown config option {option}"));
             return QPX_ERR_INVALID_ARGUMENT;

@@ -200,6 +200,12 @@
 // Record requests held back until referenced content arrived (ABI 0.11).
 #define QPX_METRIC_PARKED_REQUESTS 20
 
+// Gauge: active in-flight slot limit (ABI 0.12).
+#define QPX_METRIC_IN_FLIGHT_SLOTS 21
+
+// Times the online pipeline tuner adjusted `in_flight_slots` (ABI 0.12).
+#define QPX_METRIC_PIPELINE_ADJUSTMENTS 22
+
 // Largest batch of entries per slot, bytes (`u32`).
 #define QPX_CONFIG_MAX_BATCH_BYTES 1
 
@@ -235,6 +241,9 @@
 // Largest forwarded chunk that travels inline, bytes (`u32`, at least 64; default `u32::MAX`
 // off). Larger chunks travel by reference as data batches (ABI 0.11).
 #define QPX_CONFIG_INLINE_BATCH_BYTES 11
+
+// Online `in_flight_slots` tuning while leading: 1 on, 0 off (the default) (ABI 0.12).
+#define QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS 12
 
 // Replica configuration: create it with `qpx_config_new`, adjust it with `qpx_config_set`
 // and `qpx_config_set_leader_order`, pass it to `qpx_replica_new` (which copies it), and
