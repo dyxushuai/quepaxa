@@ -864,6 +864,7 @@ impl Replica {
             self.maybe_release_content(id);
         }
         self.content.raise_floor(next);
+        self.content.prune_evicted(|origin| self.schedule.knows(origin));
         self.release_committed_own_data();
     }
 

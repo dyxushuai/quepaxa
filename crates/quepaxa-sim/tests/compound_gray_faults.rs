@@ -45,6 +45,21 @@ fn total_moves(r: &Report) -> u64 {
     r.metrics.iter().map(|m| m.placement_moves).sum()
 }
 
+fn assert_loops_engaged(seed: u64, cfg: &SimConfig, r: &Report) {
+    let data_sent: u64 = r.metrics.iter().map(|m| m.data_sent).sum();
+    let fetches: u64 = r.metrics.iter().map(|m| m.fetches).sum();
+    let mitigated: u64 = r.metrics.iter().map(|m| m.hedged + m.stepped_aside).sum();
+    let max_w: u64 = r.metrics.iter().take(cfg.nodes).map(|m| m.in_flight_slots).max().unwrap_or(0);
+    assert!(data_sent > 0, "seed {seed}: referenced-batch Data path was never exercised");
+    assert!(fetches > 0, "seed {seed}: Fetch path was never exercised under compound faults");
+    assert!(mitigated > 0, "seed {seed}: neither hedging nor step-aside engaged under slow/stalled disk");
+    assert!(
+        max_w > 1,
+        "seed {seed}: PipelineTuner stayed pinned at W=1 on all voters after heal: {:?}",
+        r.metrics.iter().take(cfg.nodes).map(|m| m.in_flight_slots).collect::<Vec<_>>()
+    );
+}
+
 fn assert_clean_convergence(seed: u64, cfg: &SimConfig, r: &Report) {
     assert!(r.slots > 0 && r.entries > 0, "seed {seed}: no progress: {r:?}");
     assert_eq!(
@@ -108,6 +123,7 @@ fn lan_slow_disk_packet_loss_and_burst_load_converge_with_all_loops() {
         };
         let r = Sim::new(cfg.clone()).run().unwrap_or_else(|e| panic!("{e}"));
         assert_clean_convergence(seed, &cfg, &r);
+        assert_loops_engaged(seed, &cfg, &r);
         assert!(r.reads > 10, "seed {seed}: reads must keep completing under compound gray fault");
     }
 }
@@ -146,10 +162,11 @@ fn wan_compound_gray_fault_converges_without_placement_or_tuner_oscillation() {
         };
         let r = Sim::new(cfg.clone()).run().unwrap_or_else(|e| panic!("{e}"));
         assert_clean_convergence(seed, &cfg, &r);
+        assert_loops_engaged(seed, &cfg, &r);
+        let moves = total_moves(&r);
         assert!(
-            total_moves(&r) <= 4,
-            "seed {seed}: placement oscillated under compound gray fault (moves={})",
-            total_moves(&r)
+            (1..=4).contains(&moves),
+            "seed {seed}: placement should move out of ap-ne without oscillating (moves={moves})"
         );
     }
 }
@@ -178,12 +195,13 @@ fn disk_stall_loss_burst_and_compaction_converge_with_tuner_and_fetching() {
             tune_in_flight_slots: true,
             compact_every: Some(32),
             payload_bytes: Some((512, 1536)),
-            propose_schedule: Some(vec![(0, 60), (1_000, 450), (3_000, 60)]),
-            fault_phase_ms: 5_000,
+            propose_schedule: Some(vec![(0, 60), (1_000, 450), (3_000, 60), (4_000, 450)]),
+            fault_phase_ms: 5_500,
             heal_budget_ms: 60_000,
             ..SimConfig::hostile(3, seed)
         };
         let r = Sim::new(cfg.clone()).run().unwrap_or_else(|e| panic!("{e}"));
         assert_clean_convergence(seed, &cfg, &r);
+        assert_loops_engaged(seed, &cfg, &r);
     }
 }

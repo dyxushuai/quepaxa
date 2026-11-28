@@ -75,6 +75,11 @@ impl Store {
         self.evicted.get(&id.origin).is_some_and(|&(inc, seq)| (id.incarnation, id.seq) <= (inc, seq))
     }
 
+    /// Drops eviction marks for origins no longer in any active epoch (FR7 bounded memory).
+    pub fn prune_evicted(&mut self, mut keep: impl FnMut(NodeId) -> bool) {
+        self.evicted.retain(|&origin, _| keep(origin) || self.loose.contains_key(&origin));
+    }
+
     /// The content of batch `id`, if held.
     pub fn get(&self, id: &DataId) -> Option<&Bytes> {
         self.batches.get(id).map(|h| &h.bytes)
