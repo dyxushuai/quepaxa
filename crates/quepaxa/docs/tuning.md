@@ -13,6 +13,7 @@ and returns [`Error::InvalidConfig`](crate::Error::InvalidConfig) with the reaso
 | `max_batch_bytes` | 1 MiB | Largest encoded batch (one slot). Must be the same on every member. |
 | `max_message_bytes` | 16 MiB | Largest accepted message; at least `2 * max_batch_bytes + 1024`. |
 | `max_in_flight_slots` | 8 | Maximum slots one replica drives at once (pipelining), at most 64; active concurrency can be adjusted within `1..=max_in_flight_slots` via [`Replica::set_in_flight_slots`](crate::Replica::set_in_flight_slots). |
+| `tune_in_flight_slots` | off | Adapt active `in_flight_slots` online within `1..=max_in_flight_slots` while leading, using batch saturation, smoothed bytes-per-RTT, leader slot residence, and live follower commit lag (`#175`). |
 | `max_outstanding_proposals` | 4096 | Local proposals not yet committed before [`Busy`](crate::Error::Busy). |
 | `retransmit_interval` | 50 ms | The shortest wait before an unanswered request is sent again; resends back off from there. |
 | `hedge_min`, `hedge_max` | 20 ms, 1 s | Bounds of the adaptive hedge delay. |
@@ -36,6 +37,18 @@ instead of failing them.
 On disk, latency is a few `fsync`s per commit and throughput depends on how many writes
 each `fsync` carries: write on a dedicated thread and acknowledge in groups
 ([driving](crate::guide::driving)).
+
+### Online `in_flight_slots` tuning (`tune_in_flight_slots`)
+
+With `tune_in_flight_slots` enabled (off by default; `--tune-in-flight-slots on` in
+`kv-tokio`), the leader adapts its active concurrency over a power-of-two ladder within
+`1..=max_in_flight_slots` without changing safety or memory budgets (`content_cache_bytes`
+stays sized by `max_in_flight_slots`). It starts at `1`, steps up one rung per 50 ms on
+batch saturation, holds a smoothed bytes-per-RTT demand floor, and explores adjacent rungs
+only when leader p90 residence improves by at least `max(8%, 10 ms)` without retransmits or
+follower commit-lag regression. When load drops or distress persists above the demand floor,
+it steps `W` back down; losing leadership resets it. See `docs/benchmarks.md` ("Online
+in-flight slots tuning (#175)") for LAN and WAN measurements.
 
 ### Batch references (`inline_batch_bytes`)
 
@@ -130,7 +143,10 @@ not snapshotting.
 
 Where the leader is and why: the `epoch` and `leader_position` gauges give the epoch in
 force and this replica's place in the leader order (0: it leads); `suspicions`,
-`stepped_aside` and `placement_moves` count why the leader moved. The share of slots
+`stepped_aside` and `placement_moves` count why the leader moved. Active pipeline concurrency
+is reported in `in_flight_slots`, and runtime changes (from `tune_in_flight_slots` or
+[`Replica::set_in_flight_slots`](crate::Replica::set_in_flight_slots)) in
+`pipeline_adjustments`. The share of slots
 decided on the fast path is `fast_path_decisions` over `slots_decided`.
 [`Replica::members`](crate::Replica::members) lists the members in force in leader order,
 with each one's measured round trip (with `placement`), the commit index its latest

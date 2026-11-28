@@ -489,7 +489,7 @@ impl Replica {
                     }
                 }
             }
-            if self.entries.received(live_pieces, pf.to_pending, cap) {
+            if self.entries.received(live_pieces, pf.to_pending, cap, self.now) {
                 for id in live_refs {
                     self.content.keep(id);
                 }

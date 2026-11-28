@@ -546,7 +546,7 @@ fn kept_refs_are_released_when_proposers_forwards_or_staged_items_drop() {
     let (id_e, bytes_e, ref_e) = make_data(4);
     rf_node.content.insert(id_e, bytes_e);
     rf_node.content.keep(id_e);
-    rf_node.entries.received(alloc::vec![Piece::Ref(ref_e)], true, 16);
+    rf_node.entries.received(alloc::vec![Piece::Ref(ref_e)], true, 16, Timestamp(0));
     rf_node.drive();
     flood(&mut rf_node, 300);
     assert!(rf_node.content.get(&id_e).is_none(), "routed ref released after forward_pending");

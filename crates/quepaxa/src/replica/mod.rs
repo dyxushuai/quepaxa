@@ -132,6 +132,8 @@ pub struct Replica {
     /// Active in-flight slot limit (`1..=cfg.max_in_flight_slots`), movable at runtime
     /// without shrinking the content store or peer-acceptance windows (#251).
     in_flight_slots: u32,
+    /// Optional online tuner adjusting `in_flight_slots` while leading (#175).
+    tuner: Option<crate::pipeline_tuner::PipelineTuner>,
     proposers: BTreeMap<Slot, Active>,
     /// Own entries awaiting commit and those handed here, queued, forwarded or batched
     /// (`entries.rs`).
@@ -290,7 +292,11 @@ impl Replica {
             .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone());
         let leader = schedule.leader(Slot(floor));
         let entries = entries::Entries::new(cfg.id, incarnation);
-        let in_flight_slots = cfg.max_in_flight_slots;
+        let tuner = cfg.tune_in_flight_slots.then(|| {
+            crate::pipeline_tuner::PipelineTuner::new(cfg.max_in_flight_slots, cfg.max_batch_bytes, now)
+        });
+        let in_flight_slots = tuner.as_ref().map_or(cfg.max_in_flight_slots, |t| t.current());
+        let metrics = Metrics { in_flight_slots: u64::from(in_flight_slots), ..Metrics::default() };
         let mut r = Self {
             me: cfg.id,
             wire,
@@ -301,7 +307,7 @@ impl Replica {
             incarnation,
             now,
             phase: recovery::Phase::start(incarnation > 1, now),
-            metrics: Metrics::default(),
+            metrics,
             gate: Gate::new(Record::Incarnation(incarnation).encode()),
             actions: Vec::new(),
             inbox: VecDeque::new(),
@@ -317,6 +323,7 @@ impl Replica {
             content,
             fetching: content::Fetching::default(),
             in_flight_slots,
+            tuner,
             proposers: BTreeMap::new(),
             entries,
             watch: watch::Watch::default(),
@@ -382,6 +389,14 @@ impl Replica {
     /// Active driving window (`in_flight_slots`): how many slots this replica drives at once.
     fn active_window(&self) -> u64 {
         u64::from(self.in_flight_slots)
+    }
+
+    pub(super) fn apply_tuned_w(&mut self, w: u32) {
+        if w != self.in_flight_slots {
+            self.in_flight_slots = w;
+            self.metrics.in_flight_slots = u64::from(w);
+            self.metrics.pipeline_adjustments += 1;
+        }
     }
 
     // ---- durability gate ----

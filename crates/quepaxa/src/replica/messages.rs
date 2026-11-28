@@ -63,6 +63,29 @@ impl Replica {
         }
         self.heard_from(from);
         self.watch.committed.insert(from, msg.env.commit_index);
+        if self.tuner.is_some()
+            && self.leads_now()
+            && !matches!(
+                msg.body,
+                Body::ForwardAck { .. }
+                    | Body::RttProbe { .. }
+                    | Body::RttReply { .. }
+                    | Body::CatchUp { .. }
+                    | Body::Entries { .. }
+            )
+            && self.schedule.members(Slot(self.committed)).contains(&from)
+        {
+            let silence_limit = self
+                .request_rtt
+                .unwrap_or(self.cfg.retransmit_interval)
+                .saturating_mul(4)
+                .max(self.cfg.retransmit_interval.saturating_mul(2));
+            if let Some(w) = self.tuner.as_mut().and_then(|t| {
+                t.on_peer_commit(from, msg.env.commit_index, self.committed, self.now, silence_limit)
+            }) {
+                self.apply_tuned_w(w);
+            }
+        }
         // Control/liveness messages may travel on a separate stream ahead of `Decided`; do not
         // let their envelope trigger speculative bulk catch-up before in-flight decisions land.
         if !matches!(msg.body, Body::ForwardAck { .. } | Body::RttProbe { .. } | Body::RttReply { .. }) {

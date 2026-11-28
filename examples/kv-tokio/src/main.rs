@@ -90,6 +90,7 @@ struct Args {
     placement: bool,
     placement_periods: Option<(u64, u64)>,
     max_in_flight_slots: Option<u32>,
+    tune_in_flight_slots: bool,
     inline_batch_bytes: Option<u32>,
     admission_bytes: Option<u64>,
 }
@@ -101,7 +102,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
     let (mut retransmit_ms, mut hedge_max_ms, mut placement) = (None, None, false);
     let (mut placement_periods, mut max_in_flight_slots, mut hedge_min_ms) = (None, None, None);
-    let (mut inline_batch_bytes, mut admission_bytes) = (None, None);
+    let (mut inline_batch_bytes, mut admission_bytes, mut tune_in_flight_slots) = (None, None, false);
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -154,6 +155,13 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--max-in-flight-slots" => {
                 max_in_flight_slots = Some(value.parse().map_err(|e| format!("--max-in-flight-slots: {e}"))?)
             }
+            "--tune-in-flight-slots" => {
+                tune_in_flight_slots = match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err("--tune-in-flight-slots: expected on or off".to_owned()),
+                }
+            }
             "--inline-batch-bytes" => {
                 inline_batch_bytes = Some(value.parse().map_err(|e| format!("--inline-batch-bytes: {e}"))?)
             }
@@ -183,6 +191,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         placement,
         placement_periods,
         max_in_flight_slots,
+        tune_in_flight_slots,
         inline_batch_bytes,
         admission_bytes,
     })
@@ -216,6 +225,7 @@ fn config(args: &Args) -> Config {
     if let Some(slots) = args.max_in_flight_slots {
         cfg.max_in_flight_slots = slots;
     }
+    cfg.tune_in_flight_slots = args.tune_in_flight_slots;
     if let Some(bytes) = args.inline_batch_bytes {
         cfg.inline_batch_bytes = bytes;
     }

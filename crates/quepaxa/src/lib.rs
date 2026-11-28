@@ -108,6 +108,7 @@ pub mod guide;
 #[cfg(feature = "model")]
 #[doc(hidden)]
 pub mod inspect;
+mod pipeline_tuner;
 mod placement_policy;
 mod proposal;
 mod proposer;

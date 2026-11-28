@@ -248,6 +248,9 @@ impl Replica {
         let direct = self.proposes_directly();
         while let Some(d) = self.log.get(&Slot(self.committed)) {
             let slot = Slot(self.committed);
+            if let Some(t) = &mut self.tuner {
+                t.note_decided(slot, self.now);
+            }
             self.schedule.observe(slot, d.proposal.key.origin, batch::is_hedge(&d.proposal.value));
             for (_, payload) in batch::changes(&d.proposal.value) {
                 if let Some((base, order)) = crate::schedule::decode_change(&payload) {
@@ -372,9 +375,25 @@ impl Replica {
                 }
             }
             if key.origin == self.me && key.incarnation == self.incarnation {
-                let refs = self.entries.applied(key.seq);
+                let (refs, batch_info) = self.entries.applied(key.seq);
                 for r in refs {
                     self.maybe_release_content(r.id);
+                }
+                if let Some((weight, enqueued_at, hedge)) = batch_info
+                    && !hedge
+                    && weight > 0
+                    && self.leads_now()
+                    && self.proposes_directly()
+                {
+                    let residence = self.now.0.saturating_sub(enqueued_at.0);
+                    let slot_rtt = self.request_rtt.unwrap_or(0);
+                    if let Some(w) = self
+                        .tuner
+                        .as_mut()
+                        .and_then(|t| t.on_slot_committed(weight, residence, slot_rtt, self.now))
+                    {
+                        self.apply_tuned_w(w);
+                    }
                 }
             }
             self.emitted += 1;
