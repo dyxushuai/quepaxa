@@ -1252,3 +1252,72 @@ fn tuner_paces_non_full_leader_slots_and_bypasses_on_full_batch() {
     assert!(r.entries.received(alloc::vec![Piece::Entry(relayed)], false, 64, Timestamp(22_000_000)));
     assert_eq!(r.slot_pace_at(), None, "relayed entries must bypass leader slot pacing");
 }
+
+#[test]
+fn timed_out_catch_up_rotates_through_known_peers() {
+    let mut r = replica_as(3);
+    assert!(r.schedule.reconfigure(Slot(0), 0, alloc::vec![NodeId(2)]).is_some());
+    assert!(r.schedule.reconfigure(Slot(64), 1, alloc::vec![NodeId(6)]).is_some());
+    r.committed = 128;
+    let mut out = Vec::new();
+    let interval = r.cfg.retransmit_interval;
+
+    // Seed initial catch-up target as retired/unresponsive NodeId(2).
+    r.catch_up.heard(NodeId(2), 135);
+    let t0 = Timestamp(10_000_000);
+    r.handle_timeout(t0).unwrap();
+    r.poll_actions(&mut out);
+
+    // Subsequent timeouts without a response must rotate past NodeId(2) through known members,
+    // eventually reaching current epoch member NodeId(6).
+    let mut asked = Vec::new();
+    for step in 1..=6u64 {
+        r.handle_timeout(t0.after(step * interval)).unwrap();
+        out.clear();
+        r.poll_actions(&mut out);
+        for a in &out {
+            if let Action::Send(o) = a
+                && let Ok(msg) = Message::decode(&o.bytes, &r.wire)
+                && matches!(msg.body, Body::CatchUp { .. })
+            {
+                asked.push(o.to);
+            }
+        }
+    }
+    assert!(asked.contains(&NodeId(0)), "must rotate to known peer 0: {asked:?}");
+    assert!(asked.contains(&NodeId(1)), "must rotate to known peer 1: {asked:?}");
+    assert!(asked.contains(&NodeId(6)), "must rotate to current member 6: {asked:?}");
+}
+
+#[test]
+fn stalled_outside_read_round_triggers_catch_up_fallback() {
+    let mut c = Config::new([3; 16], NodeId(4), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [9; 32]);
+    c.silent_leader_takeover = true;
+    let mut r = Replica::new(c, [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    r.handle(Timestamp(0), Input::Persisted(PersistId(0))).unwrap();
+    r.poll_actions(&mut out);
+
+    // Non-member with an unanswered read round waits one interval before falling back to CatchUp.
+    let t0 = Timestamp(1_000_000);
+    r.read_barrier(t0).unwrap();
+    r.poll_actions(&mut out);
+    assert!(!r.reads.is_stalled(t0, r.cfg.retransmit_interval));
+
+    let t1 = t0.after(r.cfg.retransmit_interval);
+    r.handle_timeout(t1).unwrap();
+    out.clear();
+    r.poll_actions(&mut out);
+    let targets: Vec<NodeId> = out
+        .iter()
+        .filter_map(|a| match a {
+            Action::Send(o) => match Message::decode(&o.bytes, &r.wire) {
+                Ok(msg) if matches!(msg.body, Body::CatchUp { .. }) => Some(o.to),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert!(!targets.is_empty(), "stalled outside read round must trigger fallback CatchUp");
+}

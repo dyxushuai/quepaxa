@@ -149,3 +149,25 @@ fn stepping_aside_and_back_alternate_once_per_stall() {
     assert!(!r.watch.aside, "back once the disk catches up");
     assert_eq!(r.metrics.stepped_aside, 1);
 }
+
+#[test]
+fn commits_emitted_during_disk_stall_do_not_stretch_delta() {
+    let (mut r, id) = leader_with_a_stuck_disk();
+    r.commit_latency = Some(5 * MS);
+    let baseline = r.commit_latency;
+    let delta = r.hedge_delay();
+
+    // Advance into a stuck disk phase (past `delta` with a peer decision elsewhere).
+    r.handle(t(10), from_peer(1, 0, Body::decided(Slot(9), proposal(1, 1, 0)))).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    r.now = t(100);
+    assert!(matches!(r.watch.disk.health(r.now, delta), Health::Stuck { .. }));
+
+    // Resolve slot 0 with our own value emitted at t = 100 ms (~100 ms stall latency):
+    // `commit_latency` / `delta` must stay pinned at the healthy baseline.
+    let prop = r.proposers.get(&Slot(0)).map(|a| a.prop.working().clone()).expect("slot 0 active");
+    r.learn(Slot(0), prop, false, None, false);
+    assert_eq!(r.commit_latency, baseline, "stalled-disk commit must not inflate delta");
+    let _ = id;
+}

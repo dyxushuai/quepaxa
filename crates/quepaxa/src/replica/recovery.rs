@@ -139,6 +139,11 @@ impl CatchUp {
         self.request.is_some()
     }
 
+    /// Peer whose in-flight bulk catch-up request has timed out at `now`, if any.
+    pub(super) fn timed_out_peer(&self, now: Timestamp, interval: u64) -> Option<NodeId> {
+        self.request.filter(|(_, t)| t.after(interval) <= now).map(|(p, _)| p)
+    }
+
     pub(super) fn requested(&mut self, peer: NodeId, now: Timestamp) {
         self.request = Some((peer, now));
         self.defer_since = None;
@@ -382,6 +387,48 @@ impl Replica {
     /// Whether a bulk catch-up request may be (re)sent now.
     pub(super) fn catch_up_due(&self) -> bool {
         self.catch_up.due(self.now, self.cfg.retransmit_interval)
+    }
+
+    /// Known peers for catch-up: `preferred` (if any), current members, any known schedule
+    /// members, and initial configured members, excluding `self.me`.
+    fn catch_up_ring(&self, preferred: Option<NodeId>) -> alloc::vec::Vec<NodeId> {
+        let mut ring = alloc::vec::Vec::new();
+        let mut push = |n: NodeId| {
+            if n != self.me && !ring.contains(&n) {
+                ring.push(n);
+            }
+        };
+        if let Some(p) = preferred {
+            push(p);
+        }
+        for &m in self.schedule.members(Slot(self.committed)) {
+            push(m);
+        }
+        for m in self.schedule.everyone() {
+            push(m);
+        }
+        for &m in &self.cfg.members {
+            push(m);
+        }
+        ring
+    }
+
+    /// Fallback peer when an outside reader's round stalls without any higher mark answer.
+    pub(super) fn fallback_catch_up_peer(&self) -> Option<NodeId> {
+        self.catch_up_ring(None).into_iter().next()
+    }
+
+    /// Rotates bulk catch-up away from `timed_out` across current and known peers so a
+    /// retired or crashed target never strands catch-up forever.
+    pub(super) fn next_catch_up_peer(&self, preferred: NodeId, timed_out: Option<NodeId>) -> NodeId {
+        let Some(failed) = timed_out else {
+            return preferred;
+        };
+        let ring = self.catch_up_ring(Some(preferred));
+        if ring.is_empty() {
+            return preferred;
+        }
+        ring.iter().position(|&m| m == failed).map_or(ring[0], |pos| ring[(pos + 1) % ring.len()])
     }
 
     /// Fetches the decided prefix from `committed` in bulk.

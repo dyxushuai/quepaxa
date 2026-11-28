@@ -287,8 +287,9 @@ impl Replica {
     }
 
     /// Candidate holders for a fetch: `first` (requester/sender), then `origin`, then the
-    /// slot's members in order, deduplicated and excluding `self.me`.
-    fn fetch_ring(&self, slot: Slot, origin: NodeId, first: NodeId) -> Vec<NodeId> {
+    /// slot's members in order, then current-epoch and known members if old-epoch members
+    /// retired, deduplicated and excluding `self.me`.
+    pub(super) fn fetch_ring(&self, slot: Slot, origin: NodeId, first: NodeId) -> Vec<NodeId> {
         let mut ring = Vec::new();
         let mut push = |n: NodeId| {
             if n != self.me && !ring.contains(&n) {
@@ -298,6 +299,12 @@ impl Replica {
         push(first);
         push(origin);
         for &m in self.schedule.members(slot) {
+            push(m);
+        }
+        for &m in self.schedule.members(Slot(self.committed)) {
+            push(m);
+        }
+        for m in self.schedule.everyone() {
             push(m);
         }
         ring

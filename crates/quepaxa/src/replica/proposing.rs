@@ -647,6 +647,7 @@ impl Replica {
         // or on `Body::Data` is an initial request, not a retry; only timed-out in-flight
         // requests (and timer-driven outside-reader catch-ups) count as retries.
         let retrying = self.catch_up.in_flight() || outside;
+        let timed_out = self.catch_up.timed_out_peer(now, interval);
         if let Some(peer) = self.catch_up.retry_with(
             self.committed,
             outside,
@@ -654,12 +655,19 @@ impl Replica {
             self.last_committed_at,
             now,
             interval,
-            || self.read_catch_up_from(),
+            || {
+                self.read_catch_up_from().or_else(|| {
+                    (outside && self.reads.is_stalled(now, interval))
+                        .then(|| self.fallback_catch_up_peer())
+                        .flatten()
+                })
+            },
         ) {
             if retrying {
                 self.metrics.catch_up_retries += 1;
             }
-            self.request_catch_up(peer);
+            let target = self.next_catch_up_peer(peer, timed_out);
+            self.request_catch_up(target);
         }
         self.fire_follow();
         let stalled: Vec<Slot> = self.stalled().filter(|(_, at)| *at <= now).map(|(s, _)| s).collect();

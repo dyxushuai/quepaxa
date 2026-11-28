@@ -144,6 +144,7 @@ jobs:
         env:
           TLA_SECONDS: "1200"
           TLA_BUG_SECONDS: "300"
+          TLA_MEMBERSHIP_SECONDS: "3600"
         run: verification/tla/run.sh ${{ matrix.part }}
 
   tlaps:

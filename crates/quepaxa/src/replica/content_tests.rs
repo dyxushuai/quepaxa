@@ -1027,3 +1027,17 @@ fn evicted_batch_fetches_immediately_without_grace() {
         "evicted Data batch must fetch immediately instead of stalling for fetch_grace"
     );
 }
+
+#[test]
+fn fetch_ring_falls_back_to_current_epoch_and_known_members() {
+    let mut rep = replica_as(4);
+    assert!(rep.schedule.reconfigure(Slot(0), 0, alloc::vec![NodeId(4), NodeId(6)]).is_some());
+    assert!(rep.schedule.reconfigure(Slot(64), 1, alloc::vec![NodeId(6)]).is_some());
+    rep.committed = 128;
+    let ring = rep.fetch_ring(Slot(5), NodeId(2), NodeId(1));
+    assert_eq!(
+        ring,
+        alloc::vec![NodeId(1), NodeId(2), NodeId(6)],
+        "falls back to current/known members: {ring:?}"
+    );
+}

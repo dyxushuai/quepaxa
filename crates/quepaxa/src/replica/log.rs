@@ -391,9 +391,15 @@ impl Replica {
                     if kind == Kind::App {
                         self.note_commit_latency(self.now.0.saturating_sub(since.0));
                     }
-                    // A hedged entry waited out the hedge delay itself: learning from it
-                    // would stretch the delay further each time the leader is slow.
-                    if !hedged {
+                    // A hedged entry waited out the hedge delay itself, and an entry emitted while
+                    // this replica's own disk is stalled (`Stuck` / `SharedStall`) waited out that
+                    // stall: learning from either would stretch `δ` and `4δ` (`aside_at`) faster
+                    // than time passes.
+                    let disk_stalled = matches!(
+                        self.watch.disk.health(self.now, self.hedge_delay()),
+                        super::disk::Health::Stuck { .. } | super::disk::Health::SharedStall { .. }
+                    );
+                    if !hedged && !disk_stalled {
                         self.observe_latency(self.now.0.saturating_sub(since.0));
                     }
                     self.actions.push(Action::Committed { id, slot });
