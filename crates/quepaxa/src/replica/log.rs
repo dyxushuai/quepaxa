@@ -219,8 +219,10 @@ impl Replica {
         let (priority, key) = (proposal.priority, proposal.key);
         self.log.insert(slot, Decision { proposal });
         if !missing.is_empty() {
+            let target = hint.unwrap_or(origin);
             self.note_missing_slot(slot, hint);
-            self.fetch_refs(slot, hint.unwrap_or(origin), &missing);
+            let grace = self.fetch_grace(target);
+            self.fetch_refs_after(slot, target, &missing, grace);
         }
         self.advance_committed();
         self.advance_held();
@@ -246,6 +248,7 @@ impl Replica {
     /// schedule in order.
     pub(super) fn advance_committed(&mut self) {
         let direct = self.proposes_directly();
+        let before = self.committed;
         while let Some(d) = self.log.get(&Slot(self.committed)) {
             let slot = Slot(self.committed);
             if let Some(t) = &mut self.tuner {
@@ -258,6 +261,9 @@ impl Replica {
                 }
             }
             self.committed += 1;
+        }
+        if self.committed > before {
+            self.last_committed_at = Some(self.now);
         }
         if self.schedule.knows(self.me) {
             self.was_member = true;
@@ -299,7 +305,8 @@ impl Replica {
                 if !missing.is_empty() {
                     let target = self.decided_hint(slot).unwrap_or(d.proposal.key.origin);
                     self.note_missing_slot(slot, Some(target));
-                    self.fetch_refs(slot, target, &missing);
+                    let grace = self.fetch_grace(target);
+                    self.fetch_refs_after(slot, target, &missing, grace);
                     break;
                 }
             }

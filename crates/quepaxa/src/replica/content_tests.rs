@@ -813,3 +813,116 @@ fn staged_forward_defers_fetch_and_signals_liveness_without_acking_seq() {
         .collect();
     assert_eq!(acked_seqs, alloc::vec![7]);
 }
+
+#[test]
+fn data_and_active_pipeline_lag_do_not_trigger_speculative_catch_up() {
+    let cfg_with_id_and_w = || {
+        let mut c = cfg();
+        c.id = NodeId(2);
+        c.max_in_flight_slots = 4;
+        c.retransmit_interval = 400_000_000;
+        c
+    };
+    let mut rep = Replica::new(cfg_with_id_and_w(), [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(0));
+
+    // A Body::Data arriving on the bulk stream advertising commit_index far ahead records the
+    // peer's progress for timer-driven recovery without triggering an immediate CatchUp.
+    let data_msg = Message {
+        env: Envelope {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            from: NodeId(0),
+            to: NodeId(2),
+            commit_index: 20,
+        },
+        body: Body::Data { id: data_id(0, 0), bytes: content() },
+    };
+    rep.handle(Timestamp(1_000_000), Input::Message(data_msg.encode())).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(rep.metrics().messages_rejected, 0);
+    assert_eq!(rep.catch_up.ahead(), 20, "Body::Data still records peer commit_index");
+    assert!(
+        !sent(&out).iter().any(|o| matches!(decode_msg(&o.bytes).body, Body::CatchUp { .. })),
+        "Body::Data must not trigger immediate speculative CatchUp"
+    );
+
+    // On a fresh replica actively committing slot 0 at t=10 ms, hearing commit_index up to
+    // committed + 2 * W (= 9) via a consensus message stays within the active pipeline window.
+    let mut rep = Replica::new(cfg_with_id_and_w(), [], Timestamp(0)).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(0));
+    let p0 = Proposal {
+        priority: 1,
+        key: ValueKey { origin: NodeId(0), incarnation: 1, seq: 0 },
+        value: Bytes::new(),
+    };
+    rep.handle(
+        Timestamp(10_000_000),
+        from_peer(
+            0,
+            2,
+            Body::Entries { first: Slot(0), proposals: alloc::vec![p0.clone()], content: Vec::new() },
+        ),
+    )
+    .unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(10_000_000));
+    assert_eq!(rep.commit_index(), 1);
+
+    let within = Message {
+        env: Envelope {
+            cluster_id: [3; 16],
+            config_epoch: 0,
+            from: NodeId(0),
+            to: NodeId(2),
+            commit_index: 9,
+        },
+        body: Body::Decided { slot: Slot(0), priority: p0.priority, key: p0.key },
+    };
+    rep.handle(Timestamp(20_000_000), Input::Message(within.encode())).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(rep.metrics().messages_rejected, 0);
+    assert!(
+        !sent(&out).iter().any(|o| matches!(decode_msg(&o.bytes).body, Body::CatchUp { .. })),
+        "active commits tolerate up to 2 * max_in_flight_slots of peer commit_index lead"
+    );
+
+    // Once quiet past retransmit_interval, CatchUp fires to recover the missed slots.
+    rep.handle_timeout(Timestamp(420_000_000)).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert!(
+        sent(&out).iter().any(|o| matches!(decode_msg(&o.bytes).body, Body::CatchUp { from: Slot(1) })),
+        "stalled replica must request CatchUp after retransmit_interval"
+    );
+}
+
+#[test]
+fn learn_respects_scaled_fetch_grace_for_missing_refs() {
+    let mut c = cfg();
+    c.id = NodeId(2);
+    c.retransmit_interval = 400_000_000;
+    c.hedge_max = 3_000_000_000;
+    let mut rep = Replica::new(c, [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(0));
+    rep.commit_latency = Some(300_000_000);
+    rep.watch.reply.insert(NodeId(0), 250_000_000);
+
+    // Learning a decided slot referencing missing Data defers Fetch by max(retransmit, 2 * lat) = 600 ms.
+    let entries =
+        Body::Entries { first: Slot(0), proposals: alloc::vec![referencing()], content: Vec::new() };
+    rep.handle(Timestamp(1_000_000), from_peer(0, 2, entries)).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(rep.metrics().fetches, 0, "learn must respect fetch_grace instead of fetching immediately");
+    assert_eq!(rep.earliest_fetch(), Some(Timestamp(601_000_000)));
+}

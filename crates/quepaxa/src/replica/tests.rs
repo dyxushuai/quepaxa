@@ -1162,3 +1162,80 @@ fn the_leader_leaves_the_next_leaders_slots_to_it() {
     });
     assert!(handed_on, "{out:?}");
 }
+
+#[test]
+fn tuner_does_not_throttle_deputy_window_or_stalled_takeover() {
+    let mut c = Config::new([3; 16], NodeId(1), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [2; 32]);
+    c.tune_in_flight_slots = true;
+    c.max_in_flight_slots = 16;
+    let mut r = Replica::new(c, [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    assert_eq!(r.in_flight_slots(), 1);
+
+    // Hand 4 deputy batches from follower 2 (suspecting leader 0): deputy must drive more than
+    // the leader's W=1 starting cap (up to min(max_in_flight_slots, 8)).
+    for seq in 0..4u64 {
+        let item = Item {
+            entry: Entry {
+                origin: NodeId(2),
+                incarnation: 1,
+                id: ProposalId(seq),
+                payload: Bytes::from(alloc::vec![b'd'; 16]),
+            },
+            kind: Kind::App,
+        };
+        r.handle(
+            Timestamp(1_000_000 + seq),
+            from_peer(2, 1, Body::Forward { seq, batch: batch::encode(&[item]) }),
+        )
+        .unwrap();
+        r.poll_actions(&mut out);
+    }
+    assert!(r.proposers.len() >= 4, "deputy must not be throttled to W=1: {}", r.proposers.len());
+
+    // Stalled slots past committed + 1 must still be scanned for takeover when tuning is on.
+    r.seen.insert(Slot(10), Timestamp(1_000_000));
+    let takeover = r.takeover_at(Slot(10), Timestamp(1_000_000));
+    r.handle_timeout(takeover).unwrap();
+    r.poll_actions(&mut out);
+    assert!(
+        r.proposers.contains_key(&Slot(10)),
+        "stalled slot within max_in_flight_slots must be taken over"
+    );
+}
+
+#[test]
+fn tuner_paces_non_full_leader_slots_and_bypasses_on_full_batch() {
+    let mut c = Config::new([3; 16], NodeId(0), alloc::vec![NodeId(0), NodeId(1), NodeId(2)], [1; 32]);
+    c.tune_in_flight_slots = true;
+    c.max_in_flight_slots = 8;
+    c.max_batch_bytes = 256;
+    let mut r = Replica::new(c, [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    r.poll_actions(&mut out);
+    r.set_in_flight_slots(4).unwrap();
+    r.request_rtt = Some(80_000_000); // 80 ms RTT -> 20 ms pace at W=4
+
+    r.propose(Timestamp(1_000_000), Bytes::from_static(b"first")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.proposers.len(), 1);
+
+    // Second small write at the same timestamp waits for the 20 ms pace timer instead of convoying.
+    r.propose(Timestamp(1_000_000), Bytes::from_static(b"second")).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.proposers.len(), 1, "non-full second slot must be paced across RTT");
+    assert_eq!(r.next_deadline().min(Some(Timestamp(21_000_000))), Some(Timestamp(21_000_000)));
+
+    // Once the 20 ms pace elapses, the second slot starts.
+    r.handle_timeout(Timestamp(21_000_000)).unwrap();
+    r.poll_actions(&mut out);
+    assert_eq!(r.proposers.len(), 2, "paced slot starts once request_rtt / W elapses");
+
+    // Reaching max_batch_bytes bypasses pacing immediately so throughput is never throttled.
+    r.propose(Timestamp(22_000_000), Bytes::from(alloc::vec![b'z'; 200])).unwrap();
+    r.poll_actions(&mut out);
+    r.propose(Timestamp(22_000_000), Bytes::from(alloc::vec![b'z'; 200])).unwrap();
+    r.poll_actions(&mut out);
+    assert!(r.proposers.len() >= 3, "full batch must bypass leader slot pacing immediately");
+}

@@ -223,6 +223,45 @@ fn reset_anchors_at_clamped_value() {
 }
 
 #[test]
+fn overload_rtt_inflation_does_not_lock_w_floor_and_suppresses_saturation() {
+    let mut tuner = PipelineTuner::new(16, MIB, Timestamp(0));
+    let mut t = 0u64;
+    // Ramp to W=16 and complete clean windows at 2 ms LAN RTT so propagation min_rtt = 2 ms.
+    for _ in 0..4 {
+        t += 60 * MS;
+        let _ = tuner.on_saturated(Timestamp(t));
+    }
+    assert_eq!(tuner.current(), 16);
+    for _ in 0..160 {
+        t += 10 * MS;
+        let _ = tuner.on_slot_committed(200 * 1024, 3 * MS, 2 * MS, Timestamp(t));
+    }
+    assert_eq!(tuner.current(), 16);
+
+    // Under overload, RTT inflates 50x to 100 ms alongside distress (retransmits/lost slots).
+    // With 600 KiB every 20 ms (= 30 MiB/s), inflated 100 ms RTT would compute bpr = 3 MiB
+    // (w_floor = 16), locking W=16; propagation min_rtt = 2 ms keeps w_floor = 1 so sustained
+    // distress steps W down directly, and on_saturated is suppressed while distressed.
+    let mut stepped_down = false;
+    let mut sat_blocked = false;
+    for _ in 0..250 {
+        t += 20 * MS;
+        let _ = tuner.on_distress(Timestamp(t));
+        if let Some(w) = tuner.on_slot_committed(600 * 1024, 120 * MS, 100 * MS, Timestamp(t))
+            && w < 16
+        {
+            stepped_down = true;
+            break;
+        }
+        if tuner.on_saturated(Timestamp(t)).is_none() {
+            sat_blocked = true;
+        }
+    }
+    assert!(sat_blocked, "on_saturated must stay suppressed during sustained distress");
+    assert!(stepped_down && tuner.current() < 16, "sustained distress must step W down: {}", tuner.current());
+}
+
+#[test]
 fn arbitrary_event_sequences_keep_bounds_and_never_panic() {
     use proptest::prelude::*;
     proptest!(|(

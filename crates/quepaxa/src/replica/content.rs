@@ -217,11 +217,21 @@ impl Replica {
     }
 
     /// How long to wait for in-flight `Data` before sending the first `Fetch`: once cluster
-    /// timing is known, wait `retransmit_interval` so a cold-start or loaded bulk stream can
-    /// deliver the original `Data` without duplicate `Fetch` replies multiplying its queue.
-    fn fetch_grace(&self, from: NodeId) -> u64 {
-        if self.watch.reply.contains_key(&from) || self.commit_latency.is_some() {
-            self.cfg.retransmit_interval
+    /// timing is known, wait at least `retransmit_interval` (and twice observed commit/link
+    /// latency, capped by `hedge_max`) so a cold-start or loaded bulk stream can deliver the
+    /// original `Data` without duplicate `Fetch` replies multiplying its queue.
+    pub(super) fn fetch_grace(&self, from: NodeId) -> u64 {
+        if self.watch.reply.contains_key(&from)
+            || self.watch.fwd.ack_delay(from).is_some()
+            || self.commit_latency.is_some()
+        {
+            let floor = self.cfg.retransmit_interval;
+            let lat = self
+                .commit_latency
+                .unwrap_or(0)
+                .max(self.watch.reply.get(&from).copied().unwrap_or(0))
+                .max(self.watch.fwd.ack_delay(from).unwrap_or(0));
+            floor.max(lat.saturating_mul(2)).min(self.cfg.hedge_max.max(floor))
         } else {
             0
         }
@@ -299,7 +309,7 @@ impl Replica {
         self.fetch_refs_after(slot, first, missing, 0);
     }
 
-    fn fetch_refs_after(&mut self, slot: Slot, first: NodeId, missing: &[Ref], grace: u64) {
+    pub(super) fn fetch_refs_after(&mut self, slot: Slot, first: NodeId, missing: &[Ref], grace: u64) {
         let mut by_target: BTreeMap<NodeId, Vec<DataId>> = BTreeMap::new();
         let interval = self.cfg.retransmit_interval;
         for &r in missing {
@@ -384,7 +394,8 @@ impl Replica {
         }
         let cap = (self.cfg.max_in_flight_slots as usize)
             .saturating_mul(self.schedule.members(Slot(self.committed)).len().max(1))
-            .max(256);
+            .saturating_mul(4)
+            .max(1024);
         if self.fetching.pending_forwards.len() >= cap {
             return;
         }
@@ -650,7 +661,10 @@ impl Replica {
         let outside = self.outside();
         if let Some(peer) = self.catch_up.page(from, empty, self.committed, outside, self.now) {
             self.request_catch_up(peer);
-        } else if !empty && self.catch_up.behind(self.committed, outside) && self.catch_up_due() {
+        } else if !empty
+            && self.catch_up.behind_by(self.committed, self.catch_up_lag())
+            && self.catch_up_due()
+        {
             self.request_catch_up(from);
         }
     }

@@ -315,6 +315,18 @@ impl Entries {
         false
     }
 
+    /// Whether `pending` holds more than `limit` bytes of queued pieces.
+    pub(super) fn pending_exceeds(&self, limit: usize) -> bool {
+        let mut bytes = 0usize;
+        for p in &self.pending {
+            bytes = bytes.saturating_add(batch::piece_weight(p));
+            if bytes > limit {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Whether there is something to propose: a batch waiting for a slot, or entries `cut`
     /// takes (own pending ones only when proposing them directly).
     pub(super) fn proposable(&self, direct: bool) -> bool {

@@ -131,8 +131,19 @@ impl CatchUp {
         self.request.is_none_or(|(_, t)| t.after(interval) <= now)
     }
 
+    /// Whether a bulk catch-up request is currently in flight.
+    pub(super) fn in_flight(&self) -> bool {
+        self.request.is_some()
+    }
+
     pub(super) fn requested(&mut self, peer: NodeId, now: Timestamp) {
         self.request = Some((peer, now));
+    }
+
+    /// Worth a bulk catch-up request when allowing `lag` in-flight slots to arrive via normal
+    /// `RecordRequest` / `Decided` traffic.
+    pub(super) fn behind_by(&self, committed: u64, lag: u64) -> bool {
+        self.ahead > committed.saturating_add(lag)
     }
 
     /// A page from `from` was applied, bringing the prefix to `committed`. Only the answer
@@ -157,13 +168,54 @@ impl CatchUp {
         self.behind(committed, outside).then_some(from)
     }
 
+    /// When to retry a bulk request on the timer, while behind a peer. If within the active
+    /// pipeline `window` while committing normally (`last_committed`), waits until `interval`
+    /// after `last_committed` instead of firing immediately on in-flight WAN lag.
+    pub(super) fn deadline_with(
+        &self,
+        committed: u64,
+        outside: bool,
+        window: u64,
+        last_committed: Option<Timestamp>,
+        now: Timestamp,
+        interval: u64,
+    ) -> Option<Timestamp> {
+        if !self.behind(committed, outside) || self.request.or(self.peer.map(|p| (p, now))).is_none() {
+            return None;
+        }
+        let immediate = outside || self.behind_by(committed, window);
+        let timer = self.request.map_or(now, |(_, t)| t.after(interval));
+        if immediate {
+            Some(timer)
+        } else {
+            let quiet_at = last_committed.map_or(now, |t| t.after(interval));
+            Some(timer.max(quiet_at))
+        }
+    }
+
+    /// Whom to ask on the timer: while behind past `lag`, the most advanced peer (the
+    /// previous target may be the one that failed); otherwise the peer `read_from` names.
+    pub(super) fn retry_by(
+        &self,
+        committed: u64,
+        lag: u64,
+        now: Timestamp,
+        interval: u64,
+        read_from: impl FnOnce() -> Option<NodeId>,
+    ) -> Option<NodeId> {
+        if !self.due(now, interval) {
+            return None;
+        }
+        if self.behind_by(committed, lag) { self.peer.or(self.request.map(|(p, _)| p)) } else { read_from() }
+    }
+
     /// A snapshot answered any request in flight; whom to ask for what was decided after it.
     pub(super) fn installed(&mut self, committed: u64) -> Option<NodeId> {
         self.request = None;
         self.peer.filter(|_| self.ahead_of(committed))
     }
 
-    /// When to retry a bulk request on the timer, while behind a peer.
+    #[cfg(test)]
     pub(super) fn deadline(
         &self,
         committed: u64,
@@ -176,8 +228,7 @@ impl CatchUp {
         behind.then(|| self.request.map_or(now, |(_, t)| t.after(interval)))
     }
 
-    /// Whom to ask on the timer: while behind, the most advanced peer (the previous target
-    /// may be the one that failed); otherwise the peer `read_from` names, if any.
+    #[cfg(test)]
     pub(super) fn retry(
         &self,
         committed: u64,
@@ -186,10 +237,7 @@ impl CatchUp {
         interval: u64,
         read_from: impl FnOnce() -> Option<NodeId>,
     ) -> Option<NodeId> {
-        if !self.due(now, interval) {
-            return None;
-        }
-        if self.behind(committed, outside) { self.peer.or(self.request.map(|(p, _)| p)) } else { read_from() }
+        self.retry_by(committed, if outside { 0 } else { 1 }, now, interval, read_from)
     }
 }
 
@@ -277,6 +325,28 @@ impl Replica {
     pub(super) fn check_probe_answers(&mut self) {
         let members = self.schedule.members(Slot(self.committed));
         self.phase.check(self.me, members);
+    }
+
+    /// Active pipeline margin tolerated on a committing voting member before requesting bulk
+    /// `CatchUp`: twice `max_in_flight_slots` covers in-flight pipelining plus one-way WAN
+    /// `Decided` propagation skew without delaying recovery once commits stall.
+    pub(super) fn catch_up_window(&self) -> u64 {
+        self.window().saturating_mul(2)
+    }
+
+    /// How many slots of peer `commit_index` lead are tolerated as normal in-flight pipelining
+    /// before triggering bulk `CatchUp` (`Body::Entries`): `0` outside membership,
+    /// `catch_up_window()` while `committed` advanced within `retransmit_interval`, and `1`
+    /// once quiet/stalled.
+    pub(super) fn catch_up_lag(&self) -> u64 {
+        if self.outside() {
+            return 0;
+        }
+        if self.last_committed_at.is_some_and(|t| self.now < t.after(self.cfg.retransmit_interval)) {
+            self.catch_up_window()
+        } else {
+            1
+        }
     }
 
     /// Whether a bulk catch-up request may be (re)sent now.

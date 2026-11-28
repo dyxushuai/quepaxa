@@ -95,7 +95,8 @@ impl Replica {
         self.note_follow_heard(from, is_entries, advanced);
         // Control/liveness messages may travel on a separate stream ahead of `Decided`; do not
         // let their envelope trigger speculative bulk catch-up on voting members before
-        // in-flight decisions land.
+        // in-flight decisions land. `Data` also travels on the bulk stream, so record its
+        // `commit_index` for timer-driven recovery without firing an immediate `CatchUp`.
         let control =
             matches!(msg.body, Body::ForwardAck { .. } | Body::RttProbe { .. } | Body::RttReply { .. });
         if outside || !control {
@@ -103,10 +104,11 @@ impl Replica {
             if !outside && self.catch_up.ahead_of(self.committed) {
                 self.seen.entry(Slot(self.committed)).or_insert(self.now);
             }
-            let lag = if outside { 0 } else { 1 };
+            let lag = self.catch_up_lag();
             // `Entries` is handled after applying its page in `on_entries`, so an observer's
             // non-empty follow reply does not echo a stale duplicate `CatchUp` before advancing.
             if !matches!(msg.body, Body::Compacted { .. } | Body::Entries { .. })
+                && (outside || !matches!(msg.body, Body::Data { .. }))
                 && msg.env.commit_index > self.committed.saturating_add(lag)
                 && self.catch_up_due()
             {

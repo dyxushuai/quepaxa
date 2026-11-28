@@ -201,10 +201,24 @@ impl Replica {
     }
 
     /// How long a follower coalesces subsequent forwards to `target` after sending one:
-    /// an eighth of the observed reply delay, capped at half `ack_every`. Zero until a
-    /// reply delay is known, microseconds on a LAN, ~9-22 ms on a WAN.
+    /// an eighth of the observed forward-ack/reply delay, capped at half `ack_every`. Uses
+    /// `ack_delay` alongside `reply` so unrelated consensus messages from `target` cannot
+    /// collapse coalescing to zero under steady load; on cold start while multiple forwards
+    /// are already unacknowledged and pending data would disseminate as `Body::Data`,
+    /// coalesces up to half `ack_every` so large writes do not flood one `Data` frame per entry.
     pub(super) fn forward_coalesce(&self, target: NodeId) -> u64 {
-        self.watch.reply.get(&target).map_or(0, |&r| (r / 8).min(self.ack_every() / 2))
+        let cap = self.ack_every() / 2;
+        let rtt = self.watch.fwd.ack_delay(target).max(self.watch.reply.get(&target).copied());
+        if let Some(r) = rtt {
+            return (r / 8).min(cap);
+        }
+        if self.watch.fwd.unacked_count(target) >= 2
+            && self.cfg.inline_batch_bytes < self.cfg.max_batch_bytes
+            && self.entries.pending_exceeds(self.cfg.inline_batch_bytes as usize)
+        {
+            return cap;
+        }
+        0
     }
 
     /// When held follower entries should flush to the target, if coalescing holds them.

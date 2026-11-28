@@ -317,19 +317,52 @@ const MAX_BACKOFF: Duration = Duration::from_secs(1);
 /// connection up: on a link that silently drops packets (a partition), TCP would otherwise
 /// keep retrying with its own backoff and resume seconds after the link heals. A `bulk`
 /// connection paces its frames (see `BULK_CHUNK`).
-async fn outbound<S, C>(me: u32, connect: impl Fn() -> C, mut rx: tmpsc::Receiver<Vec<u8>>, bulk: bool)
+#[cfg(all(test, not(feature = "shuttle")))]
+async fn outbound<S, C>(me: u32, connect: impl Fn() -> C, rx: tmpsc::Receiver<Vec<u8>>, bulk: bool)
 where
     S: AsyncWrite + Unpin,
     C: Future<Output = std::io::Result<S>>,
 {
+    outbound_with(me, connect, rx, bulk, false).await;
+}
+
+/// Keeps a connection to `peer`, optionally waiting until the first queued frame before
+/// dialing (`lazy`) so idle bulk/data channels open no sockets and TCP starts with the link's
+/// live RTT rather than an empty startup handshake.
+async fn outbound_with<S, C>(
+    me: u32,
+    connect: impl Fn() -> C,
+    mut rx: tmpsc::Receiver<Vec<u8>>,
+    bulk: bool,
+    lazy: bool,
+) where
+    S: AsyncWrite + Unpin,
+    C: Future<Output = std::io::Result<S>>,
+{
     let mut backoff = MIN_BACKOFF;
+    let mut pending: Option<Vec<u8>> = None;
     loop {
+        if lazy && pending.is_none() {
+            let Some(frame) = rx.recv().await else { return };
+            pending = Some(frame);
+        }
         if let Ok(Ok(s)) = tokio::time::timeout(STALL, connect()).await {
             // Frames queued while the previous batch was written go out in one syscall.
             let mut w = BufWriter::with_capacity(CHUNK, s);
-            let hello = send_frame(&mut w, &me.to_le_bytes(), false).await && within_stall(w.flush()).await;
-            while hello && let Some(frame) = rx.recv().await {
-                let mut ok = send_frame(&mut w, &frame, bulk).await;
+            let mut ok = send_frame(&mut w, &me.to_le_bytes(), false).await && within_stall(w.flush()).await;
+            if ok && let Some(frame) = pending.take() {
+                ok = send_frame(&mut w, &frame, bulk).await;
+                while ok && let Ok(frame) = rx.try_recv() {
+                    ok = send_frame(&mut w, &frame, bulk).await;
+                }
+                ok = ok && within_stall(w.flush()).await;
+                if ok {
+                    backoff = MIN_BACKOFF;
+                }
+            }
+            while ok {
+                let Some(frame) = rx.recv().await else { return };
+                ok = send_frame(&mut w, &frame, bulk).await;
                 while ok && let Ok(frame) = rx.try_recv() {
                     ok = send_frame(&mut w, &frame, bulk).await;
                 }
@@ -353,20 +386,21 @@ const BULK_QUEUE: usize = 1;
 /// Starts four connections to a peer: liveness/probes on `ctrl`, consensus messages on `msgs`,
 /// bulk data (`Data`, `Entries`) unpaced on `data`, and snapshots paced on `bulk`, so liveness
 /// never waits behind proposal payloads and consensus never waits behind bulk data or
-/// snapshots. The peer tells them apart by frame kind.
+/// snapshots. Connections dial lazily on their first queued frame; the peer tells them apart
+/// by frame kind.
 fn peer_link<S, C>(me: u32, connect: impl Fn() -> C + Clone + Send + 'static) -> PeerLink
 where
     S: AsyncWrite + Unpin + Send + 'static,
     C: Future<Output = std::io::Result<S>> + Send + 'static,
 {
     let (ctrl, rx) = tmpsc::channel(MSG_QUEUE);
-    tokio::spawn(outbound(me, connect.clone(), rx, false));
+    tokio::spawn(outbound_with(me, connect.clone(), rx, false, true));
     let (msgs, rx) = tmpsc::channel(MSG_QUEUE);
-    tokio::spawn(outbound(me, connect.clone(), rx, false));
+    tokio::spawn(outbound_with(me, connect.clone(), rx, false, true));
     let (data, rx) = tmpsc::channel(MSG_QUEUE);
-    tokio::spawn(outbound(me, connect.clone(), rx, false));
+    tokio::spawn(outbound_with(me, connect.clone(), rx, false, true));
     let (bulk, rx) = tmpsc::channel(BULK_QUEUE);
-    tokio::spawn(outbound(me, connect, rx, true));
+    tokio::spawn(outbound_with(me, connect, rx, true, true));
     PeerLink::new(ctrl, msgs, data, bulk)
 }
 
@@ -500,8 +534,14 @@ async fn main() {
             std::process::exit(2);
         }
     };
-    let cfg = config(&args);
+    let mut cfg = config(&args);
     let admit = args.admission_bytes.unwrap_or_else(|| node::admission_bytes(&cfg));
+    // Keep every peer's per-origin unpinned content cache at least twice the per-replica
+    // admission budget so newer `Data` batches from a busy origin never evict older ones
+    // before the leader proposes or recorders pin them.
+    let min_cache =
+        u64::from(cfg.max_batch_bytes).saturating_mul(u64::from(cfg.max_in_flight_slots).saturating_mul(2));
+    cfg.content_cache_bytes = Some(admit.saturating_mul(2).max(min_cache).min(u64::from(u32::MAX)) as u32);
     let cluster_id = cfg.cluster_id;
     let (disk, records) = Disk::open(&args.data).expect("open data directory");
     let replica = Replica::new(cfg, records, Timestamp(0)).expect("recover replica");
@@ -534,7 +574,14 @@ async fn main() {
         let service = grpc::KvServer::new(grpc::EtcdKv::new(events.clone(), cluster_id, args.id));
         eprintln!("kv-tokio {}: etcd v3 KV API on {addr}", args.id);
         tokio::spawn(async move {
-            if let Err(e) = tonic::transport::Server::builder().add_service(service).serve(addr).await {
+            if let Err(e) = tonic::transport::Server::builder()
+                .tcp_nodelay(true)
+                .initial_connection_window_size(Some(64 * 1024 * 1024))
+                .initial_stream_window_size(Some(8 * 1024 * 1024))
+                .add_service(service)
+                .serve(addr)
+                .await
+            {
                 eprintln!("kv-tokio: etcd API on {addr}: {e}");
                 std::process::exit(1);
             }
@@ -706,5 +753,29 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         assert!(started.elapsed() > STALL, "the link was not slow enough to test anything");
+    }
+
+    #[tokio::test]
+    async fn peer_link_dials_lazily_on_first_frame() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let link = peer_link(7, move || dial(addr));
+
+        // No frame queued yet: peer_link must not connect eagerly.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), listener.accept()).await.is_err(),
+            "peer_link dialed before any frame was queued"
+        );
+
+        // Sending a frame triggers a lazy dial and delivers the hello + frame.
+        link.send(node::PeerFrame::SnapshotRequest);
+        let (mut s, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
+            .await
+            .expect("peer_link did not connect after queueing a frame")
+            .unwrap();
+        let hello = read_frame(&mut s).await.unwrap();
+        assert_eq!(hello.as_ref(), &7u32.to_le_bytes());
+        let frame = read_frame(&mut s).await.unwrap();
+        assert!(!frame.is_empty());
     }
 }
