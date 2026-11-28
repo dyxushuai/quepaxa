@@ -11,23 +11,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock, mpsc};
 use std::thread;
 
+use openraft::EntryPayload;
 use openraft::entry::RaftEntry;
 use openraft::storage::{IOFlushed, LogState, RaftLogReader, RaftLogStorage};
-use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
+use crate::codec::{
+    WalRecord, decode_wal_record, encode_wal_append, encode_wal_purge, encode_wal_truncate, encode_wal_vote,
+};
 use crate::types::{Entry, LogId, TypeConfig, Vote};
 
 const HEADER: usize = 12;
 const SECTOR: usize = 512;
-
-#[derive(Serialize, Deserialize)]
-enum WalRecord {
-    Vote(Vote),
-    Append(Vec<Entry>),
-    Truncate(Option<LogId>),
-    Purge(LogId),
-}
+/// Matches QuePaxa's `max_batch_bytes = 1 MiB` replication batch cap.
+const MAX_REPLICATION_BATCH_BYTES: usize = 1024 * 1024;
 
 enum WriteOp {
     Vote { bytes: Vec<u8>, done: oneshot::Sender<io::Result<()>> },
@@ -68,8 +65,7 @@ impl LogStore {
 
         let mut inner = LogInner::default();
         for raw in frames {
-            let rec: WalRecord =
-                serde_json::from_slice(&raw).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let rec = decode_wal_record(&raw)?;
             apply_record(&mut inner, rec);
         }
 
@@ -105,15 +101,14 @@ fn apply_record(inner: &mut LogInner, rec: WalRecord) {
     }
 }
 
-fn encode_frame(rec: &WalRecord) -> io::Result<Vec<u8>> {
-    let payload = serde_json::to_vec(rec).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+fn frame_payload(payload: &[u8]) -> Vec<u8> {
     let len = (payload.len() as u32).to_le_bytes();
     let mut buf = Vec::with_capacity(HEADER + payload.len());
     buf.extend_from_slice(&len);
     buf.extend_from_slice(&crc32fast::hash(&len).to_le_bytes());
-    buf.extend_from_slice(&crc32fast::hash(&payload).to_le_bytes());
-    buf.extend_from_slice(&payload);
-    Ok(buf)
+    buf.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
+    buf.extend_from_slice(payload);
+    buf
 }
 
 fn u32_at(b: &[u8], at: usize) -> u32 {
@@ -225,6 +220,24 @@ impl RaftLogReader<TypeConfig> for LogStore {
         Ok(inner.entries.range(range).map(|(_, e)| e.clone()).collect())
     }
 
+    async fn limited_get_log_entries(&mut self, start: u64, end: u64) -> Result<Vec<Entry>, io::Error> {
+        let inner = self.inner.read().expect("log lock poisoned");
+        let mut out = Vec::new();
+        let mut bytes = 0usize;
+        for (_, entry) in inner.entries.range(start..end) {
+            let size = match &entry.payload {
+                EntryPayload::Normal(req) => req.approx_bytes(),
+                _ => 64,
+            };
+            if !out.is_empty() && bytes + size > MAX_REPLICATION_BATCH_BYTES {
+                break;
+            }
+            bytes += size;
+            out.push(entry.clone());
+        }
+        Ok(out)
+    }
+
     async fn read_vote(&mut self) -> Result<Option<Vote>, io::Error> {
         Ok(self.inner.read().expect("log lock poisoned").vote)
     }
@@ -245,7 +258,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 
     async fn save_vote(&mut self, vote: &Vote) -> Result<(), io::Error> {
         self.inner.write().expect("log lock poisoned").vote = Some(*vote);
-        let bytes = encode_frame(&WalRecord::Vote(*vote))?;
+        let bytes = frame_payload(&encode_wal_vote(vote)?);
         let (tx, rx) = oneshot::channel();
         self.writer
             .send(WriteOp::Vote { bytes, done: tx })
@@ -259,7 +272,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         I::IntoIter: Send,
     {
         let batch: Vec<Entry> = entries.into_iter().collect();
-        let bytes = encode_frame(&WalRecord::Append(batch.clone()))?;
+        let bytes = frame_payload(&encode_wal_append(&batch)?);
         {
             let mut inner = self.inner.write().expect("log lock poisoned");
             for e in batch {
@@ -282,7 +295,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
                 }
             }
         }
-        let bytes = encode_frame(&WalRecord::Truncate(last_log_id))?;
+        let bytes = frame_payload(&encode_wal_truncate(last_log_id));
         let (tx, rx) = oneshot::channel();
         self.writer
             .send(WriteOp::Sync { bytes, done: tx })
@@ -296,7 +309,7 @@ impl RaftLogStorage<TypeConfig> for LogStore {
             inner.last_purged = Some(log_id);
             inner.entries = inner.entries.split_off(&(log_id.index + 1));
         }
-        let bytes = encode_frame(&WalRecord::Purge(log_id))?;
+        let bytes = frame_payload(&encode_wal_purge(log_id));
         let (tx, rx) = oneshot::channel();
         self.writer
             .send(WriteOp::Sync { bytes, done: tx })
@@ -329,11 +342,19 @@ mod tests {
 
         let e1 = Entry {
             log_id: LogId::new(crate::types::CommittedLeaderId::new(2, 1), 1),
-            payload: EntryPayload::Normal(KvRequest::Put { key: b"k1".to_vec(), value: b"v1".to_vec() }),
+            payload: EntryPayload::Normal(KvRequest::Put {
+                key: b"k1".to_vec(),
+                value: b"v1".to_vec(),
+                prev_kv: false,
+            }),
         };
         let e2 = Entry {
             log_id: LogId::new(crate::types::CommittedLeaderId::new(2, 1), 2),
-            payload: EntryPayload::Normal(KvRequest::Put { key: b"k2".to_vec(), value: b"v2".to_vec() }),
+            payload: EntryPayload::Normal(KvRequest::Put {
+                key: b"k2".to_vec(),
+                value: b"v2".to_vec(),
+                prev_kv: false,
+            }),
         };
         let (tx, rx) = TypeConfig::oneshot();
         store.append([e1.clone(), e2], IOFlushed::signal(tx)).await.expect("append");

@@ -63,3 +63,28 @@ sleep_until() {
   local ms=$(($1 - $(date +%s%3N)))
   [ "$ms" -le 0 ] || sleep "$((ms / 1000)).$(printf %03d $((ms % 1000)))"
 }
+
+# probe_disk <t0> <secs> <file> [cpuset]: from t0 for that long, once a second, appends
+# 512 bytes with fsync to the replicas' data disk and writes "<second> <us>" to that file
+# in $results: the wall time of one dd, process start included. A shared virtual disk can
+# switch between fsync regimes that move every commit latency (docs/benchmarks.md).
+probe_disk() {
+  local cpus=${4:-${probe_cpus:-$gen_cpus}}
+  # shellcheck disable=SC2016 # expanded in the container
+  docker run --rm --name qpx-disk --cpuset-cpus "$cpus" -v "$data:/d" -v "$results:/out" "$image" bash -c '
+    t0=$1 secs=$2 out=/out/$3 k=0
+    now_us() { echo "${EPOCHREALTIME/[.,]/}"; }
+    append() { dd if=/dev/zero of=/d/probe bs=512 count=1 oflag=append conv=notrunc,fsync 2>/dev/null; }
+    # Unrecorded: the first append creates the file and takes several times longer.
+    append
+    while [ "$k" -lt "$secs" ]; do
+      ms=$((t0 + k * 1000 - $(now_us) / 1000))
+      [ "$ms" -le 0 ] || sleep "$((ms / 1000)).$(printf %03d $((ms % 1000)))"
+      s=$(now_us)
+      append
+      e=$(now_us)
+      echo "$k $((e - s))" >> "$out"
+      # A stalled fsync skips the seconds it took instead of firing a burst after it.
+      k=$(((e / 1000 - t0) / 1000 + 1))
+    done' _ "$1" "$2" "$3"
+}

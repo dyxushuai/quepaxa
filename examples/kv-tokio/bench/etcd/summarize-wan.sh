@@ -42,6 +42,10 @@ run_row() {
   local name=$1 csvs=() txts=() i from
   for i in $2; do csvs+=("$dir/$name-r$i.csv"); txts+=("$dir/$name-r$i.txt"); done
   from=$(sed -n 's/^measure_from_s=//p' "$dir/$name-leader.txt" 2>/dev/null)
+  awk '
+    function field(k,   i) { for (i = 1; i <= NF; i++) if (index($i, k "=") == 1) return substr($i, length(k) + 2); return "" }
+    /^offered/ { tp = field("throughput"); sub(/\/s$/, "", tp); sum += tp + 0 }
+    END { printf "%.0f ", sum }' "${txts[@]}"
   sort -n <(awk -F, -v from="${from:-0}" 'FNR > 1 && $3 == "Ok" && $1 >= from * 1e6 { print $2 - $1 }' "${csvs[@]}") | awk '
     { v[NR] = $1 }
     function pct(p) { return NR ? v[int((NR - 1) * p + 0.5) + 1] / 1000 : 0 }
@@ -106,9 +110,9 @@ combine() {
     }'
 }
 
-# Cases in run order: <system>-<case>, with the run number and region stripped.
-cases=$(find "$dir" -name '*-r0.txt' -printf '%f\n' | sed 's/-[0-9]*-r0\.txt$//' | sort -u)
-systems="quepaxa etcd etcd-tuned openraft openraft-tuned"
+# Cases in natural version order: <system>-<case>, with the run number and region stripped.
+cases=$(find "$dir" -name '*-r0.txt' -printf '%f\n' | sed 's/-[0-9]*-r0\.txt$//' | sort -Vu)
+systems="quepaxa quepaxa-auto etcd etcd-tuned openraft openraft-tuned"
 regions=$(sed -n 's/^regions: \([^;]*\);.*/\1/p' "$dir/env.txt")
 far=$(sed -n 's/^regions: .*far: \([^,]*\),.*/\1/p' "$dir/env.txt")
 best=$(sed -n 's/^regions: .*best: \([^ ]*\).*/\1/p' "$dir/env.txt")
@@ -130,15 +134,16 @@ echo "second on the replicas' data disk over the same window; a run is in the sl
 echo "from a p50 of $slow_ms ms. Compare only rows of the same regime: on a shared virtual disk"
 echo "it moves every commit latency (docs/benchmarks.md, \"A slow member\")."
 echo
-echo "| System | Case | p50 | p99 | max | Errors | Unanswered | Longest gap (ms) | Degraded (ms) | Leader after | Leader changes | Last change (s) | Disk fsync p50 | Disk fsync max | Disk regime |"
-echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
+echo "| System | Case | Completed/s | p50 | p99 | max | Errors | Unanswered | Longest gap (ms) | Degraded (ms) | Leader after | Leader changes | Last change (s) | Disk fsync p50 | Disk fsync max | Disk regime |"
+echo "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 all_regimes=""
 declare -A case_regime
 for system in $systems; do
   for c in $cases; do
     case $c in "$system"-*) ;; *) continue ;; esac
     rest=${c#"$system"-}
-    # "etcd-tuned-calm" also starts with "etcd-" (and "openraft-tuned-calm" with "openraft-").
+    # Disambiguate prefixes ("quepaxa-auto-*", "etcd-tuned-*", "openraft-tuned-*").
+    [ "$system" = quepaxa ] && [[ $rest == auto-* ]] && continue
     [ "$system" = etcd ] && [[ $rest == tuned-* ]] && continue
     [ "$system" = openraft ] && [[ $rest == tuned-* ]] && continue
     case $rest in
@@ -172,6 +177,7 @@ for system in $systems; do
   for c in $cases; do
     case $c in "$system"-*) ;; *) continue ;; esac
     rest=${c#"$system"-}
+    [ "$system" = quepaxa ] && [[ $rest == auto-* ]] && continue
     [ "$system" = etcd ] && [[ $rest == tuned-* ]] && continue
     [ "$system" = openraft ] && [[ $rest == tuned-* ]] && continue
     i=0

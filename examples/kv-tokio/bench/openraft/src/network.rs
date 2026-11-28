@@ -14,20 +14,12 @@ use openraft::raft::{
     AppendEntriesRequest, AppendResult, SnapshotResponse, StreamAppendError, TransferLeaderRequest,
     TransferLeaderResponse, VoteRequest, VoteResponse,
 };
-use serde::{Deserialize, Serialize};
 use tonic::transport::{Channel, Endpoint};
 
+use crate::codec::{encode_append_entries_req, encode_snapshot_wire};
 use crate::types::pb::openraftkv::BytesMsg;
 use crate::types::pb::openraftkv::raft_peer_client::RaftPeerClient;
-use crate::types::{LogId, NodeId, Snapshot, SnapshotMeta, TypeConfig, Vote};
-
-/// Wire format for `InstallSnapshot` unary RPC.
-#[derive(Serialize, Deserialize)]
-pub struct SnapshotWire {
-    pub vote: Vote,
-    pub meta: SnapshotMeta,
-    pub data: Vec<u8>,
-}
+use crate::types::{LogId, NodeId, Snapshot, TypeConfig, Vote};
 
 /// Wire format for each `StreamAppend` response item (`AppendResult` without conflict hints).
 pub type WireAppendResult = Result<Option<LogId>, StreamAppendError<TypeConfig>>;
@@ -42,6 +34,9 @@ pub fn make_peer_channel(addr: &str) -> Result<Channel, tonic::transport::Error>
     };
     let endpoint = Endpoint::from_shared(uri)?
         .tcp_nodelay(true)
+        .initial_connection_window_size(64 * 1024 * 1024)
+        .initial_stream_window_size(8 * 1024 * 1024)
+        .buffer_size(16_384)
         .connect_timeout(Duration::from_secs(2))
         .http2_keep_alive_interval(Duration::from_secs(1))
         .keep_alive_timeout(Duration::from_secs(2))
@@ -101,8 +96,12 @@ impl NetworkClient {
     }
 }
 
+fn io_err(e: io::Error) -> RPCError<TypeConfig> {
+    RPCError::Unreachable(Unreachable::new(&e))
+}
+
 fn json_err(e: serde_json::Error) -> RPCError<TypeConfig> {
-    RPCError::Unreachable(Unreachable::new(&io::Error::new(io::ErrorKind::InvalidData, e)))
+    io_err(io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
 fn status_err(s: tonic::Status) -> RPCError<TypeConfig> {
@@ -141,8 +140,9 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
     {
         Box::pin(async move {
             let mut client = self.client()?;
-            let req_stream = input
-                .filter_map(|req| async move { serde_json::to_vec(&req).ok().map(|data| BytesMsg { data }) });
+            let req_stream = input.filter_map(|req| async move {
+                encode_append_entries_req(&req).ok().map(|data| BytesMsg { data })
+            });
             let setup_ttl = option.hard_ttl().max(Duration::from_millis(500));
             let resp = tokio::time::timeout(setup_ttl, client.stream_append(req_stream))
                 .await
@@ -195,8 +195,9 @@ impl RaftNetworkV2<TypeConfig> for NetworkClient {
         option: RPCOption,
     ) -> Result<SnapshotResponse<TypeConfig>, StreamingError<TypeConfig>> {
         let mut client = self.client().map_err(StreamingError::from)?;
-        let wire = SnapshotWire { vote, meta: snapshot.meta, data: snapshot.snapshot };
-        let data = serde_json::to_vec(&wire).map_err(json_err).map_err(StreamingError::from)?;
+        let data = encode_snapshot_wire(&vote, &snapshot.meta, &snapshot.snapshot)
+            .map_err(io_err)
+            .map_err(StreamingError::from)?;
         let ttl = option.soft_ttl().max(Duration::from_secs(5));
         let rpc_fut = tokio::time::timeout(ttl, client.install_snapshot(BytesMsg { data }));
         tokio::select! {

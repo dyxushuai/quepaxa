@@ -79,7 +79,7 @@ fn command(rng: &mut SplitMix, gets: f64, size: usize) -> String {
 }
 
 /// How long a connect, the final `STATS`, or the wait for in-flight replies may take.
-const GRACE: Duration = Duration::from_secs(5);
+const GRACE: Duration = Duration::from_secs(8);
 
 #[derive(Default)]
 struct Stats {

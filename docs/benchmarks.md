@@ -931,117 +931,192 @@ The data: `target/bench-etcd/wan-20261114-094533/` (the three runs) and
 `wan-20261114-004901/` (one earlier run in the fast regime: ap-ne as follower p90 10.2 ms
 against 9.7 ms for us-east; as leader 14.6 against 9.7-9.8).
 
-## Against Openraft (across regions, #156)
+## Against Openraft (LAN and WAN, #156)
 
-Interleaved five-region WAN comparison of `kv-tokio` (QuePaxa) against a standalone
-`openraft 0.10.1` KV server (`examples/kv-tokio/bench/openraft/`, isolated from the root
-workspace so core dependencies stay untouched). Both systems run five containers pinned to
-CPUs `0-1 2-3 4-5 6-7 8-9` across the `wan_leaders` five-region RTT matrix (70-300 ms via
-`tc netem`), persist to the host ext4 disk with group-commit `sync_data()` on a CRC32-framed
-append-only WAL (`records.log` vs `raft.log`), use `mimalloc`, and serve the same etcd v3 KV
-gRPC API driven by five open-loop `kv-bench --protocol etcd` generators (200 puts/s per
-region, 1,000 puts/s total, 40 s runs, fault at 10 s, heal at 25 s). Openraft enables
-Pre-Vote (`enable_pre_vote = Some(true)`), pipelined bidirectional `StreamAppend`, dedicated
-heartbeat HTTP/2 channels, atomic durable snapshots every 10,000 entries, and follower-to-leader
-`ForwardPut` with immediate cancellation on local leader change and a 7 s timeout (matching
-etcd).
+Interleaved LAN (3- and 5-node) and five-region WAN comparison of `kv-tokio` (QuePaxa stock
+`W = 8`, plus `quepaxa-auto` with `--tune-in-flight-slots on --max-in-flight-slots 16`)
+against a standalone `openraft 0.10.1` KV server (`examples/kv-tokio/bench/openraft/`,
+isolated from the root workspace so core dependencies stay untouched), plus `etcd v3.7.2` in
+the LAN steady/mixed baseline. All systems run in Docker containers pinned to host CPU cores,
+persist to the host ext4 disk with group-commit `sync_data()` on a CRC32-framed WAL
+(`records.log` vs `raft.log`), use `mimalloc`, and serve the same etcd v3 KV gRPC API.
 
-```sh
-SYSTEMS="quepaxa openraft openraft-tuned" INTERLEAVE=1 REPEATS=3 \
-  examples/kv-tokio/bench/etcd/wan.sh
-```
+**Harness parity & methodology.** Both `openraft-kv` and `kv-tokio` receive equal transport
+and serialization ergonomics:
 
-**Timers.** QuePaxa runs with its WAN timers (`--retransmit-ms 400 --hedge-max-ms 3000`).
-Openraft 0.10.1 enforces `C::timeout(heartbeat_interval)` on every heartbeat RPC (so
-`heartbeat_interval` must exceed the 300 ms maximum WAN RTT) and sets each follower's
-`leader_lease` to `election_timeout_max` (so follower elections fire after
-`election_timeout_max + [election_timeout_min, election_timeout_max)`). To match etcd's and
-`etcd-tuned`'s failover windows fairly rather than penalizing Openraft with library LAN
-defaults (`50 / 150-300 ms`, which cannot hold a leader across 300 ms RTTs) or overly wide
-leases:
+- Openraft enables Pre-Vote (`enable_pre_vote = Some(true)`), pipelined bidirectional
+  `StreamAppend`, dedicated heartbeat HTTP/2 channels, zero-dependency binary framing
+  (`codec.rs`, replacing JSON byte-array serialization), `RaftLogReader::limited_get_log_entries`
+  capped at 1 MiB (matching QuePaxa's `max_batch_bytes`), an 8-channel round-robin peer
+  forwarding pool, a single background `leader_rx` watch + atomic term (eliminating per-RPC
+  `raft.metrics()` wakeup storms), and full `Put` / `Range` / `DeleteRange` / `Txn` support.
+- `kv-tokio`, `openraft-kv`, and `kv-bench` symmetrically use explicit static 64 MiB
+  connection / 8 MiB stream HTTP/2 flow-control windows (avoiding `h2 0.4.20`'s 32 KiB
+  `DataFrameBudget` `ENHANCE_YOUR_CALM` teardowns triggered by `http2_adaptive_window(true)`).
+- Compaction is matched symmetrically: `SNAPSHOT_EVERY=100000` on `steady`/`mixed` (matching
+  `etcd`'s 100k threshold) and disabled (`1000000000000`) on open-loop load curves, faults,
+  and adversary runs so snapshot spikes do not alias fault windows.
+- **Timers.** QuePaxa uses defaults on LAN and `--retransmit-ms 400 --hedge-max-ms 3000` on
+  WAN. Openraft 0.10.1 enforces `C::timeout(heartbeat_interval)` on every heartbeat RPC and sets
+  follower `leader_lease = election_timeout_max`:
+  - LAN: `openraft` 50 / 150–300 ms; `openraft-tuned` 20 / 60–100 ms.
+  - WAN (300 ms max RTT): `openraft` 400 / 1,000–1,500 ms (2.5–3.0 s nominal failover);
+    `openraft-tuned` 1,000 / 2,000–3,000 ms (5.0–6.0 s failover, matching `etcd-tuned`).
 
-- `openraft`: heartbeat 400 ms, election 1,000-1,500 ms (2.5-3.0 s nominal failover).
-- `openraft-tuned`: heartbeat 1,000 ms, election 2,000-3,000 ms (5.0-6.0 s nominal failover).
+Measured 2026-11-27 at `c42b1ad` (+ harness updates) on the 16-vCPU VM (`Linux 7.0.14-30-pve`,
+ext4). All 3 repeats per point were interleaved (`INTERLEAVE=1`) under `scripts/heavy`; raw
+logs are outside git under `~/.local/share/quepaxa-eval/openraft-matrix-20261127-v2/`. All
+numbers are medians with min–max ranges in parentheses; compare only rows of the same disk
+regime (probe `fsync` p50 `< 6 ms` fast, `>= 6 ms` slow). Hypotheses for one host, not
+production claims.
 
-Measured 2026-11-24 at `a790ff2` on the 16-vCPU VM above (idle 512-byte `fsync`: 1.69 ms
-mean, starting 1-minute load 5.91, all 54 trials interleaved per scenario and repeat under
-`flock target/ops/bench.lock`). Raw data and `summary.md` are kept outside the repo under
-`~/.local/share/quepaxa-eval/openraft-156/full/`. Medians of three runs with min-max ranges
-in parentheses, latencies in ms.
+### LAN: steady state and 40k/s mixed (3 nodes, `SNAPSHOT_EVERY=100000`)
 
-With the leader's region alive, across all five regions' writes:
+Closed-loop (`benchmark`, 256 clients over 16 connections) and open-loop 40k/s mixed (90%
+linearizable `Range` / 10% `Put`, 40 s):
 
-| Leader's region | System | p50 | p99 | max | Longest gap | Errors | Disk regime (probe p50) |
+| System | `put` unlimited | `put` 5,000/s p50 / p99 | `range` lin. | `range` ser. | `txn-put` | `mixed` 40k/s p50 / p99 (regime) |
+|---|---|---|---|---|---|---|
+| `quepaxa` | 31,800/s (30.9k–32.4k) | 5.8 / 11.4 ms | 145,244/s | 152,623/s | 32,085/s | 19.9 / 79.4 ms (mixed 6.5 ms) |
+| `quepaxa-auto` | **44,728/s** (42.7k–45.4k) | **4.4 / 7.6 ms** | **146,532/s** | 149,300/s | **42,419/s** | 12.0 / 158.6 ms (mixed 7.5 ms) |
+| `openraft` | 26,732/s (26.0k–27.1k) | 4.4 / 111.4 ms | 112,601/s | **156,567/s** | 24,705/s | **1.7 / 15.6 ms** (mixed 6.9 ms) |
+| `etcd` | 23,807/s (23.8k–24.2k) | 8.0 / 15.8 ms | 97,421/s | 137,883/s | 22,611/s | 24.2 / 173.3 ms (mixed 9.4 ms) |
+
+All four systems completed `mixed` at 40,039/s with 0 errors and 0 unanswered requests. On
+closed-loop `put, 5000/s`, `openraft` had 4,683/s (4,658–4,819/s) with p99 111.4 (43.2–174) ms
+versus `quepaxa-auto` 4,999/s (p99 7.6 ms).
+
+### LAN: open-loop load curves (`100%` puts, 16 connections, 20 s/step)
+
+#### 3 nodes, 17 B values
+
+| System | Offered/s | Completed/s | p50 (ms) | p99 (ms) | Errors | Disk regime |
+|---|---|---|---|---|---|---|
+| `quepaxa` | 5,000 / 15,000 / 30,000 | 5,008 / 14,997 / 30,009 | 7.8 / 8.7 / 7.8 | 139.3 / 35.1 / 15.2 | 0 / 0 / 0 | mixed / mixed / fast |
+| | 50,000 / 100,000 / 150,000 | 50,007 / 100,083 / 148,986 | 18.2 / 109.1 / 21,705.8 | 132.8 / 21,714.5 / 56,561.3 | 0 / 0 / 22,804 | mixed / mixed / fast |
+| `quepaxa-auto` | 5,000 / 15,000 / 30,000 | 5,008 / 14,997 / 30,009 | 5.4 / 14.0 / 6.6 | 74.1 / 197.4 / 254.7 | 0 / 0 / 0 | mixed / mixed / fast |
+| | 50,000 / 100,000 / 150,000 | 50,007 / 100,083 / **150,002** | **7.9** / 46,401.5 / **21,147.3** | 353.9 / 94,464 / **46,028.2** | 0 / 0 (0–10.6k) / **0** | mixed / slow / mixed |
+| `openraft` | 5,000 / 15,000 / 30,000 | 5,008 / 14,985 / 30,009 | 5.3 / 6.4 / 1,592.7 | 130.1 / 304.2 / 3,084.7 | 0 / 0 (0–35.8k) / 0 | fast / mixed / fast |
+| | 50,000 / 100,000 / 150,000 | 48,328 / 94,210 / 143,597 | 4,109.1 / 15,982.4 / 24,279.3 | 7,432.8 / 27,417.5 / 45,192.6 | 33,539 / 116,009 / 127,290 | mixed / mixed / mixed |
+
+#### 5 nodes, 17 B values
+
+| System | Offered/s | Completed/s | p50 (ms) | p99 (ms) | Errors | Disk regime |
+|---|---|---|---|---|---|---|
+| `quepaxa` | 5k / 15k / 30k / 50k | 5,008 / 14,997 / 30,009 / 50,007 | 19.4 / 21.9 / 21.9 / 24.0 | 45.8 / 152 / 193.2 / 240.9 | 0 | mixed / slow / slow / slow |
+| | 100,000 / 150,000 | 100,011 / 139,963 | 47,030.3 / 75,805.6 | 89,432.5 / 190,115.3 | 0 (0–23.8k) / 200,789 | slow / mixed |
+| `quepaxa-auto` | 5k / 15k / 30k / 50k | 5,008 / 14,997 / 29,994 / 50,007 | **14.8 / 16.9 / 20.2 / 20.8** | 51 / 114 / 378.2 / **208.1** | 0 | mixed / slow / slow / slow |
+| | 100,000 / 150,000 | **100,083** / 129,973 | **27.0** / 35,809.2 | **1,518.3** / 58,213.8 | **0** / 400,584 | mixed / mixed |
+| `openraft` | 5k / 15k / 30k / 50k | 5,008 / 14,997 / 30,009 / 44,329 | 14.4 / 568.4 / 2,479.8 / 1,671.9 | 91.2 / 1,391.9 / 5,554.1 / 5,308.9 | 0 / 0 / 0 / 113,501 | slow (all) |
+| | 100,000 / 150,000 | 91,262 / 137,738 | 2,434.2 / 19,633.2 | 28,898.9 / 41,530.9 | 176,409 / 245,298 | mixed / mixed |
+
+#### 3 nodes, 4 KiB values
+
+| System | Offered/s | Completed/s | p50 (ms) | p99 (ms) | Errors | Disk regime |
+|---|---|---|---|---|---|---|
+| `quepaxa` | 1k / 2k / 5k / 10k | 1,002 / 2,002 / 5,008 / 9,998 | 18.8 / 19.0 / 21.1 / 22.1 | 354.1 / 63.5 / 55.2 / 263 | 0 | mixed / mixed / slow / slow |
+| | 20,000 | 19,532 (19.2k–20.0k) | 25.7 (25.5–25.8) | 864.3 (491.4–996.5) | 9,153 (0–15.8k) | slow (8.2 ms) |
+| `quepaxa-auto` | 1k / 2k / 5k / 10k | 1,002 / 2,002 / 5,008 / 9,993 | 14.2 / 16.5 / 18.3 / 23.0 | 120 / 162.5 / 222.8 / 305.4 | 0 / 0 / 0 / 0 (0–8.5k) | mixed / slow / slow / slow |
+| | 20,000 | 19,705 (18.6k–19.9k) | **25.6** (25.3–26.3) | **665.8** (571.4–1,525.1) | 6,337 (1.3k–28.8k) | slow (8.4 ms) |
+| `openraft` | 1k / 2k / 5k / 10k | 1,002 / 2,002 / 5,008 / 9,998 | 12.9 / 13.1 / 13.5 / 150.3 | 154.1 / **19.7** / 165.9 / 646.7 | 0 / 0 / 0 (0–47.7k) / 0 | slow (all) |
+| | 20,000 | **20,002** (20.0k–20.0k) | 139.1 (123.8–146.9) | 1,034.6 (928.1–1,739.5) | **0** | slow (8.1 ms) |
+
+### LAN: 3-node leader faults (5,000 puts/s open loop on followers, 40 s, fault 10–25 s)
+
+| Scenario | System | Errors | Longest gap (ms) | p50 (ms) | p99 (ms) | max (ms) | Disk regime |
 |---|---|---|---|---|---|---|---|
-| far (`ap-ne`), no fault | QuePaxa | 435 (434–438) | 648 (648–649) | 814 (765–899) | 184 (184–186) | 0 | fast (2.5–2.8 ms) |
-| | openraft | 365 (365–366) | 489 (489–554) | 842 (776–868) | 116 (114–370) | 0 | fast (3.0–3.5 ms) |
-| | openraft-tuned | 365 (365–366) | 488 (488–533) | 872 (871–1,096) | 52 (50–61) | 0 | fast (3.1–3.3 ms) |
-| best (`us-east`), no fault | QuePaxa | 200 (185–205) | 323 (315–365) | 450 (372–478) | 182 (84–223) | 0 | fast (2.6–3.2 ms) |
-| | openraft | 173 (165–185) | 410 (277–543) | 624 (431–864) | 340 (170–439) | 0 | mixed (3.1–7.5 ms) |
-| | openraft-tuned | 174 (166–205) | 382 (376–998) | 661 (608–1,207) | 392 (366–666) | 0 | mixed (3.1–7.0 ms) |
-| far, +100 ms on its links | QuePaxa | 499 (486–503) | 914 (831–918) | 963 (907–964) | 288 (242–289) | 0 | fast (2.6–2.9 ms) |
-| | openraft | 416 (415–2,789) | 767 (732–13,605) | 1,122 (1,033–14,530) | 471 (353–9,330) | 0 (0–9,931) | mixed (3.2–70.7 ms) |
-| | openraft-tuned | 416 (415–422) | 720 (695–724) | 1,138 (1,001–1,142) | 172 (122–315) | 0 | mixed (3.2–6.9 ms) |
-| far, jitter (σ 50 ms) & 1% loss | QuePaxa | 460 (450–472) | 891 (877–910) | 1,144 (1,087–1,229) | 511 (467–535) | 0 | fast (2.6–4.7 ms) |
-| | openraft | 621 (604–2,433) | 7,349 (6,880–7,785) | 7,842 (7,060–8,392) | 3,958 (1,386–7,185) | 2,939 (865–5,532) | mixed (3.0–54.9 ms) |
-| | openraft-tuned | 747 (637–957) | 5,730 (5,021–6,455) | 6,173 (5,506–6,701) | 568 (539–986) | 0 | fast (2.9–3.4 ms) |
+| `crash` | `quepaxa` | **0** | 316 (174–619) | 20.0 | 299.0 | 457.4 | mixed (7.0 ms) |
+| | `quepaxa-auto` | **0** | **173** (171–195) | 15.0 | **144.9** | **206.9** | slow (7.4 ms) |
+| | `openraft` | 2,716 (2,527–3,024) | 532 (512–585) | 14.4 | 387.0 | 447.2 | slow (6.8 ms) |
+| | `openraft-tuned` | 1,075 (1,031–1,122) | 310 (201–316) | **6.3** | 292.6 | 524.5 | mixed (3.7 ms) |
+| `partition` | `quepaxa` | **0** | 298 (166–438) | 17.3 | 250.7 | 386.0 | slow (6.3 ms) |
+| | `quepaxa-auto` | **0** | 322 (172–408) | **13.6** | **189.0** | **339.4** | mixed (6.6 ms) |
+| | `openraft` | 3,165 (2,589–4,257) | 617 (507–701) | 14.6 | 1,360.3 | 1,449.2 | mixed (7.1 ms) |
+| | `openraft-tuned` | 1,127 (1,056–1,181) | **224** (214–241) | 37.9 | 294.4 | 349.1 | slow (7.2 ms) |
+| `slow-disk` | `quepaxa` | 0 | **157** (153–186) | 22.5 | **159.2** | 234.2 | slow (7.0 ms) |
+| | `quepaxa-auto` | 0 | 182 (58–568) | 18.4 | 427.4 | 766.9 | mixed (6.8 ms) |
+| | `openraft` | 0 | 222 (172–845) | **15.3** | 662.4 | 858.6 | slow (7.1 ms) |
+| | `openraft-tuned` | 0 | 176 (171–176) | 15.7 | 159.3 | **194.7** | slow (7.3 ms) |
+| `stuck-disk` | `quepaxa` | 0 | 28 (26–170) | 7.2 | 13.1 | 115.1 | mixed (3.2 ms) |
+| | `quepaxa-auto` | 0 | 172 (50–291) | 7.6 | 40.7 | 211.1 | mixed (5.1 ms) |
+| | `openraft` | 0 | 12 (6–26) | 6.9 | 20.7 | 34.5 | mixed (4.4 ms) |
+| | `openraft-tuned` | 0 | **9** (5–22) | **5.5** | **8.2** | **16.9** | fast (3.2 ms) |
+| `far-leader` | `quepaxa` | **0** | **115** (103–324) | 7.1 | **62.9** | **192.6** | mixed (3.1 ms) |
+| | `quepaxa-auto` | **0** | 319 (78–326) | **6.7** | 487.2 | 1,073.7 | fast (3.1 ms) |
+| | `openraft` | 0 | 301 (165–472) | 7.1 | 453.7 | 748.2 | fast (3.5 ms) |
+| | `openraft-tuned` | **73,081** (52.8k–73.9k) | 14,271 (9,740–14,592) | 13.0 | 141.6 | 329.3 | mixed (6.6 ms) |
 
-With the leader's region (`ap-ne`) crashed or cut off, across the four surviving regions'
-writes (percentiles cover successful requests only; requests Openraft fails during elections
-are counted in `Errors`, not in latency percentiles):
+### WAN: 5-region calm & faults (`1,000 puts/s` total, 4 conns/region, 40 s)
 
-| Fault | System | Errors | Longest gap | p50 | p99 | max | Leader after | Disk regime |
-|---|---|---|---|---|---|---|---|---|
-| crash (`SIGKILL`) | QuePaxa | 0 | 714 (707–780) | 208 (190–209) | 1,092 (928–1,127) | 12,398 (12,354–12,417) | `us-east` (3/3) | mixed (2.7–6.4 ms) |
-| | openraft | 3,035 (2,997–3,143) | 3,951 (3,921–3,979) | 287 (286–293) | 588 (573–590) | 869 (862–1,091) | `eu-west` (3/3) | mixed (3.0–6.0 ms) |
-| | openraft-tuned | 4,896 (4,701–5,358) | 6,027 (5,991–6,846) | 204 (204–346) | 528 (527–662) | 873 (850–1,094) | `us-east` (2), `sa-east` (1) | fast (3.2–3.7 ms) |
-| partition (15 s) | QuePaxa | 0 | 732 (608–754) | 211 (207–212) | 963 (865–1,076) | 12,415 (1,364–12,417) | `us-east` (3/3) | fast (2.5–3.0 ms) |
-| | openraft | 5,188 (3,366–5,820) | 6,624 (6,366–7,552) | 286 (166–346) | 649 (593–2,264) | 3,160 (2,733–4,090) | `us-east`, `sa-east`, `us-west` | fast (3.3–3.8 ms) |
-| | openraft-tuned | 5,367 (5,073–5,402) | 7,557 (6,825–8,662) | 295 (285–346) | 959 (582–2,178) | 1,379 (1,132–2,564) | `us-west`, `eu-west`, `sa-east` | fast (3.1–3.4 ms) |
+With the leader's region (`ap-ne`) crashed or cut off, `Completed/s` (~796/s for QuePaxa vs
+669–728/s for Openraft) and latency cover the four surviving regions; percentiles cover
+successful requests only (`Errors` excludes requests rejected during Openraft elections):
 
-What the tables show, and what they do not:
+| Case | System | Completed/s | Errors | Longest gap (ms) | p50 (ms) | p99 (ms) | max (ms) | Leader after | Disk regime |
+|---|---|---|---|---|---|---|---|---|---|
+| `calm` | `quepaxa` | 995 | 0 | **126** (126–426) | 407.9 | 590.7 | **671.9** | `ap-ne` | fast (2.8 ms) |
+| (`ap-ne`) | `quepaxa-auto` | 995 | 0 | 185 (184–348) | 454.0 | 662.7 | 734.1 | `ap-ne` | fast (2.8 ms) |
+| | `openraft` | 995 | 0 | 134 (49–658) | **365.4** | **487.6** | 1,086.6 | `ap-ne` | fast (3.3 ms) |
+| | `openraft-tuned` | 995 | 0 | 342 (245–504) | 365.6 | 607.5 | 944.0 | `ap-ne` | mixed (3.1 ms) |
+| `calm-best` | `quepaxa` | 995 | 0 | 204 (182–212) | 182.6 | 352.3 | 460.9 | `us-east` | slow (6.8 ms) |
+| (`us-east`) | `quepaxa-auto` | 995 | 0 | **94** (91–204) | 223.4 | 351.7 | **454.8** | `us-east` | fast (5.2 ms) |
+| | `openraft` | 985 | 0 (0–1,054) | 187 (175–675) | 173.1 | 329.9 (318–6,788) | 456.4 | `us-east` | slow (7.0 ms) |
+| | `openraft-tuned` | 995 | 0 | 115 (67–192) | **172.6** | **276.3** | 458.8 | `us-east` | slow (6.8 ms) |
+| `slow` | `quepaxa` | 995 | 0 | 324 (219–494) | 463.2 | 853.3 | 995.5 | `ap-ne` | mixed (6.0 ms) |
+| (+100 ms) | `quepaxa-auto` | 995 | 0 | 293 (291–1,099) | 522.4 | 937.6 | 984.8 | `ap-ne` | fast (5.1 ms) |
+| | `openraft` | 995 | 0 | 201 (188–345) | **422.5** | 760.6 | **885.5** | `ap-ne` | mixed (6.6 ms) |
+| | `openraft-tuned` | 995 | 0 | **183** (136–189) | 422.6 | **726.1** | 901.4 | `ap-ne` | slow (7.2 ms) |
+| `jitter` | `quepaxa` | 995 | **0** | 553 (525–624) | **458.7** | **847.1** | **1,172.3** | `ap-ne` | mixed (5.0 ms) |
+| (σ 50 ms, | `quepaxa-auto` | 995 | **0** | 803 (744–898) | 499.3 | 944.8 | 1,414.6 | `ap-ne` | fast (5.1 ms) |
+| 1% loss) | `openraft` | 995 | 0 | **417** (369–514) | 485.7 | 1,327.5 | 1,750.8 | `ap-ne` | mixed (4.3 ms) |
+| | `openraft-tuned` | 995 | 0 (0–10) | 525 (339–1,226) | 621.4 | 4,412.8 | 4,594.2 | `ap-ne` | mixed (5.3 ms) |
+| `crash` | `quepaxa` | **796** | **0** | **746** (746–779) | 215.1 | 914.6 | 3,435.1 | `us-east` (3/3) | mixed (2.6 ms) |
+| (`SIGKILL`) | `quepaxa-auto` | **796** | **0** | 1,021 (651–1,024) | 408.9 | 977.3 | 1,870.7 | `us-east` (3/3) | fast (3.0 ms) |
+| | `openraft` | 728 | 2,731 (2,683–2,927) | 3,369 (3,295–3,472) | **167.3** | **487.4** | **902.7** | `us-east` | mixed (3.4 ms) |
+| | `openraft-tuned` | 669 | 5,137 (4,805–5,469) | 6,529 (6,086–6,885) | 334.5 | 570.1 | 914.1 | `us-east` | fast (3.6 ms) |
+| `partition` | `quepaxa` | **796** | **0** | **778** (747–871) | **215.5** | **886.1** | 3,406.3 | `us-east` (3/3) | mixed (3.0 ms) |
+| (15 s) | `quepaxa-auto` | **796** | **0** | 993 (746–1,023) | 409.7 | 897.2 | **1,815.3** | `us-east` (3/3) | fast (3.0 ms) |
+| | `openraft` | 707 | 3,336 (3,318–5,745) | 5,490 (4,521–8,951) | 346.1 | 1,442.8 | 1,941.2 | `sa-east` | mixed (4.7 ms) |
+| | `openraft-tuned` | 670 | 5,448 (4,943–8,169) | 8,900 (6,121–12,264) | 335.9 | 2,296.8 | 2,600.8 | `us-east` | mixed (6.7 ms) |
 
-- **Steady state (`calm`, `calm-best`) and uniform `+100 ms` delay (`slow`): Openraft has lower
-  steady-state latency.** With `ap-ne` leading, Openraft's local commit p50 is 185 ms (180 ms
-  RTT to its second-nearest peer `us-east` plus ~5 ms `fsync`) and all-region p50/p99 is
-  365/488-489 ms, against QuePaxa's 263 ms local p50 and 435/648 ms overall. Under `+100 ms`
-  uniform leader delay (`slow`), `ap-ne` stays leader in all three systems and `openraft-tuned`
-  commits at 416/720 ms with 0 errors versus QuePaxa's 499/914 ms. Openraft streams
-  `AppendEntries` continuously over `StreamAppend` without filling a fixed 8-slot in-flight
-  window, whereas QuePaxa's default `max_in_flight_slots = 8` fills in bursts on a 180 ms
-  quorum RTT (visible in its 184 ms `calm` gap). In `calm-best`, Openraft's p50 stays lower
-  (173 vs 200 ms), while its p99 (382-410 vs 323 ms) reflects both mixed disk spikes and
-  40,000 single-entry Raft logs crossing its 10,000-entry snapshot threshold 3-4 times per
-  run (QuePaxa batches many writes per slot and stays below its 10,000-slot snapshot
-  threshold).
-- **Host disk stalls affected two Openraft runs.** `openraft` run 3 of `slow` hit a shared-host
-  disk stall (probe `fsync` p50 70.7 ms, max 6.79 s), which broke its 400 ms heartbeat and
-  caused all 9,931 errors (runs 1-2 in the fast regime had 0 errors and p99 732-767 ms).
-  `openraft` run 2 of `jitter` similarly hit a 54.9 ms disk p50 (5,532 errors), though runs 1
-  and 3 in the fast disk regime (3.0-3.1 ms) still saw 865-2,939 errors and 6.9-7.3 s p99.
-- **Jitter + 1% loss (`jitter`): QuePaxa cuts p99 by 6.4×–8.2× with 0 errors.** All three
-  `quepaxa` and `openraft-tuned` runs stayed in the fast disk regime (2.6-4.7 ms, 21-39 TCP
-  reorders). QuePaxa held p99 at 891 ms with 0 errors. `openraft-tuned` avoided spurious
-  elections (0 errors) via its 1 s heartbeat / 3 s lease, yet sequential Raft replication
-  head-of-line blocked behind 1% packet loss and netem jitter to a 5,730 ms p99 (similar to
-  `etcd-tuned`'s 6,880 ms). Aggressive `openraft` (400 ms heartbeat) suffered both elections
-  and head-of-line backlog (2,939 median errors, 7,349 ms p99).
-- **Leader crash and partition: QuePaxa fails 0 requests and recovers 5.5×–10.3× faster.**
-  QuePaxa rotated deterministically to `us-east` (next in `--leader-order`) in 714 ms
-  (`crash`) and 732 ms (`partition`) with 0 errors. Openraft failed 3,035-5,367 writes across
-  3,951-6,027 ms (`crash`) and 6,624-7,557 ms (`partition`) while waiting out its follower
-  lease plus election timeout (and TCP/HTTP2 keepalive teardown under silent `iptables DROP`),
-  and elected whichever survivor won the race (`eu-west`, `us-west`, `sa-east`, or `us-east`),
-  moving post-fault p50 accordingly. Openraft's lower post-fault p99 (528-959 ms vs QuePaxa's
-  963-1,092 ms) omits the 3k-5.4k failed requests, whereas QuePaxa's p99 includes every
-  request delayed across the 714-732 ms failover.
-- **QuePaxa `sa-east` 12.4 s max outlier on crash/partition.** In `crash` (3/3 runs) and
-  `partition` (2/3 runs), 10-30 writes from `sa-east` (out of 32,000 surviving-region writes)
-  forwarded right before `ap-ne` failed waited until the `4 · hedge_max` (12 s) upper bound
-  introduced in #231 before hedging, completing at 12.3-12.4 s with 0 errors (`us-east`,
-  `us-west`, and `eu-west` max stayed at 0.94-1.43 s).
-- Single-host caveats apply identically to "Against etcd" above: emulated links, shared host
-  CPUs and ext4 disk, and no bandwidth cap; hypotheses for real regions, not production claims.
+### WAN: 5-region open-loop load curves (16 conns/region, `us-east` leading, 30 s/step)
+
+#### 17 B values (1,000–50,000/s)
+
+| System | Offered/s | Completed/s | p50 (ms) | p99 (ms) | Errors | Disk regime |
+|---|---|---|---|---|---|---|
+| `quepaxa` | 1k / 5k / 15k / 30k / 50k | 994 / 5,000 / 15,001 / 29,974 / **49,948** | **180.7 / 214.0 / 218.8 / 231.2 / 254.6** | **345.2** / 621.7 / 682.3 / 495.6 / 721.1 | **0 / 0 / 0 / 0 / 0** | slow / mixed (×4) |
+| `quepaxa-auto` | 1k / 5k / 15k / 30k / 50k | 994 / 5,000 / 15,001 / 29,974 / **49,948** | 223.7 / 224.0 / 233.8 / 243.9 / **247.2** | 353.6 / **357.0 / 367.9 / 485.9 / 680.8** | **0 / 0 / 0 / 0 / 0** | fast (×3) / mixed (×2) |
+| `openraft` | 1k / 5k / 15k / 30k / 50k | 994 / 5,000 / 14,964 / 26,722 / 49,915 | 172.9 / 264.3 / 2,717.9 / 3,427.7 / 3,168.7 | 333.9 / 2,655.5 / 6,628.7 / 7,706.4 / 6,549.0 | 0 / 0 / 0 (0–82.6k) / 97,566 / 1,967 | mixed (×4) / slow |
+
+#### 4 KiB values (500–10,000/s)
+
+| System | Offered/s | Completed/s | p50 (ms) | p99 (ms) | Errors | Disk regime |
+|---|---|---|---|---|---|---|
+| `quepaxa` | 500 / 1k / 2k / 5k / 10k | 498 / 985 / 1,993 / 3,585 / 3,045 | 212.6 / 250.8 / 227.0 / 5,757.7 / 6,759.0 | 520.4 / 1,775.1 / 1,317.7 / 14,182.4 / 18,373.2 | 0 / 0 / 0 / 42,497 / 208,357 | slow (×2) / mixed (×3) |
+| `quepaxa-auto` | 500 / 1k / 2k / 5k / 10k | 498 / 994 / 1,993 / 4,955 / 9,442 | 229.3 / 218.9 / 219.9 / 337.3 / **308.1** | 574.7 / 757.8 / 1,056.3 / 31,535.4 / 6,503.2 | 0 / 0 / 0 / 623 / 16,386 | fast / mixed (×4) |
+| `openraft` | 500 / 1k / 2k / 5k / 10k | 498 / 994 / 1,993 / **5,000 / 9,989** | **175.5 / 174.8 / 175.8 / 322.7** / 385.7 | **391.3 / 386.9 / 432.2 / 681.5 / 1,105.0** | **0 / 0 / 0 / 0 / 0** | slow (×4) / mixed |
+
+### WAN: 5-region dynamic adversary (2 of 5 delayed 1–500 ms every 5 s, 60 s/step)
+
+| System | Offered/s | Completed/s | p50 (ms) | p99 (ms) | Errors | Longest gap (ms) | Disk regime |
+|---|---|---|---|---|---|---|---|
+| `quepaxa` | 1k / 5k / 15k / 30k | 997 / 4,996 / 14,988 / 29,972 | **452.9 / 542.8 / 589.9 / 604.8** | 3,553.1 / 7,133.9 / 7,424.0 / 8,284.6 | **0 / 0 / 0 / 0** | 1,424 / 4,872 / 2,405 / 1,761 | mixed (×2) / slow (×2) |
+| `quepaxa-auto` | 1k / 5k / 15k / 30k | 997 / 4,996 / 14,988 / 29,972 | 522.8 / 581.5 / 724.5 / 741.9 | 2,900.0 / 6,858.6 / **6,418.6 / 6,040.3** | **0 / 0 / 0 / 0** | 1,356 / 3,557 / **1,906 / 1,423** | mixed (×3) / slow |
+| `openraft` | 1k / 5k / 15k / 30k | 988 / 4,897 / 8,943 / 22,453 | **413.7** / 845.6 / 2,500.8 / 3,635.5 | **1,552.5 / 3,425.1** / 9,855.4 / 8,520.7 | 0 (0–18k) / 6.4k / 362.7k / 453.4k | 499 / 596 / 7,523 / 5,597 | slow / mixed / slow (×2) |
+| `openraft-tuned` | 1k / 5k / 15k / 30k | 997 / 4,994 / 10,813 / 24,834 | 417.6 / 1,402.0 / 4,769.7 / 3,856.6 | **1,464.6 / 5,491.9** / 8,609.5 / 8,689.5 | 0 / 0 (0–119) / 248.2k / 308.3k | **401 / 397** / 13,579 / 4,004 | slow (×4) |
+
+### What the matrix shows
+
+- **Where Openraft wins:**
+  - **Low-load / steady-state WAN latency (`calm`, `calm-best`, `slow`, 1k/s `adversary`) and LAN 40k/s `mixed`:** Openraft streams `AppendEntries` continuously without waiting on an 8-slot in-flight cap, giving lower steady WAN p50 (365 ms vs 408 ms `calm`, 173 ms vs 183–223 ms `calm-best`) and **1.7 ms p50 vs 12.0–19.9 ms** on 90%-read LAN `mixed`.
+  - **Large (4 KiB) values at high open-loop rate:** At 20k/s on LAN (`0` errors vs `quepaxa` 9,153 and `quepaxa-auto` 6,337 errors) and 5k–10k/s on WAN (`0` errors and 1.1 s p99 at 10k/s vs `quepaxa-auto` 16,386 errors / 6.5 s p99 and `quepaxa` 208,357 errors / 18.4 s p99), Openraft streams inline values directly, whereas QuePaxa's content-addressable indirect `Data` fetch + fixed slot admission bound throttle under high 4 KiB ingress.
+  - **Follower `stuck-disk` on LAN (`openraft-tuned` 5.5/8.2 ms p50/p99):** Fast local elections cleanly hand off if a disk stalls while heartbeats remain sub-second.
+- **Where QuePaxa (`quepaxa` & `quepaxa-auto`) wins:**
+  - **Closed-loop steady throughput & small-value open-loop scale:** `quepaxa-auto` reaches **44,728/s** `put` and **146,532/s** linearizable `range` on LAN (`+67%` and `+30%` over `openraft`). On 17B open-loop curves, `quepaxa-auto` holds **0 errors** up to 150k/s (3-node LAN), 100k/s (5-node LAN, 27 ms p50 vs `openraft` 2.4 s + 176k errors), and **50k/s across 5 WAN regions** (247/681 ms p50/p99 vs `openraft` 3,169/6,549 ms).
+  - **Crash, partition, jitter, and dynamic adversary resilience:** On both LAN and WAN `crash` and `partition`, QuePaxa fails **0 requests** and rotates in ~0.2–1.0 s (`us-east` 3/3) while Openraft rejects 1k–5.4k writes across 0.2–8.9 s failovers. On LAN `far-leader` (+50 ms), aggressive `openraft-tuned` collapsed with **73,081 errors** and a 14.3 s gap while QuePaxa kept 0 errors and a 115 ms gap. Under 5-region WAN dynamic adversary at 15k–30k/s, QuePaxa kept **0 errors** (p50 590–742 ms) while Openraft dropped 248k–453k writes and stalled for 4–13.6 s gaps.
+- **Methodology & shared-host caveats:** `quepaxa-auto` raises `max_in_flight_slots` up to 16 on saturation, explaining why it trails stock `W = 8` on low-rate WAN `calm`/`crash` (more in-flight slots queue longer across a fault) while dominating high-rate LAN/WAN curves. Single-host caveats apply identically to "Against etcd": emulated links, shared host CPUs and ext4 disk (several steps shifted between fast `< 6 ms` and slow `>= 6 ms` `fsync` regimes mid-matrix), and no link bandwidth cap.
+
 
 ## The paper's evaluation (§7, #174)
 
