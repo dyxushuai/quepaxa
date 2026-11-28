@@ -18,12 +18,12 @@ lint() {
 }
 
 tests() {
-  cargo nextest run --workspace --no-fail-fast --no-tests=pass -E 'not binary(model_check) and not binary(placement)'
+  cargo nextest run --workspace --no-fail-fast --no-tests=pass -E 'not binary(model_check) and not binary(placement) and not binary(compound_gray_faults)'
   cargo test --workspace --doc
   # The documented examples assert their results.
   for e in cluster restart membership; do cargo run -q -p quepaxa --example "$e"; done
-  # Model checking (release; every scenario must be exhausted) and placement across regions.
-  cargo nextest run --release -p quepaxa-sim --test model_check --test placement --no-fail-fast
+  # Model checking (release; every scenario must be exhausted), placement, and compound gray-fault convergence.
+  cargo nextest run --release -p quepaxa-sim --test model_check --test placement --test compound_gray_faults --no-fail-fast
   cargo nextest run -p kv-tokio --features shuttle --bin kv-tokio --no-fail-fast
 }
 

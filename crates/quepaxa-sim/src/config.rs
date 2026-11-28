@@ -83,6 +83,11 @@ pub struct SimConfig {
     /// Target write payload size range `(min, max)` in bytes (`None` for small ~10-byte
     /// payloads). Values must fit within `max_batch_bytes` (4096 in the simulator).
     pub payload_bytes: Option<(usize, usize)>,
+    /// Enable online `in_flight_slots` tuning (`Config::tune_in_flight_slots`).
+    pub tune_in_flight_slots: bool,
+    /// Optional bursty write-rate schedule `(at_ms, propose_per_mille)` overriding `propose`
+    /// from each virtual ms onward. Values above 1000 issue multiple writes per tick.
+    pub propose_schedule: Option<Vec<(u64, u32)>>,
 }
 
 /// Draws `Config::inline_batch_bytes` per replica per seed from `{64, 256, u32::MAX}` so
@@ -162,6 +167,8 @@ impl SimConfig {
             write_weights: None,
             track_leader: false,
             payload_bytes: None,
+            tune_in_flight_slots: false,
+            propose_schedule: None,
         }
     }
 }

@@ -199,3 +199,16 @@ proptest::proptest! {
         }
     }
 }
+
+#[test]
+fn was_evicted_tracks_trimmed_batches_per_origin() {
+    let mut s = Store::new(10);
+    assert!(!s.was_evicted(id(0, 0)));
+    assert!(s.insert(id(0, 0), batch(6, 1)));
+    assert!(!s.was_evicted(id(0, 0)));
+    assert!(s.insert(id(0, 1), batch(6, 2)));
+    assert!(s.get(&id(0, 0)).is_none());
+    assert!(s.was_evicted(id(0, 0)));
+    assert!(!s.was_evicted(id(0, 1)));
+    assert!(!s.was_evicted(id(1, 0)));
+}

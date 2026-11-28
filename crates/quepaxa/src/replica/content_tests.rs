@@ -975,3 +975,55 @@ fn learn_respects_scaled_fetch_grace_for_missing_refs() {
     rec.poll_actions(&mut out);
     assert_eq!(rec.metrics().fetches, 1, "catch-up Body::Entries must fetch missing content immediately");
 }
+
+#[test]
+fn evicted_batch_fetches_immediately_without_grace() {
+    let mut c = cfg();
+    c.id = NodeId(2);
+    c.retransmit_interval = 400_000_000;
+    c.hedge_max = 3_000_000_000;
+    c.max_batch_bytes = 4096;
+    c.content_cache_bytes = Some(4096);
+    let mut rep = Replica::new(c, [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(0));
+    rep.commit_latency = Some(300_000_000);
+    rep.watch.reply.insert(NodeId(0), 250_000_000);
+
+    // Receive `Data` seq 0 from origin 0, then push newer unpinned data past the 4 KiB cap so seq 0
+    // is evicted from the local content store.
+    let id0 = batch::DataId { origin: NodeId(0), incarnation: 1, seq: 0 };
+    let payload0 = Bytes::from(alloc::vec![b'a'; 2048]);
+    let ref0 = batch::Ref { id: id0, len: payload0.len() as u32, crc: crate::crc::crc32c(&payload0) };
+    rep.handle(Timestamp(1_000_000), from_peer(0, 2, Body::Data { id: id0, bytes: payload0 })).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    for seq in 1..=3u64 {
+        let id = batch::DataId { origin: NodeId(0), incarnation: 1, seq };
+        let bytes = Bytes::from(alloc::vec![b'b'; 2048]);
+        rep.handle(Timestamp(1_000_000), from_peer(0, 2, Body::Data { id, bytes })).unwrap();
+        out.clear();
+        rep.poll_actions(&mut out);
+    }
+    assert!(rep.content.was_evicted(id0), "seq 0 must be marked evicted after cache trim");
+
+    // Parking a RecordRequest referencing the evicted batch must fetch immediately (no fetch_grace).
+    let p = Proposal {
+        priority: 0,
+        key: ValueKey { origin: NodeId(0), incarnation: 1, seq: 0 },
+        value: batch::encode_pieces(&[batch::Piece::Ref(ref0)]),
+    };
+    rep.handle(
+        Timestamp(2_000_000),
+        from_peer(0, 2, Body::RecordRequest { slot: Slot(0), step: 4, proposal: p }),
+    )
+    .unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(
+        rep.metrics().fetches,
+        1,
+        "evicted Data batch must fetch immediately instead of stalling for fetch_grace"
+    );
+}

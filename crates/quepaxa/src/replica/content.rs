@@ -313,9 +313,10 @@ impl Replica {
         let mut by_target: BTreeMap<NodeId, Vec<DataId>> = BTreeMap::new();
         let interval = self.cfg.retransmit_interval;
         for &r in missing {
+            let delay = if self.content.was_evicted(r.id) { 0 } else { grace };
             if let Some(in_flight) = self.fetching.fetches.get_mut(&r.id) {
                 in_flight.slot = in_flight.slot.min(slot);
-                let upgrade = (grace == 0 && !in_flight.sent).then_some((in_flight.slot, in_flight.first));
+                let upgrade = (delay == 0 && !in_flight.sent).then_some((in_flight.slot, in_flight.first));
                 if let Some((s, f)) = upgrade {
                     let ring = self.fetch_ring(s, r.id.origin, f);
                     if let Some(&target) = ring.first()
@@ -330,7 +331,6 @@ impl Replica {
             }
             let ring = self.fetch_ring(slot, r.id.origin, first);
             let Some(&target) = ring.first() else { continue };
-            let delay = grace;
             if delay == 0 {
                 self.fetching.fetches.insert(
                     r.id,

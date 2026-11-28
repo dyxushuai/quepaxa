@@ -358,6 +358,7 @@ impl Sim {
         cfg.hedge_max = self.cfg.hedge_max_ms * MS;
         cfg.silent_leader_takeover = self.cfg.silent_leader_takeover;
         cfg.max_in_flight_slots = self.cfg.in_flight_slots;
+        cfg.tune_in_flight_slots = self.cfg.tune_in_flight_slots;
         cfg.max_batch_bytes = 4096;
         cfg.inline_batch_bytes = config::inline_batch_bytes(self.cfg.seed, i);
         cfg.max_message_bytes = self.cfg.max_message_bytes;
@@ -446,9 +447,31 @@ impl Sim {
                     self.inject_faults()?;
                     self.check_progress()?;
                 }
-                if self.faults_on && self.chance(self.cfg.propose) {
-                    let i = self.writer();
-                    self.propose(i)?;
+                if self.faults_on {
+                    let rate = self
+                        .cfg
+                        .propose_schedule
+                        .as_ref()
+                        .and_then(|steps| {
+                            steps.iter().rev().find(|(at, _)| self.now >= *at * MS).map(|&(_, r)| r)
+                        })
+                        .unwrap_or(self.cfg.propose);
+                    if rate <= 1_000 {
+                        if self.chance(rate) {
+                            let i = self.writer();
+                            self.propose(i)?;
+                        }
+                    } else {
+                        for _ in 0..(rate / 1_000) {
+                            let i = self.writer();
+                            self.propose(i)?;
+                        }
+                        let rem = rate % 1_000;
+                        if rem > 0 && self.chance(rem) {
+                            let i = self.writer();
+                            self.propose(i)?;
+                        }
+                    }
                 }
                 if self.faults_on && self.chance(self.cfg.read) {
                     let i = self.reader();
