@@ -166,5 +166,12 @@ ReadSafe == \A i \in ReadIds : rd[i].st = "ready" => \A t \in rd[i].before : t <
 \* The durable mark never exceeds what is answered from memory.
 MarkOrder == \A r \in Replicas : DurableMark(r) <= Mark(r)
 
+\* Permanent non-voting observers: replicas in neither InitMembers nor any Change.
+Observers == Replicas \ (InitMembers \cup UNION Changes)
+
+\* Observers never hold recorder registers (they follow the log and read without voting).
+ObserverNoRegisters == \A r \in Observers : vreg[r] = {} /\ reg[r] = {}
+
 ReplicaSymmetry == Permutations(Replicas)
+MemberSymmetry == Permutations(InitMembers)
 =============================================================================

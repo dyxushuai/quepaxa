@@ -11,6 +11,7 @@ mod api;
 mod content;
 mod disk;
 mod entries;
+mod follow;
 mod forwards;
 mod gate;
 mod log;
@@ -118,6 +119,11 @@ pub struct Replica {
     unresolved: BTreeMap<Slot, (NodeId, Timestamp)>,
     /// How far peers are ahead, and the bulk request in flight (`recovery.rs`).
     catch_up: recovery::CatchUp,
+    /// Periodic `CatchUp` polling while outside the latest epoch (`follow.rs`).
+    follow: follow::Follow,
+    /// True once this replica has been a voting member of any epoch (configured, recovered,
+    /// or learned); a never-a-member observer never retires (`retire.rs`).
+    was_member: bool,
     /// Leader schedule as of the decided prefix (`committed`), used to drive slots.
     schedule: Schedule,
     /// The same schedule as of the emitted prefix (`emitted`), carried in `core_state`.
@@ -290,6 +296,7 @@ impl Replica {
         let schedule = snapshot
             .as_ref()
             .map_or_else(|| Schedule::with_order(cfg.leaders()), |(s, _)| s.schedule.clone());
+        let was_member = cfg.members.contains(&cfg.id) || schedule.knows(cfg.id) || !registers.is_empty();
         let leader = schedule.leader(Slot(floor));
         let entries = entries::Entries::new(cfg.id, incarnation);
         let tuner = cfg.tune_in_flight_slots.then(|| {
@@ -319,6 +326,8 @@ impl Replica {
             seen: BTreeMap::new(),
             unresolved: BTreeMap::new(),
             catch_up: recovery::CatchUp::default(),
+            follow: follow::Follow::default(),
+            was_member,
             dedup: snapshot.as_ref().map_or_else(Dedup::default, |(s, _)| s.dedup.clone()),
             content,
             fetching: content::Fetching::default(),
@@ -369,6 +378,7 @@ impl Replica {
         if incarnation > 1 {
             r.probe_peers();
         }
+        r.start_follow(incarnation > 1);
         // Nothing leaves this replica until its new incarnation is durable.
         r.flush();
         Ok(r)
@@ -455,6 +465,7 @@ impl Replica {
             self.actions.push(Action::Dropped { id, reason: DropReason::Fenced });
         }
         self.drop_reads();
+        self.follow.stop();
         self.proposers.clear();
         self.unresolved.clear();
         self.fence_content();
@@ -505,6 +516,8 @@ mod decided_tests;
 mod disk_tests;
 #[cfg(test)]
 mod egress_tests;
+#[cfg(test)]
+mod observer_tests;
 #[cfg(test)]
 mod placement_tests;
 #[cfg(test)]

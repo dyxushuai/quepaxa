@@ -259,23 +259,33 @@ impl Replica {
             }
             self.committed += 1;
         }
+        if self.schedule.knows(self.me) {
+            self.was_member = true;
+        }
+        if !self.outside() {
+            self.follow.stop();
+        } else if self.cfg.follow_interval > 0 {
+            self.follow.arm_if_idle(self.now, self.cfg.follow_interval);
+        }
         if direct && !self.proposes_directly() {
             self.hand_on_unstarted();
         }
         self.seen = self.seen.split_off(&Slot(self.committed));
-        // Something past our prefix is decided (or a peer is ahead): keep the next slot
-        // driven so a quiet cluster cannot strand us behind.
-        let ahead = self.catch_up.ahead_of(self.committed)
-            || self.log.last_key_value().is_some_and(|(&s, _)| s.0 >= self.committed);
-        if ahead {
-            self.seen.entry(Slot(self.committed)).or_insert(self.now);
-        }
-        // A decided membership change not yet in force needs the slots before it decided even
-        // if nobody writes: they are taken over like stalled slots (the leader first), a
-        // window at a time.
-        let from = self.schedule.epoch().1;
-        for slot in self.committed..from.min(self.committed + self.window()) {
-            self.seen.entry(Slot(slot)).or_insert(self.now);
+        if !self.outside() {
+            // Something past our prefix is decided (or a peer is ahead): keep the next slot
+            // driven so a quiet cluster cannot strand us behind.
+            let ahead = self.catch_up.ahead_of(self.committed)
+                || self.log.last_key_value().is_some_and(|(&s, _)| s.0 >= self.committed);
+            if ahead {
+                self.seen.entry(Slot(self.committed)).or_insert(self.now);
+            }
+            // A decided membership change not yet in force needs the slots before it decided even
+            // if nobody writes: they are taken over like stalled slots (the leader first), a
+            // window at a time.
+            let from = self.schedule.epoch().1;
+            for slot in self.committed..from.min(self.committed + self.window()) {
+                self.seen.entry(Slot(slot)).or_insert(self.now);
+            }
         }
     }
 

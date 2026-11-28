@@ -61,7 +61,7 @@ The paper does not cover reads; everything here is an extension.
 | Linearizable read at any replica (leader or follower) through a majority's high-water mark, no slot used | Implemented | `crates/quepaxa/docs/reads.md`; `Reads.tla`, `ReadsProof.tla` |
 | Local (possibly stale) read | Implemented in the host (kv-tokio `STALE`) | `examples/kv-tokio` |
 | Read without a quorum round trip (quorum lease) | Open: design, model and go/no-go first | #158 |
-| Observer replicas serving reads in their region | Open | #157 |
+| Observer replicas serving reads in their region | Implemented (extension: stateless pull-based `CatchUp` log-following via `Config::follow_interval`, direct majority `ReadQuery` reads, non-retirement for never-a-member observers) | `replica/follow.rs`, `replica/observer_tests.rs`; `Reads.tla` (`ReadsObserver.cfg`, `Reads.cfg`), `ReadsProof.tla` (`ObserverFixedSafe`), Verus `recovery.rs` & `retirement.rs`; `quepaxa-sim` & `kv-tokio`; #157 |
 
 ## Threat model (§3.2)
 

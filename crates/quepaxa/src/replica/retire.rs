@@ -168,8 +168,11 @@ impl Retirement {
     }
 }
 
-/// The latest epoch in `schedule`, if `me` is not a member of it.
-fn removal(schedule: &Schedule, me: NodeId) -> Option<Removal<'_>> {
+/// The latest epoch in `schedule`, if this replica was ever a member and is not in it.
+fn removal(schedule: &Schedule, me: NodeId, was_member: bool) -> Option<Removal<'_>> {
+    if !was_member {
+        return None;
+    }
     let (epoch, from) = schedule.epoch();
     let members = schedule.members(Slot(from));
     (epoch > 0 && !members.contains(&me)).then_some(Removal { epoch, from, members })
@@ -178,14 +181,18 @@ fn removal(schedule: &Schedule, me: NodeId) -> Option<Removal<'_>> {
 impl Replica {
     /// Notes a member's durable progress, from the envelope of a catch-up reply.
     pub(super) fn note_progress(&mut self, member: NodeId, commit_index: u64) {
-        self.retirement.note_progress(removal(&self.schedule, self.me), member, commit_index);
+        self.retirement.note_progress(
+            removal(&self.schedule, self.me, self.was_member),
+            member,
+            commit_index,
+        );
     }
 
     /// Reports retirement, submits the barrier or asks the members behind, as
     /// [`Retirement::check`] decides. A barrier refused (busy or fenced) is tried again on
     /// the next event.
     pub(super) fn check_retired(&mut self) {
-        let removal = removal(&self.schedule, self.me);
+        let removal = removal(&self.schedule, self.me, self.was_member);
         match self.retirement.check(removal, self.now, self.cfg.retransmit_interval) {
             Next::Nothing => {}
             Next::Retire { epoch } => self.actions.push(Action::Retired { epoch }),

@@ -124,6 +124,13 @@ pub struct Config {
     /// latency (leader residence plus live follower lag). Local to the leader: members may
     /// differ. Off by default.
     pub tune_in_flight_slots: bool,
+    /// How often, in nanoseconds, a replica outside the latest epoch polls a voting member
+    /// (`CatchUp`) to keep following the log indefinitely while idle (#157). `0` (the default)
+    /// disables background polling; set it (for example to `retransmit_interval`) on
+    /// non-voting observer replicas or on joining replicas that should catch up before a
+    /// membership change includes them. Polling stops automatically once the replica becomes a
+    /// member. Per replica.
+    pub follow_interval: u64,
 }
 
 impl Config {
@@ -152,6 +159,7 @@ impl Config {
             inline_batch_bytes: 1024,
             content_cache_bytes: None,
             tune_in_flight_slots: false,
+            follow_interval: 0,
         }
     }
 

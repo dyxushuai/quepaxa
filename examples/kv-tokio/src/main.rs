@@ -5,12 +5,14 @@
 //!          --client 127.0.0.1:7200 --data /tmp/kv0 [--snapshot-every 1000] [--leader-order 2,0,1] \
 //!          [--peers 3=127.0.0.1:7103] [--etcd 127.0.0.1:2379] [--retransmit-ms 400] [--hedge-max-ms 3000]
 //!          [--placement on] [--placement-periods 30000,120000] [--max-in-flight-slots 10]
-//!          [--hedge-min-ms 3000] [--inline-batch-bytes 1024] [--admission-bytes 16777216]
+//!          [--hedge-min-ms 3000] [--inline-batch-bytes 1024] [--admission-bytes 16777216] [--follow-ms 50]
 //! ```
 //!
 //! `--retransmit-ms`, `--hedge-min-ms` and `--hedge-max-ms` set the replica's
 //! `retransmit_interval`, `hedge_min` and `hedge_max`; raise the first and last above the
-//! longest round trip and commit path on a WAN.
+//! longest round trip and commit path on a WAN. `--follow-ms` sets `follow_interval` for
+//! non-voting observers and pre-join replicas (defaults to `retransmit_interval` when `--id`
+//! is not in `--members`; `0` disables background polling).
 //! `--placement on` lets the leader move to the replica where writes commit fastest (set it
 //! on every replica); `--placement-periods` sets its sustained period and hold in ms.
 //! `--max-in-flight-slots` sets how many slots the replica drives at once (the pipeline).
@@ -93,6 +95,7 @@ struct Args {
     tune_in_flight_slots: bool,
     inline_batch_bytes: Option<u32>,
     admission_bytes: Option<u64>,
+    follow_ms: Option<u64>,
 }
 
 const MILLI: u64 = 1_000_000;
@@ -102,7 +105,8 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     let (mut leader_order, mut peers, mut etcd) = (Vec::new(), Vec::new(), None);
     let (mut retransmit_ms, mut hedge_max_ms, mut placement) = (None, None, false);
     let (mut placement_periods, mut max_in_flight_slots, mut hedge_min_ms) = (None, None, None);
-    let (mut inline_batch_bytes, mut admission_bytes, mut tune_in_flight_slots) = (None, None, false);
+    let (mut inline_batch_bytes, mut admission_bytes, mut tune_in_flight_slots, mut follow_ms) =
+        (None, None, false, None);
     let addrs = |flag: &str, value: &str| -> Result<Vec<(u32, SocketAddr)>, String> {
         value
             .split(',')
@@ -168,6 +172,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--admission-bytes" => {
                 admission_bytes = Some(value.parse().map_err(|e| format!("--admission-bytes: {e}"))?)
             }
+            "--follow-ms" => follow_ms = Some(value.parse().map_err(|e| format!("--follow-ms: {e}"))?),
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -194,6 +199,7 @@ fn parse_args(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         tune_in_flight_slots,
         inline_batch_bytes,
         admission_bytes,
+        follow_ms,
     })
 }
 
@@ -229,6 +235,11 @@ fn config(args: &Args) -> Config {
     if let Some(bytes) = args.inline_batch_bytes {
         cfg.inline_batch_bytes = bytes;
     }
+    cfg.follow_interval = match args.follow_ms {
+        Some(ms) => ms.saturating_mul(MILLI),
+        None if !cfg.members.contains(&cfg.id) => cfg.retransmit_interval,
+        None => 0,
+    };
     cfg
 }
 
@@ -604,6 +615,17 @@ mod tests {
             4096
         );
         assert!(args(&format!("{base} --inline-batch-bytes nope")).is_err());
+        assert_eq!(plain.follow_interval, 0, "members do not poll by default");
+        let obs = config(
+            &args("--id 3 --client 127.0.0.1:1 --data d --members 0=127.0.0.1:2 --peers 3=127.0.0.1:3")
+                .unwrap(),
+        );
+        assert_eq!(obs.follow_interval, obs.retransmit_interval, "non-members follow by default");
+        assert_eq!(config(&args(&format!("{base} --follow-ms 25")).unwrap()).follow_interval, 25 * MILLI);
+        assert_eq!(
+            config(&args("--id 3 --client 127.0.0.1:1 --data d --members 0=127.0.0.1:2 --peers 3=127.0.0.1:3 --follow-ms 0").unwrap()).follow_interval,
+            0
+        );
         assert!(Replica::new(zero, [], Timestamp(0)).is_err(), "the replica's own validation refuses it");
         let bad = args(&format!("{base} --retransmit-ms soon")).err().unwrap();
         assert!(bad.starts_with("--retransmit-ms"), "{bad}");

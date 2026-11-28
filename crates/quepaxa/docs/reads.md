@@ -76,8 +76,10 @@ A read also makes a lagging replica catch up: every answer carries the replier's
 prefix, and the replica cannot report the read before it has applied everything the
 majority has.
 
-The rule is modelled in `verification/tla/Reads.tla` (checked with TLC across membership
-changes) and proved for fixed membership in `ReadsProof.tla`. Reads count against
+The rule is modelled in `verification/tla/Reads.tla` (checked exhaustively with fixed
+membership and with a permanent non-voting observer in `ReadsObserver.cfg`, and simulated
+across membership changes with an observer in `Reads.cfg`) and proved for fixed membership
+(both voting members and non-voting observers) in `ReadsProof.tla`. Reads count against
 [`Config::max_outstanding_proposals`](crate::Config::max_outstanding_proposals) together
 with proposals, and are reported [`Dropped`](crate::Action::Dropped) when the replica
 fences.

@@ -515,11 +515,14 @@ impl Replica {
         let stall = self.stalled().map(|(_, at)| at);
         let hedge = self.entries.forwarded_since().filter_map(|(id, at)| self.hedge_at(id, at)).min();
         // Behind a peer: retry bulk catch-up on the timer, not only when a message arrives.
-        let catch_up = self.catch_up.deadline(self.committed, self.now, self.cfg.retransmit_interval);
+        let outside = self.outside();
+        let catch_up =
+            self.catch_up.deadline(self.committed, outside, self.now, self.cfg.retransmit_interval);
         resend
             .chain(stall)
             .chain(hedge)
             .chain(catch_up)
+            .chain(self.follow.deadline(outside, self.cfg.follow_interval))
             .chain(self.retirement.probe_at())
             .chain(self.reads.resend_at())
             .chain(self.phase.probe_at())
@@ -584,10 +587,14 @@ impl Replica {
         // marks wait for, and the round's resend timer brings this back here until the read
         // is ready.
         let interval = self.cfg.retransmit_interval;
-        if let Some(peer) = self.catch_up.retry(self.committed, now, interval, || self.read_catch_up_from()) {
+        let outside = self.outside();
+        if let Some(peer) =
+            self.catch_up.retry(self.committed, outside, now, interval, || self.read_catch_up_from())
+        {
             self.metrics.catch_up_retries += 1;
             self.request_catch_up(peer);
         }
+        self.fire_follow();
         let stalled: Vec<Slot> = self.stalled().filter(|(_, at)| *at <= now).map(|(s, _)| s).collect();
         for slot in stalled {
             let seq = self.entries.new_batch(Vec::new());

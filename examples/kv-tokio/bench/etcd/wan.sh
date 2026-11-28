@@ -15,9 +15,12 @@
 #     paper Fig. 10); load (QuePaxa only, never by default: no fault, the leader in the
 #     best-placed region, one run per rate in LOAD_RATES: paper Fig. 6c-d); adversary (QuePaxa
 #     only, never by default: like load, with a changing minority delayed up to ADVERSARY_MAX_MS
-#     every ADVERSARY_EPOCH_S seconds: paper Fig. 8); and hedge-crash (QuePaxa only, never by
+#     every ADVERSARY_EPOCH_S seconds: paper Fig. 8); hedge-crash (QuePaxa only, never by
 #     default: best-placed leader crashed at HEDGE_FAULT_S across hedging delays in
-#     HEDGE_DELAYS: paper Fig. 9)
+#     HEDGE_DELAYS: paper Fig. 9); and observer (QuePaxa only, never by default: 3 voting
+#     regions {us-west, eu-west, ap-ne} plus non-voting observer regions {us-east, sa-east},
+#     comparing linearizable read latency at a local observer against reading over the WAN
+#     from the nearest voting member: #157)
 #   --smoke    short single runs, to check the harness works
 # Environment: RATE (total writes/s, default 1000), REPEATS (runs per case, default 3),
 #   REPLICA_CPUS ("0-1 2-3 4-5 6-7 8-9"), GEN_CPUS (10-15), SLOW_MS (one-way delay added to
@@ -38,6 +41,9 @@
 #   LOAD_SECS (default 60); ADVERSARY_EPOCH_S (default 5), ADVERSARY_MAX_MS (default 500),
 #   ADVERSARY_VICTIMS (default (n-1)/2); HEDGE_DELAYS (ms or "adaptive", default
 #   "50 100 150 200 300 400 500"), HEDGE_SECS (default 40), HEDGE_FAULT_S (default 15);
+#   OBSERVER_WRITE_RATE (background total writes/s on the 3 voting regions, default 6),
+#   OBSERVER_READ_RATE (linearizable reads/s per observer region, default 200),
+#   OBSERVER_FOLLOW_MS (observer --follow-ms, default 50);
 #   LADDER_CPUS (one CPU quota per region in order, default
 #   "2 1 1.5 0.5 0.75"; a quota of 2 is none on the two-CPU cpusets) and CPU_PERIOD_US (the
 #   quota's period, default 10000), LADDER_FIRST (the region leading first, default the
@@ -54,7 +60,7 @@ scenarios=()
 for a in "$@"; do
   case $a in
     --smoke) smoke=1 ;;
-    calm | crash | partition | slow | jitter | convergence | heterogeneous | shift | burst | speedup | ladder | load | adversary | hedge-crash)
+    calm | crash | partition | slow | jitter | convergence | heterogeneous | shift | burst | speedup | ladder | load | adversary | hedge-crash | observer)
       scenarios+=("$a") ;;
     *) echo "unknown argument $a" >&2; exit 2 ;;
   esac
@@ -95,6 +101,9 @@ fi
 size=${SIZE:-17}
 read -r -a load_rates <<< "${LOAD_RATES:-1000 10000 50000 100000}"
 read -r -a hedge_delays <<< "${HEDGE_DELAYS:-50 100 150 200 300 400 500}"
+observer_write_rate=${OBSERVER_WRITE_RATE:-6}
+observer_read_rate=${OBSERVER_READ_RATE:-200}
+observer_follow_ms=${OBSERVER_FOLLOW_MS:-50}
 adversary_epoch_s=${ADVERSARY_EPOCH_S:-5}
 adversary_max_ms=${ADVERSARY_MAX_MS:-500}
 read -r -a ladder_cpus <<< "${LADDER_CPUS:-2 1 1.5 0.5 0.75}"
@@ -179,6 +188,7 @@ docker network inspect "$net" >/dev/null 2>&1 || docker network create --subnet 
   echo "quepaxa extra flags: ${quepaxa_flags[*]:-none}; load rates ${load_rates[*]} for ${load_secs}s each"
   echo "adversary: $adversary_victims of $n replicas delayed 1-${adversary_max_ms}ms every ${adversary_epoch_s}s for ${load_secs}s"
   echo "hedge-crash: delays ${hedge_delays[*]} ms, run ${hedge_secs}s, crash at ${hedge_fault}s, rate ${base_rate}/s"
+  echo "observer: voters us-west,eu-west,ap-ne; observers us-east,sa-east; follow ${observer_follow_ms}ms, writes ${observer_write_rate}/s, reads ${observer_read_rate}/s per observer region"
   echo "ladder quotas: ${ladder_cpus[*]} CPUs (period ${cpu_period_us}us), first leader ${regions[$slowest]}; leader sampled every ${sample_s}s"
   # summarize-wan.sh reads this line.
   if [ "$data_tmpfs" = 1 ]; then echo "data: tmpfs"; else echo "data: host disk"; fi
@@ -202,29 +212,43 @@ slow_of() {
 # start_quepaxa <pinned> <scenario> [hedge_delay_ms]: the pinned region leads first; the
 # policy flags apply to the policy scenarios (and to all with POLICY_EVERYWHERE=1); the
 # quota scenarios put the first leader's container (or SLOW_REGION's) on a CPU quota;
-# hedge-crash pins hedge_min = hedge_max to the swept delay (unless "adaptive").
+# hedge-crash pins hedge_min = hedge_max to the swept delay (unless "adaptive"); observer
+# runs 3 voting regions {1, 2, 3} with non-voting observers in {0, 4}.
 start_quepaxa() {
-  local members="" i flags=() quota mount slow timers=(--retransmit-ms 400 --hedge-max-ms 3000)
+  local members="" peers="" i flags=() extra=() quota mount slow timers=(--retransmit-ms 400 --hedge-max-ms 3000) order
   # The ladder is a LAN: the library's default timers.
   [ "$2" = ladder ] && timers=()
   if [ "$2" = hedge-crash ] && [ -n "${3:-}" ] && [ "$3" != adaptive ]; then
     timers=(--retransmit-ms 400 --hedge-min-ms "$3" --hedge-max-ms "$3")
   fi
   slow=$(slow_of "$1")
-  for i in $(seq 0 $((n - 1))); do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
+  if [ "$2" = observer ]; then
+    for i in 1 2 3; do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
+    for i in 0 4; do peers+="${peers:+,}$i=$(replica_ip "$i"):7000"; done
+    order="1,2,3"
+  else
+    for i in $(seq 0 $((n - 1))); do members+="${members:+,}$i=$(replica_ip "$i"):7000"; done
+    order="$(leader_order "$1")"
+  fi
   if policy_case "$2" || [ "${POLICY_EVERYWHERE:-0}" = 1 ]; then read -r -a flags <<< "$policy"; fi
   for i in $(seq 0 $((n - 1))); do
-    quota=()
+    quota=() extra=()
     if [ "$2" = ladder ]; then
       quota=(--cpu-period "$cpu_period_us" --cpu-quota "$(awk -v c="${ladder_cpus[$i]}" -v p="$cpu_period_us" 'BEGIN { printf "%d", c * p }')")
     elif quota_case "$2" && [ "$i" = "$slow" ]; then
       quota=(--cpus "$slow_cpus")
     fi
+    if [ "$2" = observer ]; then
+      extra+=(--peers "$peers")
+      if [ "$i" = 0 ] || [ "$i" = 4 ]; then
+        extra+=(--follow-ms "$observer_follow_ms")
+      fi
+    fi
     read -r -a mount <<< "$(data_mount "$i")"
     docker run -d --name "qpx-r$i" --network "$net" --ip "$(replica_ip "$i")" --cpuset-cpus "${replica_cpus[$i]}" \
       "${quota[@]}" "${mount[@]}" "$image" \
-      kv-tokio --id "$i" --members "$members" --client 0.0.0.0:7100 --etcd 0.0.0.0:2379 --data /data \
-      --leader-order "$(leader_order "$1")" "${timers[@]}" "${flags[@]}" \
+      kv-tokio --id "$i" --members "$members" "${extra[@]}" --client 0.0.0.0:7100 --etcd 0.0.0.0:2379 --data /data \
+      --leader-order "$order" "${timers[@]}" "${flags[@]}" \
       "${quepaxa_flags[@]}" >/dev/null
   done
 }
@@ -590,7 +614,7 @@ probe_disk() {
 
 # One run: a generator per region on its local replica, the fault on the leader's region.
 run_case() {
-  local system=$1 scenario=$2 pinned=$3 name=$4 run=$5 i pids=() before load sampler="" prober=""
+  local system=$1 scenario=$2 pinned=$3 name=$4 run=$5 mode=${6:-} i pids=() before load sampler="" prober=""
   # The policy scenarios report the longest stall after their load changes instead.
   local run_secs=$secs fault_at=$fault lifter="" adversary_pid=""
   policy_case "$scenario" && run_secs=$policy_secs fault_at=$change_at
@@ -606,7 +630,25 @@ run_case() {
     prober=$!
   fi
   for i in $(seq 0 $((n - 1))); do
-    read -r -a load <<< "$(region_load "$scenario" "$i")"
+    if [ "$scenario" = observer ] && { [ "$i" = 0 ] || [ "$i" = 4 ]; }; then
+      # Non-voting observer region: share the region container's WAN-shaped network namespace
+      # so local reads hit 127.0.0.1:2379 (0 ms) while remote reads traverse the exact WAN
+      # link to the nearest voting member (us-west, replica 1).
+      local target="127.0.0.1:2379"
+      [ "$mode" = remote ] && target="$(replica_ip 1):2379"
+      docker run --rm --name "qpx-g$i" --network "container:qpx-r$i" --cpuset-cpus "$gen_cpus" \
+        -v "$results:/out" "$image" \
+        kv-bench --protocol etcd --targets "$target" --rate "$observer_read_rate" --gets 100 --size "$size" --secs "$run_secs" \
+        --conns "$conns" --start-at "$t0" --fault-at "$fault_at" --timeline 250 --seed $((run * 10 + i + 1)) \
+        --samples "/out/$name-r$i.csv" > "$results/$name-r$i.txt" &
+      pids+=($!)
+      continue
+    fi
+    if [ "$scenario" = observer ]; then
+      load=(--rate $((observer_write_rate / 3)))
+    else
+      read -r -a load <<< "$(region_load "$scenario" "$i")"
+    fi
     docker run --rm --name "qpx-g$i" --network "$net" --ip "$(gen_ip "$i")" --cpuset-cpus "$gen_cpus" \
       -v "$results:/out" "$image" \
       kv-bench --protocol etcd --targets "$(replica_ip "$i"):2379" "${load[@]}" --gets 0 --size "$size" --secs "$run_secs" \
@@ -629,7 +671,7 @@ run_case() {
   elif [ "$scenario" = hedge-crash ]; then
     sleep_until $((t0 + fault_at * 1000))
     inject crash "$pinned"
-  else
+  elif [ "$scenario" != observer ]; then
     sleep_until $((t0 + fault * 1000))
     inject "$scenario" "$pinned"
     sleep_until $((t0 + heal * 1000))
@@ -688,7 +730,7 @@ stop() {
 }
 
 quepaxa_only_case() {
-  policy_case "$1" || [ "$1" = load ] || [ "$1" = adversary ] || [ "$1" = hedge-crash ]
+  policy_case "$1" || [ "$1" = load ] || [ "$1" = adversary ] || [ "$1" = hedge-crash ] || [ "$1" = observer ]
 }
 
 run_trial() {
@@ -708,7 +750,7 @@ run_trial() {
   fi
   check_generators
   ready "$system" "$pinned"
-  run_case "$system" "$scenario" "$pinned" "$system-$label-$run" "$run"
+  run_case "$system" "$scenario" "$pinned" "$system-$label-$run" "$run" "$delay"
   stop
 }
 
@@ -717,22 +759,25 @@ if [ "$interleave" = 1 ]; then
     placements=(far)
     [ "$scenario" = calm ] && placements+=(best)
     # The write shift starts where the first writers are best served.
-    { [ "$scenario" = shift ] || [ "$scenario" = burst ] || [ "$scenario" = load ] || [ "$scenario" = adversary ] || [ "$scenario" = hedge-crash ]; } && placements=(best)
+    { [ "$scenario" = shift ] || [ "$scenario" = burst ] || [ "$scenario" = load ] || [ "$scenario" = adversary ] || [ "$scenario" = hedge-crash ] || [ "$scenario" = observer ]; } && placements=(best)
     # region_load reads $rate: load and adversary set it per run, the others keep RATE.
     rates=("$base_rate")
     { [ "$scenario" = load ] || [ "$scenario" = adversary ]; } && rates=("${load_rates[@]}")
     delays=("")
     [ "$scenario" = hedge-crash ] && delays=("${hedge_delays[@]}")
+    [ "$scenario" = observer ] && delays=(local remote)
     for placement in "${placements[@]}"; do
       for rate in "${rates[@]}"; do
         for delay in "${delays[@]}"; do
           [ "$placement" = far ] && pinned=$far || pinned=$best
           [ "$scenario" = ladder ] && pinned=$slowest
+          [ "$scenario" = observer ] && pinned=1
           label=$scenario
           [ "$placement" = best ] && label=$scenario-best
           [ "$scenario" = load ] && label=load-$rate
           [ "$scenario" = adversary ] && label=adversary-$rate
           [ "$scenario" = hedge-crash ] && label=hedge-crash-$delay
+          [ "$scenario" = observer ] && label=observer-$delay
           for run in $(seq 1 "$repeats"); do
             for system in "${systems[@]}"; do
               quepaxa_only_case "$scenario" && [ "$system" != quepaxa ] && continue
@@ -750,22 +795,25 @@ else
       placements=(far)
       [ "$scenario" = calm ] && placements+=(best)
       # The write shift starts where the first writers are best served.
-      { [ "$scenario" = shift ] || [ "$scenario" = burst ] || [ "$scenario" = load ] || [ "$scenario" = adversary ] || [ "$scenario" = hedge-crash ]; } && placements=(best)
+      { [ "$scenario" = shift ] || [ "$scenario" = burst ] || [ "$scenario" = load ] || [ "$scenario" = adversary ] || [ "$scenario" = hedge-crash ] || [ "$scenario" = observer ]; } && placements=(best)
       # region_load reads $rate: load and adversary set it per run, the others keep RATE.
       rates=("$base_rate")
       { [ "$scenario" = load ] || [ "$scenario" = adversary ]; } && rates=("${load_rates[@]}")
       delays=("")
       [ "$scenario" = hedge-crash ] && delays=("${hedge_delays[@]}")
+      [ "$scenario" = observer ] && delays=(local remote)
       for placement in "${placements[@]}"; do
         for rate in "${rates[@]}"; do
           for delay in "${delays[@]}"; do
             [ "$placement" = far ] && pinned=$far || pinned=$best
             [ "$scenario" = ladder ] && pinned=$slowest
+            [ "$scenario" = observer ] && pinned=1
             label=$scenario
             [ "$placement" = best ] && label=$scenario-best
             [ "$scenario" = load ] && label=load-$rate
             [ "$scenario" = adversary ] && label=adversary-$rate
             [ "$scenario" = hedge-crash ] && label=hedge-crash-$delay
+            [ "$scenario" = observer ] && label=observer-$delay
             for run in $(seq 1 "$repeats"); do
               run_trial "$system" "$scenario" "$pinned" "$label" "$run" "$delay"
             done
