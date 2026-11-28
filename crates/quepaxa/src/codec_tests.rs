@@ -344,3 +344,31 @@ fn decode_never_panics_on_mutated_valid_messages() {
         let _ = Message::decode(&Bytes::from(v), &CTX);
     });
 }
+
+#[test]
+fn outbound_class_separates_control_consensus_and_bulk() {
+    use crate::api::OutboundClass;
+    let classify = |body| outbound_class(&Message { env: env(), body }.encode());
+    assert_eq!(classify(Body::ForwardAck { seqs: Vec::new() }), OutboundClass::Control);
+    assert_eq!(
+        classify(Body::RttProbe { incarnation: 1, sent: 1, commit: 0, table: Vec::new() }),
+        OutboundClass::Control
+    );
+    assert_eq!(classify(Body::RttReply { incarnation: 1, sent: 1 }), OutboundClass::Control);
+    assert_eq!(classify(request().body), OutboundClass::Consensus);
+    assert_eq!(classify(Body::Forward { seq: 1, batch: Bytes::new() }), OutboundClass::Consensus);
+    assert_eq!(
+        classify(Body::Decided {
+            slot: Slot(1),
+            priority: 1,
+            key: ValueKey { origin: NodeId(1), incarnation: 1, seq: 1 }
+        }),
+        OutboundClass::Consensus
+    );
+    assert_eq!(classify(Body::Data { id: data_id(), bytes: Bytes::from_static(b"x") }), OutboundClass::Bulk);
+    assert_eq!(
+        classify(Body::Entries { first: Slot(0), proposals: Vec::new(), content: Vec::new() }),
+        OutboundClass::Bulk
+    );
+    assert_eq!(outbound_class(b"bad"), OutboundClass::Consensus);
+}

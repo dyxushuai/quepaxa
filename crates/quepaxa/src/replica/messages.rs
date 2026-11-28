@@ -63,12 +63,16 @@ impl Replica {
         }
         self.heard_from(from);
         self.watch.committed.insert(from, msg.env.commit_index);
-        self.catch_up.heard(from, msg.env.commit_index);
-        if self.catch_up.ahead_of(self.committed) {
-            self.seen.entry(Slot(self.committed)).or_insert(self.now);
-        }
-        if msg.env.commit_index > self.committed + 1 && self.catch_up_due() {
-            self.request_catch_up(from);
+        // Control/liveness messages may travel on a separate stream ahead of `Decided`; do not
+        // let their envelope trigger speculative bulk catch-up before in-flight decisions land.
+        if !matches!(msg.body, Body::ForwardAck { .. } | Body::RttProbe { .. } | Body::RttReply { .. }) {
+            self.catch_up.heard(from, msg.env.commit_index);
+            if self.catch_up.ahead_of(self.committed) {
+                self.seen.entry(Slot(self.committed)).or_insert(self.now);
+            }
+            if msg.env.commit_index > self.committed + 1 && self.catch_up_due() {
+                self.request_catch_up(from);
+            }
         }
         if let Body::Entries { .. } = msg.body {
             self.phase.answered(from);

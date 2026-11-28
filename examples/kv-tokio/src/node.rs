@@ -54,26 +54,52 @@ impl PeerFrame {
     }
 }
 
-/// The bounded queues to one peer, each drained onto its own connection. Snapshots take
-/// the bulk queue: a consensus message never waits behind one, which on a slow link would
-/// take seconds and make the peer suspect a live leader and hedge.
+/// The bounded queues to one peer, each drained onto its own connection. Liveness probes take
+/// `ctrl`, consensus messages take `msgs`, bulk payload messages (`Data`, `Entries`) take
+/// `data`, and snapshots take the paced `bulk` queue: liveness never waits behind proposal
+/// payloads, and consensus never waits behind bulk data or a snapshot.
 pub struct PeerLink {
+    ctrl: Sender<Vec<u8>>,
     msgs: Sender<Vec<u8>>,
+    data: Sender<Vec<u8>>,
     bulk: Sender<Vec<u8>>,
     /// Bytes queued onto this link, 4-byte length prefixes included; dropped frames are not.
     sent: Cell<u64>,
 }
 
 impl PeerLink {
-    pub fn new(msgs: Sender<Vec<u8>>, bulk: Sender<Vec<u8>>) -> Self {
-        Self { msgs, bulk, sent: Cell::new(0) }
+    pub fn new(
+        ctrl: Sender<Vec<u8>>,
+        msgs: Sender<Vec<u8>>,
+        data: Sender<Vec<u8>>,
+        bulk: Sender<Vec<u8>>,
+    ) -> Self {
+        Self { ctrl, msgs, data, bulk, sent: Cell::new(0) }
     }
 
     /// Queues `frame`, or drops it if its queue is full (the peer is unreachable or slow):
     /// the protocol retransmits what still matters, and a lagging peer asks for a snapshot
     /// again.
     pub fn send(&self, frame: PeerFrame) {
-        let queue = if matches!(frame, PeerFrame::Snapshot(_)) { &self.bulk } else { &self.msgs };
+        self.send_on(frame, quepaxa::OutboundClass::Consensus);
+    }
+
+    /// Queues a protocol message on the connection matching its [`quepaxa::OutboundClass`].
+    pub fn send_outbound(&self, o: quepaxa::Outbound) {
+        let class = o.class();
+        self.send_on(PeerFrame::Msg(o.bytes), class);
+    }
+
+    fn send_on(&self, frame: PeerFrame, class: quepaxa::OutboundClass) {
+        let queue = if matches!(frame, PeerFrame::Snapshot(_)) {
+            &self.bulk
+        } else {
+            match class {
+                quepaxa::OutboundClass::Control => &self.ctrl,
+                quepaxa::OutboundClass::Bulk => &self.data,
+                _ => &self.msgs,
+            }
+        };
         let frame = frame.encode();
         let len = 4 + frame.len() as u64;
         if queue.try_send(frame).is_ok() {
@@ -529,7 +555,7 @@ impl Node {
                 break;
             }
             for o in then {
-                self.send(o.to.0, PeerFrame::Msg(o.bytes));
+                self.send_outbound(o);
             }
             let _ = self.replica.handle(now, Input::Persisted(id));
             self.drain();
@@ -638,7 +664,7 @@ impl Node {
         self.replica.poll_actions(&mut actions);
         for a in actions {
             match a {
-                Action::Send(o) => self.send(o.to.0, PeerFrame::Msg(o.bytes)),
+                Action::Send(o) => self.send_outbound(o),
                 Action::Persist { id, records, then, replace } => {
                     self.pending += records.iter().map(|r| r.len() as u64).sum::<u64>();
                     self.persists.push(PendingPersist { id, records, then, replace })
@@ -687,6 +713,12 @@ impl Node {
     fn send(&self, to: u32, frame: PeerFrame) {
         if let Some(p) = self.peers.get(&to) {
             p.send(frame);
+        }
+    }
+
+    fn send_outbound(&self, o: quepaxa::Outbound) {
+        if let Some(p) = self.peers.get(&o.to.0) {
+            p.send_outbound(o);
         }
     }
 

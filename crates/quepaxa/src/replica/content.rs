@@ -51,7 +51,10 @@ struct InFlightFetch {
     first: NodeId,
     /// Rotation index across `[first, origin, ...slot_members]`.
     attempt: u32,
-    sent_at: Timestamp,
+    /// Whether the first `Fetch` has been sent (`false` during the rule-R arrival grace).
+    sent: bool,
+    /// When to send the first fetch (if `!sent`) or retry it (if `sent`).
+    due: Timestamp,
 }
 
 /// Content dissemination, rule-R parking, and fetch tracking for one [`Replica`].
@@ -206,7 +209,22 @@ impl Replica {
             }
         }
         self.metrics.parked_requests += 1;
-        self.fetch_refs(slot, from, missing);
+        // Origin disseminated `Data` to every member in parallel with forwarding `Ref` to the
+        // leader; wait briefly before fetching, so in-flight `Data` (on a direct link or a
+        // separate data stream) does not trigger redundant egress.
+        let grace = self.fetch_grace(from);
+        self.fetch_refs_after(slot, from, missing, grace);
+    }
+
+    /// How long to wait for in-flight `Data` before sending the first `Fetch`: once cluster
+    /// timing is known, wait `retransmit_interval` so a cold-start or loaded bulk stream can
+    /// deliver the original `Data` without duplicate `Fetch` replies multiplying its queue.
+    fn fetch_grace(&self, from: NodeId) -> u64 {
+        if self.watch.reply.contains_key(&from) || self.commit_latency.is_some() {
+            self.cfg.retransmit_interval
+        } else {
+            0
+        }
     }
 
     /// Drops any parked requests for `slot` (once decided).
@@ -278,19 +296,59 @@ impl Replica {
     /// Starts a `Fetch` for each reference in `missing` that does not already have one in
     /// flight, asking `first` first.
     pub(super) fn fetch_refs(&mut self, slot: Slot, first: NodeId, missing: &[Ref]) {
+        self.fetch_refs_after(slot, first, missing, 0);
+    }
+
+    fn fetch_refs_after(&mut self, slot: Slot, first: NodeId, missing: &[Ref], grace: u64) {
         let mut by_target: BTreeMap<NodeId, Vec<DataId>> = BTreeMap::new();
+        let interval = self.cfg.retransmit_interval;
         for &r in missing {
             if let Some(in_flight) = self.fetching.fetches.get_mut(&r.id) {
                 in_flight.slot = in_flight.slot.min(slot);
+                let upgrade = (grace == 0 && !in_flight.sent).then_some((in_flight.slot, in_flight.first));
+                if let Some((s, f)) = upgrade {
+                    let ring = self.fetch_ring(s, r.id.origin, f);
+                    if let Some(&target) = ring.first()
+                        && let Some(in_flight) = self.fetching.fetches.get_mut(&r.id)
+                    {
+                        in_flight.sent = true;
+                        in_flight.due = self.now.after(interval);
+                        by_target.entry(target).or_default().push(r.id);
+                    }
+                }
                 continue;
             }
             let ring = self.fetch_ring(slot, r.id.origin, first);
             let Some(&target) = ring.first() else { continue };
-            self.fetching.fetches.insert(
-                r.id,
-                InFlightFetch { slot, len: r.len, crc: r.crc, first, attempt: 0, sent_at: self.now },
-            );
-            by_target.entry(target).or_default().push(r.id);
+            let delay = grace;
+            if delay == 0 {
+                self.fetching.fetches.insert(
+                    r.id,
+                    InFlightFetch {
+                        slot,
+                        len: r.len,
+                        crc: r.crc,
+                        first,
+                        attempt: 0,
+                        sent: true,
+                        due: self.now.after(interval),
+                    },
+                );
+                by_target.entry(target).or_default().push(r.id);
+            } else {
+                self.fetching.fetches.insert(
+                    r.id,
+                    InFlightFetch {
+                        slot,
+                        len: r.len,
+                        crc: r.crc,
+                        first,
+                        attempt: 0,
+                        sent: false,
+                        due: self.now.after(delay),
+                    },
+                );
+            }
         }
         for (target, ids) in by_target {
             self.metrics.fetches += ids.len() as u64;
@@ -310,17 +368,23 @@ impl Replica {
         pieces: Vec<Piece>,
         missing: &[Ref],
     ) {
-        let expires_at = self.now.after(self.cfg.retransmit_interval.saturating_mul(2));
+        let ttl = self
+            .cfg
+            .retransmit_interval
+            .saturating_mul(4)
+            .min(self.cfg.hedge_max.max(self.cfg.retransmit_interval.saturating_mul(2)));
+        let expires_at = self.now.after(ttl);
+        let grace = self.fetch_grace(from);
         if let Some(existing) =
             self.fetching.pending_forwards.iter_mut().find(|pf| pf.from == from && pf.seq == seq)
         {
             existing.expires_at = expires_at;
-            self.fetch_refs(Slot(MAX_SLOT), from, missing);
+            self.fetch_refs_after(Slot(MAX_SLOT), from, missing, grace);
             return;
         }
         let cap = (self.cfg.max_in_flight_slots as usize)
             .saturating_mul(self.schedule.members(Slot(self.committed)).len().max(1))
-            .max(16);
+            .max(256);
         if self.fetching.pending_forwards.len() >= cap {
             return;
         }
@@ -330,8 +394,15 @@ impl Replica {
             }
         }
         self.fetching.pending_forwards.push(PendingForward { from, seq, to_pending, pieces, expires_at });
-        // Use MAX_SLOT so a holder never mistakes a fresh forward's fetch for a compacted slot.
-        self.fetch_refs(Slot(MAX_SLOT), from, missing);
+        if grace > 0 {
+            // `from` sent `Data` alongside `Forward`; prove liveness without acknowledging `seq`
+            // while waiting briefly for the in-flight `Data` instead of fetching immediately.
+            self.ack_forward(from);
+            self.fetch_refs_after(Slot(MAX_SLOT), from, missing, grace);
+        } else {
+            // Use MAX_SLOT so a holder never mistakes a fresh forward's fetch for a compacted slot.
+            self.fetch_refs(Slot(MAX_SLOT), from, missing);
+        }
     }
 
     /// Handles an inbound `Body::Data { id, bytes }`.
@@ -630,28 +701,46 @@ impl Replica {
             .fetches
             .retain(|id, f| f.slot.0 >= floor && self.content.get(id).is_none() && needed.contains(id));
         let interval = self.cfg.retransmit_interval;
-        let due: Vec<(DataId, Slot, NodeId, u32)> = self
+        let due: Vec<(DataId, Slot, NodeId, bool, u32)> = self
             .fetching
             .fetches
             .iter()
-            .filter(|(_, f)| f.sent_at.after(interval) <= now)
-            .map(|(id, f)| (*id, f.slot, f.first, f.attempt.wrapping_add(1)))
+            .filter(|(_, f)| f.due <= now)
+            .map(|(id, f)| (*id, f.slot, f.first, f.sent, f.attempt))
             .collect();
-        let mut by_target: BTreeMap<(Slot, NodeId), Vec<DataId>> = BTreeMap::new();
-        for (id, slot, first, attempt) in due {
+        let mut initial_by_target: BTreeMap<(Slot, NodeId), Vec<DataId>> = BTreeMap::new();
+        let mut retry_by_target: BTreeMap<(Slot, NodeId), Vec<DataId>> = BTreeMap::new();
+        for (id, slot, first, sent, prev_attempt) in due {
             let ring = self.fetch_ring(slot, id.origin, first);
             if ring.is_empty() {
                 self.fetching.fetches.remove(&id);
                 continue;
             }
+            let attempt = if sent { prev_attempt.wrapping_add(1) } else { 0 };
             let target = ring[attempt as usize % ring.len()];
+            // Back off fetch retries so a slow or cold-start bulk stream is not flooded with
+            // duplicate `Data` copies faster than it can drain them.
+            let backoff = if sent {
+                interval.saturating_mul(1u64 << attempt.min(3)).min(self.cfg.hedge_max.max(interval))
+            } else {
+                interval
+            };
             if let Some(f) = self.fetching.fetches.get_mut(&id) {
                 f.attempt = attempt;
-                f.sent_at = now;
+                f.sent = true;
+                f.due = now.after(backoff);
             }
-            by_target.entry((slot, target)).or_default().push(id);
+            if sent {
+                retry_by_target.entry((slot, target)).or_default().push(id);
+            } else {
+                initial_by_target.entry((slot, target)).or_default().push(id);
+            }
         }
-        for ((slot, target), ids) in by_target {
+        for ((slot, target), ids) in initial_by_target {
+            self.metrics.fetches += ids.len() as u64;
+            self.send(target, Body::Fetch { slot, ids });
+        }
+        for ((slot, target), ids) in retry_by_target {
             self.metrics.fetch_retries += ids.len() as u64;
             self.send(target, Body::Fetch { slot, ids });
         }
@@ -681,7 +770,7 @@ impl Replica {
     }
 
     pub(super) fn earliest_fetch(&self) -> Option<Timestamp> {
-        let fetches = self.fetching.fetches.values().map(|f| f.sent_at.after(self.cfg.retransmit_interval));
+        let fetches = self.fetching.fetches.values().map(|f| f.due);
         let staged = self.fetching.pending_forwards.iter().map(|pf| pf.expires_at);
         fetches.chain(staged).min()
     }

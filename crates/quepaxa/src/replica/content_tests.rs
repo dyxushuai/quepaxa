@@ -355,8 +355,8 @@ fn fetch_rotates_from_requester_to_origin_to_members() {
     r.poll_actions(&mut out);
     assert_eq!(fetch_targets(&out), alloc::vec![NodeId(1)], "retry rotates to origin 1");
     assert_eq!(r.metrics().fetch_retries, 1);
-    // Retry 2 wraps back to 0 (members are [0, 1, 2], excluding self=2).
-    r.handle_timeout(Timestamp(1 + 2 * interval)).unwrap();
+    // Retry 2 wraps back to 0 after exponential backoff (2 * interval).
+    r.handle_timeout(Timestamp(1 + 3 * interval)).unwrap();
     out.clear();
     r.poll_actions(&mut out);
     assert_eq!(fetch_targets(&out), alloc::vec![NodeId(0)]);
@@ -720,4 +720,96 @@ fn lowering_in_flight_slots_at_runtime_does_not_evict_content_or_shrink_cap() {
             "explicit content_cache_bytes holds batch {seq}"
         );
     }
+}
+
+#[test]
+fn rule_r_parking_waits_for_arrival_grace_before_fetching() {
+    let mut c = cfg();
+    c.id = NodeId(2);
+    c.retransmit_interval = 400_000_000;
+    let mut rep = Replica::new(c, [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    rep.poll_actions(&mut out);
+    drain_persists(&mut rep, &mut out, Timestamp(0));
+    rep.watch.reply.insert(NodeId(0), 100_000_000);
+
+    // Park a RecordRequest from the leader referencing missing Data from peer 1.
+    let req = Body::RecordRequest { slot: Slot(0), step: 1, proposal: referencing() };
+    rep.handle(Timestamp(1_000_000), from_peer(0, 2, req)).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(rep.metrics().parked_requests, 1);
+    assert_eq!(rep.metrics().fetches, 0, "no immediate Fetch while direct Data may still be in flight");
+
+    // Once the arrival grace elapses without Data, the initial Fetch fires (not a retry).
+    let due = rep.earliest_fetch().expect("grace timer scheduled");
+    assert_eq!(due, Timestamp(401_000_000));
+    rep.handle_timeout(due).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(rep.metrics().fetches, 1);
+    assert_eq!(rep.metrics().fetch_retries, 0);
+    assert!(
+        sent(&out)
+            .iter()
+            .any(|o| o.to == NodeId(0) && matches!(decode_msg(&o.bytes).body, Body::Fetch { .. })),
+        "initial Fetch goes to requester after grace"
+    );
+
+    // Retries rotate peers and back off exponentially so a loaded bulk stream is not flooded.
+    let retry1 = rep.earliest_fetch().expect("retry timer scheduled");
+    assert_eq!(retry1, Timestamp(801_000_000));
+    rep.handle_timeout(retry1).unwrap();
+    out.clear();
+    rep.poll_actions(&mut out);
+    assert_eq!(rep.metrics().fetch_retries, 1);
+    assert_eq!(rep.earliest_fetch(), Some(Timestamp(1_601_000_000)));
+}
+
+#[test]
+fn staged_forward_defers_fetch_and_signals_liveness_without_acking_seq() {
+    let mut c = cfg();
+    c.retransmit_interval = 400_000_000;
+    let mut leader = Replica::new(c, [], Timestamp(0)).unwrap();
+    let mut out = Vec::new();
+    leader.poll_actions(&mut out);
+    drain_persists(&mut leader, &mut out, Timestamp(0));
+    leader.commit_latency = Some(80_000_000);
+
+    let data_bytes = content();
+    let id = data_id(1, 0);
+    let r = Ref { id, len: data_bytes.len() as u32, crc: crc32c(&data_bytes) };
+    let fwd = Body::Forward { seq: 7, batch: batch::encode_pieces(&[Piece::Ref(r)]) };
+    leader.handle(Timestamp(1_000_000), from_peer(1, 0, fwd)).unwrap();
+    out.clear();
+    leader.poll_actions(&mut out);
+
+    // Leader proves liveness with an empty ForwardAck (seq 7 is NOT acked) and defers Fetch.
+    assert_eq!(leader.metrics().fetches, 0, "Fetch deferred for in-flight Data");
+    let acks: Vec<Vec<u64>> = sent(&out)
+        .into_iter()
+        .filter_map(|o| match decode_msg(&o.bytes).body {
+            Body::ForwardAck { seqs } if o.to == NodeId(1) => Some(seqs),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(acks, alloc::vec![Vec::<u64>::new()], "liveness ForwardAck does not ack staged seq");
+
+    // Direct Data arriving within grace wakes the forward and acknowledges seq 7 with zero Fetches.
+    leader.handle(Timestamp(10_000_000), from_peer(1, 0, Body::Data { id, bytes: data_bytes })).unwrap();
+    out.clear();
+    leader.poll_actions(&mut out);
+    assert_eq!(leader.metrics().fetches, 0);
+    leader.handle_timeout(Timestamp(100_000_000)).unwrap();
+    out.clear();
+    leader.poll_actions(&mut out);
+    let acked_seqs: Vec<u64> = sent(&out)
+        .into_iter()
+        .filter_map(|o| match decode_msg(&o.bytes).body {
+            Body::ForwardAck { seqs } if o.to == NodeId(1) => Some(seqs),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert_eq!(acked_seqs, alloc::vec![7]);
 }

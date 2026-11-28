@@ -195,6 +195,22 @@ impl Body {
     }
 }
 
+/// Traffic class of an encoded message, for transports that separate streams to avoid
+/// head-of-line blocking (e.g. TCP per peer). Keeping all consensus messages on one stream
+/// preserves their relative order while keeping small liveness probes off payload-bearing
+/// connections and bulk content off the consensus path.
+pub(crate) fn outbound_class(bytes: &[u8]) -> crate::api::OutboundClass {
+    use crate::api::OutboundClass;
+    if bytes.len() < 4 || bytes[0..2] != MAGIC || bytes[2] != WIRE_VERSION {
+        return OutboundClass::Consensus;
+    }
+    match bytes[3] {
+        KIND_FORWARD_ACK | KIND_RTT_PROBE | KIND_RTT_REPLY => OutboundClass::Control,
+        KIND_DATA | KIND_ENTRIES => OutboundClass::Bulk,
+        _ => OutboundClass::Consensus,
+    }
+}
+
 /// What the receiver expects from every message.
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "model", derive(Hash))]

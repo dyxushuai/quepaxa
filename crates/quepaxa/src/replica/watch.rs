@@ -50,6 +50,8 @@ pub(super) struct Watch {
     pub(super) asked: Option<(NodeId, Timestamp)>,
     /// Current forwarding destination and when it first received entries in this run.
     pub(super) forwarded_to: Option<(NodeId, Timestamp)>,
+    /// Destination and timestamp of the most recent forward sent, for follower coalescing.
+    pub(super) last_forward: Option<(NodeId, Timestamp)>,
     /// Smoothed delay from a forward to each member's next message (R), in nanoseconds.
     pub(super) reply: BTreeMap<NodeId, u64>,
     /// This replica's disk (`disk.rs`).
@@ -180,6 +182,27 @@ impl Replica {
             let avg = self.watch.reply.entry(from).or_insert(sample);
             *avg = if sample < *avg { *avg - *avg / 8 + sample / 8 } else { sample };
         }
+    }
+
+    /// How long a follower coalesces subsequent forwards to `target` after sending one:
+    /// an eighth of the observed reply delay, capped at half `ack_every`. Zero until a
+    /// reply delay is known, microseconds on a LAN, ~9-22 ms on a WAN.
+    pub(super) fn forward_coalesce(&self, target: NodeId) -> u64 {
+        self.watch.reply.get(&target).map_or(0, |&r| (r / 8).min(self.ack_every() / 2))
+    }
+
+    /// When held follower entries should flush to the target, if coalescing holds them.
+    pub(super) fn forward_flush_at(&self) -> Option<Timestamp> {
+        if self.proposes_directly() || !self.entries.has_pending() {
+            return None;
+        }
+        let target = self.target();
+        let wait = self.forward_coalesce(target);
+        if wait == 0 {
+            return None;
+        }
+        let (to, at) = self.watch.last_forward?;
+        (to == target).then(|| at.after(wait)).filter(|&due| self.now < due)
     }
 
     /// How long a forward may wait for its acknowledgement after an earlier one was sent.
