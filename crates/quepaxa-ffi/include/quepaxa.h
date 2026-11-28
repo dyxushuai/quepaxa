@@ -40,7 +40,9 @@
 // 0.11: batch references: `QPX_CONFIG_INLINE_BATCH_BYTES`, `QPX_METRIC_DATA_SENT`,
 // `QPX_METRIC_FETCHES`, `QPX_METRIC_FETCH_RETRIES`, `QPX_METRIC_FETCHES_SERVED`,
 // `QPX_METRIC_PARKED_REQUESTS`.
-#define QPX_ABI_VERSION_MINOR 11
+// 0.12: online pipeline tuner: `QPX_CONFIG_TUNE_IN_FLIGHT_SLOTS`,
+// `QPX_METRIC_IN_FLIGHT_SLOTS`, `QPX_METRIC_PIPELINE_ADJUSTMENTS`.
+#define QPX_ABI_VERSION_MINOR 12
 
 // Success.
 #define QPX_OK 0
@@ -238,8 +240,9 @@
 // How long placement leaves any change of the leader order alone, nanoseconds (ABI 0.10).
 #define QPX_CONFIG_PLACEMENT_HOLD_NS 10
 
-// Largest forwarded chunk that travels inline, bytes (`u32`, at least 64; default `u32::MAX`
-// off). Larger chunks travel by reference as data batches (ABI 0.11).
+// Largest forwarded chunk that travels inline, bytes (`u32`, at least 64; default `1024`;
+// set to `u32::MAX` to keep every chunk inline). Larger chunks travel by reference as data
+// batches (ABI 0.11).
 #define QPX_CONFIG_INLINE_BATCH_BYTES 11
 
 // Online `in_flight_slots` tuning while leading: 1 on, 0 off (the default) (ABI 0.12).
