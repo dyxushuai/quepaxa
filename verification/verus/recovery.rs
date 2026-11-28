@@ -1,6 +1,7 @@
 // crates/quepaxa/src/replica/recovery.rs (`Phase`, `CatchUp`, `Reservation`), with
 // `read_catch_up_from` (reads.rs) and the lines of `Replica::start`, `send_requests`,
-// `apply`, `fire_timers` and `checkpoint` that use them, ported to Verus
+// `apply`, `on_message` (messages.rs), `advance_committed` (log.rs), `earliest_timer` /
+// `fire_timers` (proposing.rs) and `checkpoint` that use them, ported to Verus
 // (verification/verus/prove.sh checks it).
 //
 // The port keeps the original's logic statement by statement, except where marked DEV.
@@ -22,12 +23,18 @@
 //     `Recovering` for `Live` only once a majority of the members at the decided prefix,
 //     counting this replica, answered, or when there is nobody to ask; fenced, it stays so
 //     with no probe timer;
-// (c) catching up ends only once caught up: a due retry asks a peer exactly while the
-//     replica is behind a peer or, outside the membership, below its read mark (the most
-//     advanced peer, or the answerer with the highest mark); while behind a peer there is a
-//     retry deadline, no later than now if a retry is due, at which one is due; a page from
-//     the peer asked ends the request and asks again exactly while still behind, an empty
-//     one leaves it to the timer, and a page from anyone else changes nothing.
+// (c) catching up ends only once caught up: a due retry (`retry_with`) asks a peer while the
+//     replica is behind a peer whose deadline is due or, outside the membership, below its
+//     read mark (the most advanced peer, or the answerer with the highest mark); while behind
+//     a peer there is a retry deadline (`deadline_with`), at which a retry is due and fires;
+//     a page from the peer asked ends the request and asks again exactly while still behind,
+//     an empty one leaves it to the timer, and a page from anyone else changes nothing;
+//     deferred `Body::Data` (`defer_since`) on a voting member never triggers an immediate
+//     speculative `CatchUp` nor fires via `retry_with` before `retransmit_interval` elapses,
+//     fires once `retransmit_interval` elapses while still behind (respecting the
+//     `2 * max_in_flight_slots` active-pipeline lag allowance while actively committing),
+//     fires immediately outside membership when no request is in flight, and clears on
+//     `advanced()`, `requested()`, and `installed()`.
 //
 // Departures from the original's code, forced by what vstd specifies, are marked DEV;
 // VERIFICATION.md lists them. When recovery.rs, or those lines of reads.rs, proposing.rs,
@@ -246,6 +253,7 @@ pub struct CatchUp {
     pub ahead: u64,
     pub peer: Option<u64>,
     pub request: Option<(u64, u64)>,
+    pub defer_since: Option<u64>,
 }
 
 /// Outside the membership, with an answer to the round in flight past the prefix.
@@ -310,7 +318,8 @@ pub fn read_catch_up_from(outside: bool, round: Option<&Vec<(u64, u64)>>, commit
 
 impl CatchUp {
     pub open spec fn inv(self) -> bool {
-        self.ahead > 0 ==> self.peer is Some
+        &&& self.ahead > 0 ==> self.peer is Some
+        &&& self.request is Some ==> self.defer_since is None
     }
 
     pub open spec fn behind_spec(self, committed: u64, outside: bool) -> bool {
@@ -321,6 +330,10 @@ impl CatchUp {
         }
     }
 
+    pub open spec fn behind_by_spec(self, committed: u64, lag: u64) -> bool {
+        self.ahead > after(committed, lag)
+    }
+
     pub open spec fn due_spec(self, now: u64, interval: u64) -> bool {
         match self.request {
             None => true,
@@ -328,16 +341,56 @@ impl CatchUp {
         }
     }
 
+    pub open spec fn timer_spec(self, now: u64, interval: u64) -> u64 {
+        match (self.request, self.defer_since) {
+            (Some((_, t)), _) => after(t, interval),
+            (None, Some(t)) => after(t, interval),
+            (None, None) => now,
+        }
+    }
+
+    pub open spec fn deadline_with_spec(
+        self,
+        committed: u64,
+        outside: bool,
+        window: u64,
+        last_committed: Option<u64>,
+        now: u64,
+        interval: u64,
+    ) -> Option<u64> {
+        if !self.behind_spec(committed, outside) || (self.request is None && self.peer is None) {
+            None
+        } else if outside {
+            Some(match self.request {
+                None => now,
+                Some((_, t)) => after(t, interval),
+            })
+        } else {
+            let timer = self.timer_spec(now, interval);
+            if self.behind_by_spec(committed, window) {
+                Some(timer)
+            } else {
+                let quiet_at = match last_committed {
+                    None => timer,
+                    Some(t) => after(t, interval),
+                };
+                Some(if timer >= quiet_at { timer } else { quiet_at })
+            }
+        }
+    }
+
     pub fn new() -> (c: CatchUp)
-        ensures c.inv(), c.request is None, c.ahead == 0,
+        ensures c.inv(), c.request is None, c.defer_since is None, c.ahead == 0,
     {
-        CatchUp { ahead: 0, peer: None, request: None }
+        CatchUp { ahead: 0, peer: None, request: None, defer_since: None }
     }
 
     pub fn heard(&mut self, from: u64, commit_index: u64)
         requires old(self).inv(),
         ensures
-            final(self).inv(), final(self).request == old(self).request,
+            final(self).inv(),
+            final(self).request == old(self).request,
+            final(self).defer_since == old(self).defer_since,
             final(self).ahead >= old(self).ahead, final(self).ahead >= commit_index,
     {
         if commit_index > self.ahead {
@@ -359,6 +412,12 @@ impl CatchUp {
         if outside { self.ahead > committed } else { self.ahead as u128 > committed as u128 + 1 }
     }
 
+    pub fn behind_by(&self, committed: u64, lag: u64) -> (r: bool)
+        ensures r == self.behind_by_spec(committed, lag),
+    {
+        self.ahead > after_exec(committed, lag)
+    }
+
     pub fn due(&self, now: u64, interval: u64) -> (r: bool)
         ensures r == self.due_spec(now, interval),
     {
@@ -369,19 +428,62 @@ impl CatchUp {
         }
     }
 
+    pub fn in_flight(&self) -> (r: bool)
+        ensures r == (self.request is Some),
+    {
+        self.request.is_some()
+    }
+
     pub fn requested(&mut self, peer: u64, now: u64)
         requires old(self).inv(),
         ensures
             final(self).inv(), final(self).request == Some((peer, now)),
+            final(self).defer_since is None,
             final(self).ahead == old(self).ahead, final(self).peer == old(self).peer,
     {
         self.request = Some((peer, now));
+        self.defer_since = None;
+    }
+
+    pub fn defer(&mut self, now: u64)
+        requires old(self).inv(),
+        ensures
+            final(self).inv(),
+            final(self).ahead == old(self).ahead,
+            final(self).peer == old(self).peer,
+            final(self).request == old(self).request,
+            old(self).request is Some ==> final(self).defer_since is None,
+            old(self).request is None && old(self).defer_since is None ==> final(self).defer_since == Some(now),
+            old(self).request is None && old(self).defer_since is Some ==> final(self).defer_since == old(self).defer_since,
+    {
+        // DEV: `get_or_insert` as a branch.
+        if self.request.is_none() {
+            if self.defer_since.is_none() {
+                self.defer_since = Some(now);
+            }
+        }
+    }
+
+    pub fn advanced(&mut self, committed: u64, outside: bool)
+        requires old(self).inv(),
+        ensures
+            final(self).inv(),
+            final(self).ahead == old(self).ahead,
+            final(self).peer == old(self).peer,
+            final(self).request == old(self).request,
+            !old(self).behind_spec(committed, outside) ==> final(self).defer_since is None,
+            old(self).behind_spec(committed, outside) ==> final(self).defer_since == old(self).defer_since,
+    {
+        if !self.behind(committed, outside) {
+            self.defer_since = None;
+        }
     }
 
     pub fn page(&mut self, from: u64, empty: bool, committed: u64, outside: bool, now: u64) -> (r: Option<u64>)
         requires old(self).inv(),
         ensures
             final(self).inv(), final(self).ahead == old(self).ahead, final(self).peer == old(self).peer,
+            final(self).defer_since == old(self).defer_since,
             !(old(self).request matches Some((p, _)) && p == from) ==>
                 r is None && final(self).request == old(self).request,
             (old(self).request matches Some((p, _)) && p == from) && empty ==>
@@ -409,13 +511,103 @@ impl CatchUp {
     pub fn installed(&mut self, committed: u64) -> (r: Option<u64>)
         requires old(self).inv(),
         ensures
-            final(self).inv(), final(self).request is None, final(self).ahead == old(self).ahead,
+            final(self).inv(), final(self).request is None, final(self).defer_since is None,
+            final(self).ahead == old(self).ahead, final(self).peer == old(self).peer,
             r is Some <==> old(self).ahead > committed,
             r matches Some(p) ==> old(self).peer == Some(p),
     {
         self.request = None;
+        self.defer_since = None;
         // DEV: `filter` as a branch.
         if self.ahead_of(committed) { self.peer } else { None }
+    }
+
+    pub fn deadline_with(
+        &self,
+        committed: u64,
+        outside: bool,
+        window: u64,
+        last_committed: Option<u64>,
+        now: u64,
+        interval: u64,
+    ) -> (r: Option<u64>)
+        requires self.inv(),
+        ensures
+            r == self.deadline_with_spec(committed, outside, window, last_committed, now, interval),
+            r is Some <==> self.behind_spec(committed, outside),
+            outside && self.behind_spec(committed, true) && self.request is None ==> r == Some(now),
+            self.request matches Some((_, t)) ==> (outside && self.behind_spec(committed, true) ==> r == Some(after(t, interval))),
+            r matches Some(d) ==> (!outside ==> d >= self.timer_spec(now, interval)),
+            self.defer_since matches Some(ds) ==> (r matches Some(d) ==> (!outside ==> d >= after(ds, interval))),
+            last_committed matches Some(lc) ==> (r matches Some(d) ==> (!outside && !self.behind_by_spec(committed, window) ==> d >= after(lc, interval))),
+            r matches Some(d) ==> self.due_spec(d, interval),
+            r matches Some(d) ==> self.deadline_with_spec(committed, outside, window, last_committed, d, interval) == Some(d),
+    {
+        // DEV: `or(map(..)).is_none()`, `map_or`, and `max` as matches/branches.
+        let known = self.request.is_some() || self.peer.is_some();
+        if !self.behind(committed, outside) || !known {
+            return None;
+        }
+        if outside {
+            return match self.request {
+                None => Some(now),
+                Some((_, t)) => Some(after_exec(t, interval)),
+            };
+        }
+        let timer = match (self.request, self.defer_since) {
+            (Some((_, t)), _) => after_exec(t, interval),
+            (None, Some(t)) => after_exec(t, interval),
+            (None, None) => now,
+        };
+        if self.behind_by(committed, window) {
+            Some(timer)
+        } else {
+            let quiet_at = match last_committed {
+                None => timer,
+                Some(t) => after_exec(t, interval),
+            };
+            Some(if timer >= quiet_at { timer } else { quiet_at })
+        }
+    }
+
+    // DEV: the closure `read_from` passed evaluated (it has no effects).
+    pub fn retry_with(
+        &self,
+        committed: u64,
+        outside: bool,
+        window: u64,
+        last_committed: Option<u64>,
+        now: u64,
+        interval: u64,
+        read_from: Option<u64>,
+    ) -> (r: Option<u64>)
+        requires self.inv(),
+        ensures
+            !self.due_spec(now, interval) ==> r is None,
+            self.behind_spec(committed, outside) ==> (
+                r is Some <==> self.deadline_with_spec(committed, outside, window, last_committed, now, interval).unwrap() <= now
+            ),
+            self.behind_spec(committed, outside) && r is Some ==> r == self.peer,
+            !self.behind_spec(committed, outside) ==> (
+                r == if self.due_spec(now, interval) { read_from } else { None }
+            ),
+            self.defer_since matches Some(ds) ==> (!outside && self.behind_spec(committed, false) && now < after(ds, interval) ==> r is None),
+    {
+        if let Some(due) = self.deadline_with(committed, outside, window, last_committed, now, interval) {
+            if due <= now {
+                // DEV: `or(map(..))` as matches.
+                return match self.peer {
+                    Some(p) => Some(p),
+                    None => match self.request {
+                        Some((p, _)) => Some(p),
+                        None => None,
+                    },
+                };
+            } else {
+                return None;
+            }
+        }
+        if self.due(now, interval) { read_from } else { None }
     }
 
     pub fn deadline(&self, committed: u64, outside: bool, now: u64, interval: u64) -> (r: Option<u64>)
@@ -442,47 +634,322 @@ impl CatchUp {
         requires self.inv(),
         ensures
             !self.due_spec(now, interval) ==> r is None,
-            self.due_spec(now, interval) && self.behind_spec(committed, outside) ==> r == self.peer && r is Some,
-            self.due_spec(now, interval) && !self.behind_spec(committed, outside) ==> r == read_from,
+            (outside || self.defer_since is None) && self.due_spec(now, interval) && self.behind_spec(committed, outside) ==> r == self.peer && r is Some,
+            !self.behind_spec(committed, outside) ==> (
+                r == if self.due_spec(now, interval) { read_from } else { None }
+            ),
     {
-        if !self.due(now, interval) {
-            return None;
-        }
-        if self.behind(committed, outside) {
-            // DEV: `or(map(..))` as matches.
-            match self.peer {
-                Some(p) => Some(p),
-                None => match self.request {
-                    Some((p, _)) => Some(p),
-                    None => None,
-                },
-            }
-        } else {
-            read_from
+        let window: u64 = if outside { 0 } else { 1 };
+        self.retry_with(committed, outside, window, None, now, interval, read_from)
+    }
+}
+
+pub open spec fn catch_up_window_spec(max_in_flight_slots: u64) -> u64 {
+    if max_in_flight_slots as int * 2 > u64::MAX as int {
+        u64::MAX
+    } else {
+        (max_in_flight_slots * 2) as u64
+    }
+}
+
+/// `Replica::catch_up_window`.
+pub fn catch_up_window(max_in_flight_slots: u64) -> (r: u64)
+    ensures r == catch_up_window_spec(max_in_flight_slots),
+{
+    // DEV: `saturating_mul(2)` spelled out.
+    if max_in_flight_slots > u64::MAX / 2 { u64::MAX } else { max_in_flight_slots * 2 }
+}
+
+pub open spec fn catch_up_lag_spec(
+    outside: bool,
+    max_in_flight_slots: u64,
+    last_committed_at: Option<u64>,
+    now: u64,
+    interval: u64,
+) -> u64 {
+    if outside {
+        0
+    } else {
+        match last_committed_at {
+            Some(t) => if now < after(t, interval) { catch_up_window_spec(max_in_flight_slots) } else { 1 },
+            None => 1,
         }
     }
 }
 
-/// `fire_timers`' catch-up, with the read mark of the round in flight (`round`).
+/// `Replica::catch_up_lag`.
+pub fn catch_up_lag(
+    outside: bool,
+    max_in_flight_slots: u64,
+    last_committed_at: Option<u64>,
+    now: u64,
+    interval: u64,
+) -> (r: u64)
+    ensures r == catch_up_lag_spec(outside, max_in_flight_slots, last_committed_at, now, interval),
+{
+    if outside {
+        return 0;
+    }
+    // DEV: `is_some_and` as a match.
+    let active = match last_committed_at {
+        Some(t) => now < after_exec(t, interval),
+        None => false,
+    };
+    if active {
+        catch_up_window(max_in_flight_slots)
+    } else {
+        1
+    }
+}
+
+pub enum CatchUpBody {
+    Control,
+    Data,
+    CompactedOrEntries,
+    Other,
+}
+
+/// `Replica::on_message`'s catch-up handling (`messages.rs`).
+pub fn on_message_catch_up(
+    c: &mut CatchUp,
+    from: u64,
+    commit_index: u64,
+    body: CatchUpBody,
+    committed: u64,
+    outside: bool,
+    max_in_flight_slots: u64,
+    last_committed_at: Option<u64>,
+    now: u64,
+    interval: u64,
+) -> (asked: Option<u64>)
+    requires old(c).inv(),
+    ensures
+        final(c).inv(),
+        outside || !(body is Control) ==> final(c).ahead >= old(c).ahead && final(c).ahead >= commit_index,
+        !outside && body is Data ==> asked is None,
+        !outside && body is Data && old(c).request is None
+            && (old(c).behind_spec(committed, false) || commit_index as int > committed as int + 1)
+            ==> final(c).request is None
+                && (old(c).defer_since is None ==> final(c).defer_since == Some(now))
+                && (old(c).defer_since is Some ==> final(c).defer_since == old(c).defer_since),
+        outside && body is Data && commit_index > committed && old(c).due_spec(now, interval)
+            ==> asked == Some(from) && final(c).request == Some((from, now)) && final(c).defer_since is None,
+        asked is Some ==> final(c).defer_since is None && final(c).request is Some,
+{
+    let control = match body {
+        CatchUpBody::Control => true,
+        _ => false,
+    };
+    if outside || !control {
+        c.heard(from, commit_index);
+        let lag = catch_up_lag(outside, max_in_flight_slots, last_committed_at, now, interval);
+        let is_data = match body {
+            CatchUpBody::Data => true,
+            _ => false,
+        };
+        let is_compacted_or_entries = match body {
+            CatchUpBody::CompactedOrEntries => true,
+            _ => false,
+        };
+        if !outside && is_data {
+            if c.behind(committed, false) {
+                c.defer(now);
+            }
+            None
+        } else if !is_compacted_or_entries
+            && commit_index > after_exec(committed, lag)
+            && c.due(now, interval)
+        {
+            c.requested(from, now);
+            Some(from)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// `fire_timers`' catch-up, with `max_in_flight_slots`, `last_committed`, and the read mark
+/// of the round in flight (`round`).
 pub fn fire_catch_up(
     c: &CatchUp,
     committed: u64,
     now: u64,
     interval: u64,
     outside: bool,
+    max_in_flight_slots: u64,
+    last_committed: Option<u64>,
     round: Option<&Vec<(u64, u64)>>,
 ) -> (r: Option<u64>)
     requires c.inv(),
     ensures
         !c.due_spec(now, interval) ==> r is None,
-        // (c): a due retry asks exactly while behind a peer or below the read mark.
-        c.due_spec(now, interval) ==> (r is Some <==> c.behind_spec(committed, outside)
-            || (round is Some && below_mark(outside, round.unwrap()@, committed))),
+        c.behind_spec(committed, outside) ==> (
+            r is Some <==> c.deadline_with_spec(
+                committed,
+                outside,
+                catch_up_window_spec(max_in_flight_slots),
+                last_committed,
+                now,
+                interval,
+            ).unwrap() <= now
+        ),
+        !c.behind_spec(committed, outside) ==> (
+            r is Some <==> c.due_spec(now, interval) && round is Some && below_mark(outside, round.unwrap()@, committed)
+        ),
         r matches Some(p) ==> (c.behind_spec(committed, outside) && c.peer == Some(p))
             || exists|i: int| #[trigger] highest(round.unwrap()@, i) && round.unwrap()@[i].0 == p,
+        c.behind_spec(committed, outside) && r is Some ==> r == c.peer,
+        c.defer_since matches Some(ds) ==> (!outside && now < after(ds, interval) ==> r is None),
+        outside && c.due_spec(now, interval) ==> (
+            r is Some <==> c.behind_spec(committed, true)
+                || (round is Some && below_mark(true, round.unwrap()@, committed))
+        ),
 {
+    let window = catch_up_window(max_in_flight_slots);
     let read_from = read_catch_up_from(outside, round, committed);
-    c.retry(committed, outside, now, interval, read_from)
+    c.retry_with(committed, outside, window, last_committed, now, interval, read_from)
+}
+
+/// Verifies end-to-end `Body::Data` deferral on a voting member:
+/// (1) `Body::Data` never triggers an immediate speculative `CatchUp` and sets `defer_since`;
+/// (2) unrelated timer ticks via `retry_with` before `interval` cannot fire early;
+/// (3) once `interval` elapses while still behind, `retry_with` fires when past the
+///     active-pipeline `2 * max_in_flight_slots` window or once commits are quiet past `interval`,
+///     while still respecting the lag allowance during active commits;
+/// (4) catching up (`advanced`) or starting a request (`requested`) clears `defer_since`.
+pub fn verify_deferred_data_voting(
+    c0: CatchUp,
+    from: u64,
+    commit_index: u64,
+    committed: u64,
+    max_in_flight_slots: u64,
+    last_committed: Option<u64>,
+    t0: u64,
+    t_early: u64,
+    t_due: u64,
+    interval: u64,
+    round: Option<&Vec<(u64, u64)>>,
+)
+    requires
+        c0.inv(),
+        c0.request is None,
+        c0.defer_since is None,
+        commit_index as int > committed as int + 1,
+        t_early < after(t0, interval),
+        after(t0, interval) <= t_due,
+{
+    let mut c = c0;
+    let immediate = on_message_catch_up(
+        &mut c,
+        from,
+        commit_index,
+        CatchUpBody::Data,
+        committed,
+        false,
+        max_in_flight_slots,
+        last_committed,
+        t0,
+        interval,
+    );
+    assert(immediate is None);
+    assert(c.defer_since == Some(t0));
+
+    // Unrelated timer before `interval` cannot fire `CatchUp` early.
+    let early = fire_catch_up(
+        &c,
+        committed,
+        t_early,
+        interval,
+        false,
+        max_in_flight_slots,
+        last_committed,
+        round,
+    );
+    assert(early is None);
+
+    // Once `interval` elapses while still behind:
+    let window = catch_up_window(max_in_flight_slots);
+    let quiet = match last_committed {
+        None => true,
+        Some(lc) => after_exec(lc, interval) <= t_due,
+    };
+    let due_fire = fire_catch_up(
+        &c,
+        committed,
+        t_due,
+        interval,
+        false,
+        max_in_flight_slots,
+        last_committed,
+        round,
+    );
+    if c.behind_by(committed, window) || quiet {
+        assert(due_fire == c.peer && due_fire is Some);
+        let p = match due_fire {
+            Some(p) => p,
+            None => 0,
+        };
+        let mut c_req = CatchUp {
+            ahead: c.ahead,
+            peer: c.peer,
+            request: c.request,
+            defer_since: c.defer_since,
+        };
+        c_req.requested(p, t_due);
+        let in_flight = c_req.in_flight();
+        assert(in_flight);
+        assert(c_req.request is Some);
+        assert(c_req.defer_since is None);
+    } else {
+        // Within active-pipeline lag allowance (`<= 2 * W` and recently committed): deferred until quiet.
+        assert(due_fire is None);
+        if let Some(lc) = last_committed {
+            let t_quiet = after_exec(lc, interval);
+            let quiet_fire = fire_catch_up(
+                &c,
+                committed,
+                t_quiet,
+                interval,
+                false,
+                max_in_flight_slots,
+                last_committed,
+                round,
+            );
+            assert(quiet_fire == c.peer && quiet_fire is Some);
+        }
+    }
+
+    // Still behind: `advanced` keeps `defer_since`. Catching up clears it.
+    c.advanced(committed, false);
+    assert(c.defer_since == Some(t0));
+    let caught_up = c.ahead;
+    c.advanced(caught_up, false);
+    assert(c.defer_since is None);
+}
+
+/// Verifies that outside observers fire immediately when behind and not in flight,
+/// regardless of `defer_since`, active-pipeline window, or `last_committed`.
+pub fn verify_outside_observer_ignores_defer(
+    c: &CatchUp,
+    committed: u64,
+    max_in_flight_slots: u64,
+    last_committed: Option<u64>,
+    now: u64,
+    interval: u64,
+    round: Option<&Vec<(u64, u64)>>,
+)
+    requires
+        c.inv(),
+        c.request is None,
+        c.behind_spec(committed, true),
+{
+    let window = catch_up_window(max_in_flight_slots);
+    let dl = c.deadline_with(committed, true, window, last_committed, now, interval);
+    assert(dl == Some(now));
+    let asked = fire_catch_up(c, committed, now, interval, true, max_in_flight_slots, last_committed, round);
+    assert(asked == c.peer && asked is Some);
 }
 
 // ---- Reservation ----
